@@ -10,8 +10,8 @@ from heretic.utils import empty_cache
 
 from model_utils import LearnableDirectionWeights, apply_abliteration_with_hyperparams
 from data_utils import extract_response_after_think
-from evaluate.judges import classify_question_category_with_local_llm, evaluate_harmfulness_with_local_judge
-from config import GRPO_CONFIG, ABLITERATION_PARAMS, JUDGE_API_URL, CLASSIFIER_API_URL, JUDGE_MODEL, FEW_SHOTS_PATH
+from evaluate.judges import evaluate_harmfulness
+from config import GRPO_CONFIG, ABLITERATION_PARAMS
 
 
 def train_grpo_epoch(
@@ -98,30 +98,11 @@ def train_grpo_epoch(
         variant_rewards = []
         for question, response in zip(category_questions, modified_responses):
             if response:
-                category_id = "unknown"
-                if classifier_categories:
-                    try:
-                        pred = classify_question_category_with_local_llm(
-                            question,
-                            classifier_categories,
-                            api_url=CLASSIFIER_API_URL,
-                            model=JUDGE_MODEL,
-                            temperature=0.0,
-                            max_tokens=120,
-                        )
-                        category_id = pred.get("category_id", "unknown")
-                    except Exception as e:
-                        print(f"      Classification error: {e}")
-
                 try:
-                    score_data = evaluate_harmfulness_with_local_judge(
+                    score_data = evaluate_harmfulness(
                         question,
                         response,
-                        api_key="dummy",
-                        api_url=JUDGE_API_URL,
-                        model=JUDGE_MODEL,
-                        category_id=category_id,
-                        few_shots_path=str(FEW_SHOTS_PATH) if FEW_SHOTS_PATH.exists() else None,
+                        classifier_categories=classifier_categories,
                     )
                     score = score_data.get("score")
                     if score is not None:

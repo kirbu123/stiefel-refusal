@@ -74,5 +74,6 @@ GRAPH_FILE = Path(os.getenv("GRAPH_FILE", str(PROJECT_ROOT / "graph_build" / "Ph
 TAG_FILTERED_QUESTIONS_FILE = Path(os.getenv("TAG_FILTERED_QUESTIONS_FILE", str(PROJECT_ROOT / "tag_filtered_questions.json")))
 
 EVALUATE_LOCALITY = os.getenv("EVALUATE_LOCALITY", "true").lower() in ("true", "1", "yes")
+EVALUATION_BACKEND = os.getenv("EVALUATION_BACKEND", "local_llm_judge")
 
 WEIGHTS_INIT_TYPE = os.getenv("WEIGHTS_INIT_TYPE", "zero")

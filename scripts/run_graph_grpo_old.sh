@@ -26,9 +26,19 @@ export ABLITERATION_MIN_WEIGHT_DISTANCE=0.3
 # ---- Weight initialization ----
 export WEIGHTS_INIT_TYPE="zero"
 
-# ---- Judge / Classifier APIs ----
+# ---- Evaluation backend ----
+# Options: local_llm_judge | llamaguard
+export EVALUATION_BACKEND="local_llm_judge"
+
+# ---- Judge / Classifier APIs (used by local_llm_judge) ----
 export JUDGE_API_URL="http://localhost:31181/v1/chat/completions"
 export CLASSIFIER_API_URL="http://localhost:31180/v1/chat/completions"
+
+# ---- LlamaGuard settings (used by llamaguard) ----
+export LLAMAGUARD_MODEL_NAME="meta-llama/Meta-Llama-Guard-2-8B"
+export LLAMAGUARD_DEVICE="cuda"
+export LLAMAGUARD_DTYPE="bfloat16"
+# export HF_TOKEN="<your_hf_token>"
 
 # ---- Locality evaluation ----
 export EVALUATE_LOCALITY="true"

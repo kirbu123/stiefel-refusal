@@ -37,8 +37,7 @@ torch.manual_seed(42)
 from config import (
     MODEL_NAME, CATEGORIES, GOOD_PROMPTS_DATASET, RESULTS_DIR,
     GRPO_CONFIG, ABLITERATION_PARAMS, FEW_SHOTS_PATH,
-    JUDGE_API_URL, CLASSIFIER_API_URL, JUDGE_MODEL,
-    HARMLESS_EVAL_DATASET, EVALUATE_LOCALITY, WEIGHTS_INIT_TYPE, GRAPH_FILE,
+    HARMLESS_EVAL_DATASET, EVALUATE_LOCALITY, WEIGHTS_INIT_TYPE, GRAPH_FILE, EVALUATION_BACKEND,
 )
 from data_utils import load_all_datasets_with_categories, extract_response_after_think
 from refusal_directions import (
@@ -46,7 +45,7 @@ from refusal_directions import (
 )
 from model_utils import LearnableDirectionWeights, apply_abliteration_with_hyperparams
 from training import train_grpo_epoch
-from evaluate.judges import classify_question_category_with_local_llm, evaluate_harmfulness_with_local_judge
+from evaluate.judges import evaluate_harmfulness
 
 
 def _fmt(v: float) -> str:
@@ -235,6 +234,7 @@ def main():
     print(f"GRPO Config: {GRPO_CONFIG}")
     print(f"Abliteration Params: {ABLITERATION_PARAMS}")
     print(f"Weights Init Type: {WEIGHTS_INIT_TYPE}")
+    print(f"Evaluation backend: {EVALUATION_BACKEND}")
     print()
 
     GRPO_RESULTS_DIR = RESULTS_DIR / "graph_grpo_old"
@@ -399,17 +399,18 @@ def main():
         )
         print("Wandb initialized")
 
-    try:
-        with open(FEW_SHOTS_PATH, "r", encoding="utf-8") as f:
-            few_shots_data = json.load(f)
-        classifier_categories = [
-            {"id": c.get("id"), "label": c.get("label", "")}
-            for c in few_shots_data.get("categories", [])
-            if c.get("id")
-        ]
-    except Exception as e:
-        print(f"Warning: could not load classifier categories: {e}")
-        classifier_categories = []
+    classifier_categories = []
+    if EVALUATION_BACKEND == "local_llm_judge":
+        try:
+            with open(FEW_SHOTS_PATH, "r", encoding="utf-8") as f:
+                few_shots_data = json.load(f)
+            classifier_categories = [
+                {"id": c.get("id"), "label": c.get("label", "")}
+                for c in few_shots_data.get("categories", [])
+                if c.get("id")
+            ]
+        except Exception as e:
+            print(f"Warning: could not load classifier categories: {e}")
 
     harmless_eval_prompts = []
     original_harmless_responses = []
@@ -443,25 +444,12 @@ def main():
             print("\nEvaluating pre-modification model responses...")
             for i, (question, response) in enumerate(zip(harmless_eval_prompts, original_harmless_responses)):
                 if response:
-                    category_id = "unknown"
-                    if classifier_categories:
-                        try:
-                            pred = classify_question_category_with_local_llm(
-                                question, classifier_categories,
-                                api_url=CLASSIFIER_API_URL, model=JUDGE_MODEL,
-                                temperature=0.0, max_tokens=120,
-                            )
-                            category_id = pred.get("category_id", "unknown")
-                        except Exception as e:
-                            if i < 5:
-                                print(f"      Classification error: {e}")
-
                     try:
-                        score_data = evaluate_harmfulness_with_local_judge(
-                            question, response, api_key="dummy",
-                            api_url=JUDGE_API_URL, model=JUDGE_MODEL,
-                            category_id=category_id,
-                            few_shots_path=str(FEW_SHOTS_PATH) if FEW_SHOTS_PATH.exists() else None,
+                        score_data = evaluate_harmfulness(
+                            question,
+                            response,
+                            classifier_categories=classifier_categories,
+                            backend=EVALUATION_BACKEND,
                         )
                         score = score_data.get("score")
                         if score is not None:
@@ -561,24 +549,12 @@ def main():
     final_scores = []
     for question, response in zip(category_questions, final_responses):
         if response:
-            category_id = "unknown"
-            if classifier_categories:
-                try:
-                    pred = classify_question_category_with_local_llm(
-                        question, classifier_categories,
-                        api_url=CLASSIFIER_API_URL, model=JUDGE_MODEL,
-                        temperature=0.0, max_tokens=120,
-                    )
-                    category_id = pred.get("category_id", "unknown")
-                except Exception as e:
-                    print(f"      Classification error: {e}")
-
             try:
-                score_data = evaluate_harmfulness_with_local_judge(
-                    question, response, api_key="dummy",
-                    api_url=JUDGE_API_URL, model=JUDGE_MODEL,
-                    category_id=category_id,
-                    few_shots_path=str(FEW_SHOTS_PATH) if FEW_SHOTS_PATH.exists() else None,
+                score_data = evaluate_harmfulness(
+                    question,
+                    response,
+                    classifier_categories=classifier_categories,
+                    backend=EVALUATION_BACKEND,
                 )
                 score = score_data.get("score")
                 if score is not None:
@@ -597,25 +573,12 @@ def main():
             harmless_eval_prompts, original_harmless_responses, modified_harmless_responses,
         )):
             if mod_resp:
-                category_id = "unknown"
-                if classifier_categories:
-                    try:
-                        pred = classify_question_category_with_local_llm(
-                            question, classifier_categories,
-                            api_url=CLASSIFIER_API_URL, model=JUDGE_MODEL,
-                            temperature=0.0, max_tokens=120,
-                        )
-                        category_id = pred.get("category_id", "unknown")
-                    except Exception as e:
-                        if i < 5:
-                            print(f"      Classification error: {e}")
-
                 try:
-                    mod_score_data = evaluate_harmfulness_with_local_judge(
-                        question, mod_resp, api_key="dummy",
-                        api_url=JUDGE_API_URL, model=JUDGE_MODEL,
-                        category_id=category_id,
-                        few_shots_path=str(FEW_SHOTS_PATH) if FEW_SHOTS_PATH.exists() else None,
+                    mod_score_data = evaluate_harmfulness(
+                        question,
+                        mod_resp,
+                        classifier_categories=classifier_categories,
+                        backend=EVALUATION_BACKEND,
                     )
                     mod_score = mod_score_data.get("score")
                     if mod_score is not None:

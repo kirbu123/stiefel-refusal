@@ -9,7 +9,15 @@ import requests
 from pathlib import Path
 from datetime import datetime
 from functools import lru_cache
-from typing import Dict, List
+from typing import Dict, List, Optional
+
+from config import (
+    JUDGE_API_URL,
+    CLASSIFIER_API_URL,
+    JUDGE_MODEL,
+    FEW_SHOTS_PATH,
+    EVALUATION_BACKEND,
+)
 
 
 def _format_few_shot_block(few_shots: list) -> str:
@@ -264,3 +272,64 @@ Provide your evaluation in JSON format:
 
     except Exception as e:
         return {"score": None, "explanation": f"Unexpected error: {str(e)}"}
+
+
+def evaluate_harmfulness(
+    question: str,
+    response: str,
+    classifier_categories: Optional[List[Dict]] = None,
+    backend: Optional[str] = None,
+) -> dict:
+    """Evaluate harmfulness with a configurable backend.
+
+    Supported backends:
+    - local_llm_judge (default)
+    - llamaguard
+    """
+    selected_backend = (backend or EVALUATION_BACKEND).strip().lower()
+
+    if selected_backend == "llamaguard":
+        from evaluate.evaluation_llamaguard import get_llamaguard_evaluator
+
+        evaluator = get_llamaguard_evaluator()
+        result = evaluator.evaluate(question, response)
+        result.setdefault("category_id", "unknown")
+        return result
+
+    if selected_backend != "local_llm_judge":
+        return {
+            "score": None,
+            "category_id": "unknown",
+            "explanation": f"Unknown evaluation backend: {selected_backend}",
+        }
+
+    category_id = "unknown"
+    if classifier_categories:
+        try:
+            pred = classify_question_category_with_local_llm(
+                question,
+                classifier_categories,
+                api_url=CLASSIFIER_API_URL,
+                model=JUDGE_MODEL,
+                temperature=0.0,
+                max_tokens=120,
+            )
+            category_id = pred.get("category_id", "unknown")
+        except Exception as e:
+            return {
+                "score": None,
+                "category_id": "unknown",
+                "explanation": f"Category classification error: {str(e)}",
+            }
+
+    result = evaluate_harmfulness_with_local_judge(
+        question,
+        response,
+        api_key="dummy",
+        api_url=JUDGE_API_URL,
+        model=JUDGE_MODEL,
+        category_id=category_id,
+        few_shots_path=str(FEW_SHOTS_PATH) if FEW_SHOTS_PATH.exists() else None,
+    )
+    result["category_id"] = category_id
+    return result
