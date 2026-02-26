@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ---- GPU ----
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=3
 
 # ---- Model ----
 export MODEL_NAME="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
