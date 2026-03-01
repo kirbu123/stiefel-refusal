@@ -6,14 +6,13 @@ export CUDA_VISIBLE_DEVICES=0
 # ---- Model ----
 export MODEL_NAME="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 
-# ---- Graph file (tags for averaged refusal direction) ----
-export GRAPH_FILE="graphs/physical harm_wordnet_graph_actions_terms.txt"
-
 # ---- Grid-search hyperparameters (comma-separated lists) ----
-export GRID_MAX_WEIGHT="2.5,3.0"
+
+# basic refusal is used as a uniform shift
+export GRID_MAX_WEIGHT="1.0"
 export GRID_MAX_WEIGHT_POSITION="0.7"
-export GRID_MIN_WEIGHT="0.0,1.0"
-export GRID_MIN_WEIGHT_DISTANCE="0.3"
+export GRID_MIN_WEIGHT="1.0"
+export GRID_MIN_WEIGHT_DISTANCE="1.0"
 
 # ---- Evaluation backend ----
 # Options: local_llm_judge | llamaguard
@@ -33,4 +32,4 @@ export LLAMAGUARD_DTYPE="bfloat16"
 export EVALUATE_LOCALITY="true"
 
 cd "$(dirname "$0")/.."
-python -m baselines.graph_average
+python -m baselines.basic_refusal
