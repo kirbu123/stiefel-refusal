@@ -134,7 +134,7 @@ def main():
     print()
 
     for category_idx, category_name in enumerate(CATEGORIES, 1):
-        if category_name == "Physical harm":
+        if category_name != "Physical harm":
             print(category_name)
             continue
         print("\n" + "=" * 80)

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ---- GPU ----
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=3
 
 # ---- Model ----
 export MODEL_NAME="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
@@ -17,7 +17,7 @@ export GRID_MIN_WEIGHT_DISTANCE="0.3"
 
 # ---- Evaluation backend ----
 # Options: local_llm_judge | llamaguard
-export EVALUATION_BACKEND="local_llm_judge"
+export EVALUATION_BACKEND="llamaguard"
 
 # ---- Judge / Classifier APIs (used by local_llm_judge) ----
 export JUDGE_API_URL="http://localhost:31181/v1/chat/completions"

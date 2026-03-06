@@ -13,9 +13,14 @@ import json
 import sys
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 
 import numpy as np
+
+# Project root for evaluate module
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -98,6 +103,39 @@ def load_answers_file(file_path: Path) -> Dict:
     """
     with open(file_path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def _fill_evaluations_if_empty(data: Dict, file_path: Path, evaluator: Any) -> Dict:
+    """
+    If harmful_questions has empty original_evaluations or modified_evaluations,
+    run LlamaGuard evaluation and update data. Saves updated data to file.
+    """
+    harmful = data.get("harmful_questions", {})
+    orig_evals = harmful.get("original_evaluations", [])
+    mod_evals = harmful.get("modified_evaluations", [])
+
+    if orig_evals and mod_evals:
+        return data
+
+    try:
+        from evaluate.evaluate_answers import process_answers_format
+    except ImportError as e:
+        print(f"WARNING: Cannot run evaluation (missing evaluate module): {e}")
+        print("  Run: cd evaluate && python evaluate_answers.py")
+        return data
+
+    print(f"  Evaluations empty, running LlamaGuard evaluation...")
+    data = process_answers_format(data, evaluator)
+
+    # Save updated data to file
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        print(f"  Evaluations saved to {file_path}")
+    except Exception as e:
+        print(f"  WARNING: Could not save evaluations to file: {e}")
+
+    return data
 
 
 def extract_scores(data: Dict) -> Dict[str, List[int]]:
@@ -656,7 +694,7 @@ def generate_output_filename(
     return f"{plot_type}_{category_safe}_{timestamp}{ext}"
 
 
-def process_answers_files(file_paths: List[Path]) -> None:
+def process_answers_files(file_paths: List[Path], evaluator: Any = None) -> None:
     """
     Process answer files and build plots.
     
@@ -669,6 +707,7 @@ def process_answers_files(file_paths: List[Path]) -> None:
     
     Args:
         file_paths: List of paths to answer files
+        evaluator: Optional LlamaGuard evaluator; if provided and evaluations are empty, runs evaluation
     """
     if not file_paths:
         print("ERROR: No files provided")
@@ -712,7 +751,7 @@ def process_answers_files(file_paths: List[Path]) -> None:
         process_grpo_format_files(file_paths, output_dirs, baseline_type)
     else:
         # Process single answer files (graph_average, topic_ablation format)
-        process_single_answer_files(file_paths, output_dirs, baseline_type)
+        process_single_answer_files(file_paths, output_dirs, baseline_type, evaluator)
     
     print("\n" + "=" * 80)
     print("Processing completed!")
@@ -857,7 +896,8 @@ def process_combined_results_files(
 def process_single_answer_files(
     file_paths: List[Path],
     output_dirs: Dict[str, Path],
-    baseline_type: str
+    baseline_type: str,
+    evaluator: Any = None,
 ) -> None:
     """
     Process single answer files (graph_average, topic_ablation format).
@@ -874,6 +914,10 @@ def process_single_answer_files(
         
         # Load data
         data = load_answers_file(file_path)
+
+        # Fill evaluations if empty (requires --evaluate-if-empty and LlamaGuard)
+        if evaluator:
+            data = _fill_evaluations_if_empty(data, file_path, evaluator)
         
         # Extract experiment info
         experiment_info = data.get("experiment_info", {})
@@ -901,6 +945,9 @@ def process_single_answer_files(
         print(f"  Harmless (original): {len(scores['original_harmless'])}")
         print(f"  Harmless (modified): {len(scores['modified_harmless'])}")
         print(f"  Locality differences: {len(scores['locality_differences'])}")
+
+        if not scores['original_harmful'] and not scores['modified_harmful'] and not evaluator:
+            print(f"\n  NOTE: No scores found. Run with --evaluate-if-empty to run LlamaGuard evaluation.")
         
         # Build distribution plots for this file
         print(f"\nBuilding distribution plots for file {file_idx}...")
@@ -1285,7 +1332,12 @@ For multiple files:
         action="store_true",
         help="Verbose output"
     )
-    
+    parser.add_argument(
+        "--evaluate-if-empty",
+        action="store_true",
+        help="Run LlamaGuard evaluation when original_evaluations/modified_evaluations are empty"
+    )
+
     args = parser.parse_args()
     # if paths is not None:
     #     args.file_paths = paths
@@ -1304,13 +1356,29 @@ For multiple files:
         
         if not file_path.suffix.lower() == ".json":
             print(f"WARNING: File does not have .json extension: {file_path}")
+
+    # Create evaluator if --evaluate-if-empty
+    evaluator = None
+    if args.evaluate_if_empty:
+        try:
+            from evaluate.evaluation_llamaguard import LlamaGuardEvaluator
+            print("Loading LlamaGuard evaluator...")
+            evaluator = LlamaGuardEvaluator()
+            print("Evaluator ready.")
+        except Exception as e:
+            print(f"WARNING: Could not load evaluator: {e}")
+            print("  Run: cd evaluate && python evaluate_answers.py")
     
     # Process files
-    process_answers_files(file_paths)
+    process_answers_files(file_paths, evaluator)
 
 
 if __name__ == "__main__":
     paths = [
-        "graph_experiments/results/baselines/graph_grpo/answers/answers_Physical_harm_20260125_172522.json"
+        # "graph_experiments/results/baselines/graph_grpo/answers/answers_Physical_harm_20260125_172522.json"
+        "results/graph_average/answers/answers_Physical_harm_max_weight=2.5_&max_weight_position=0.7_&min_weight=0.0_&min_weight_distance=0.3_20260302_091612.json",
+        "results/graph_average/answers/answers_Physical_harm_max_weight=2.5_&max_weight_position=0.7_&min_weight=1.0_&min_weight_distance=0.3_20260302_094125.json",
+        "results/graph_average/answers/answers_Physical_harm_max_weight=3.0_&max_weight_position=0.7_&min_weight=0.0_&min_weight_distance=0.3_20260302_100637.json",
+        "results/graph_average/answers/answers_Physical_harm_max_weight=3.0_&max_weight_position=0.7_&min_weight=1.0_&min_weight_distance=0.3_20260302_103254.json",
     ]
     main(paths)
