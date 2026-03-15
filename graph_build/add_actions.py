@@ -269,7 +269,7 @@ def main() -> None:
     parser.add_argument("--retry-delay", type=float, default=1.5)
     args = parser.parse_args()
 
-    api_key = os.getenv(args.api_key_env)
+    api_key = "pNj4rZVd3yHXUPkvia2UySyN19mNADFT"
     if not api_key:
         raise RuntimeError(
             f"Missing API key: set environment variable {args.api_key_env}"

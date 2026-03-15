@@ -14,7 +14,10 @@ from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 
 from evaluate.metrics import evaluate_responses, evaluate_locality
-from visualization.plots import create_harmfulness_heatmap, create_distribution_plots
+from visualization.plots import (
+    plot_harmfulness_heatmap, plot_harmfulness_distribution,
+    plot_locality_distribution, generate_plot_filename,
+)
 from config import (
     JUDGE_API_URL,
     CLASSIFIER_API_URL,
@@ -132,28 +135,56 @@ def main():
     print("CREATING PLOTS")
     print(f"{'=' * 80}")
 
+    evaluator_name = JUDGE_MODEL
+    method_name = "evaluated"
+
     print("\nCreating harmfulness heatmap...")
-    create_harmfulness_heatmap(
-        {"results": evaluated_results},
-        category_name,
-        VALUES_PLOTS_DIR,
-    )
+    heatmap_data = []
+    for param_key, result_data in evaluated_results.items():
+        hp = result_data.get("hyperparameters", {})
+        mod = result_data.get("modified_scores", [])
+        if mod:
+            heatmap_data.append({
+                "max_weight": hp.get("max_weight"),
+                "min_weight": hp.get("min_weight"),
+                "mean_modified_score": np.mean(mod),
+            })
+    if heatmap_data:
+        fname = generate_plot_filename("harmfulness_heatmap", category_name, evaluator_name)
+        plot_harmfulness_heatmap(
+            heatmap_data, VALUES_PLOTS_DIR / fname,
+            evaluator_name=evaluator_name, method_name=method_name,
+            category_name=category_name,
+        )
 
     print("\nCreating distribution plots...")
     for param_key, result_data in evaluated_results.items():
         original_scores = result_data.get("original_scores", [])
         modified_scores = result_data.get("modified_scores", [])
         locality_scores_data = result_data.get("locality_scores", [])
+        cat_param = f"{category_name}_{param_key}"
 
-        if original_scores or modified_scores or locality_scores_data:
-            create_distribution_plots(
-                original_scores,
-                modified_scores,
-                locality_scores_data,
-                f"{category_name}_{param_key}",
-                DISTRIBUTION_PLOTS_DIR,
-                DISTRIBUTION_PLOTS_DIR,
+        if original_scores or modified_scores:
+            fname = generate_plot_filename("harmfulness_distribution", cat_param, evaluator_name, ext=".png")
+            plot_harmfulness_distribution(
+                original_scores, modified_scores,
+                DISTRIBUTION_PLOTS_DIR / fname,
+                evaluator_name=evaluator_name, method_name=method_name,
+                category_name=cat_param,
             )
+
+        if locality_scores_data:
+            orig_loc = [s["original_score"] for s in locality_scores_data]
+            mod_loc = [s["modified_score"] for s in locality_scores_data]
+            diffs = [s["difference"] for s in locality_scores_data if s["difference"] is not None]
+            if diffs:
+                fname = generate_plot_filename("locality_distribution", cat_param, evaluator_name, ext=".png")
+                plot_locality_distribution(
+                    orig_loc, mod_loc, diffs,
+                    DISTRIBUTION_PLOTS_DIR / fname,
+                    evaluator_name=evaluator_name, method_name=method_name,
+                    category_name=cat_param,
+                )
 
     output_file = RESULTS_DIR / f"evaluated_baselines_{category_name.replace('/', '_').replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     output_data = {

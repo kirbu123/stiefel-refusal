@@ -7,7 +7,7 @@ export CUDA_VISIBLE_DEVICES=3
 export MODEL_NAME="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 
 # ---- Graph file (tags for averaged refusal direction) ----
-export GRAPH_FILE="graphs/physical harm_wordnet_graph_actions_terms.txt"
+export GRAPH_FILE="graph_build/ph_wordnet_graph_25neighbours_actions_terms.txt"
 
 # ---- Grid-search hyperparameters (comma-separated lists) ----
 export GRID_MAX_WEIGHT="2.5,3.0"

@@ -154,6 +154,7 @@ def train_grpo_is_step(
         rollout_is="sequence",
         rollout_is_threshold=is_clip_ratio,
     )
+    is_weights = is_weights.detach()
 
     # Step 5: Rewards
     scores = compute_reward(flat_questions, flat_responses, classifier_categories, backend)
@@ -170,6 +171,7 @@ def train_grpo_is_step(
         index=question_indices,
         is_weights=is_weights,
     )
+    advantages = advantages.detach()
 
     # Step 7: Policy loss (verl, differentiable)
     combined_direction = direction_weights(extracted_directions)

@@ -1,5 +1,7 @@
 from .plots import (
-    create_harmfulness_heatmap,
-    create_locality_heatmap,
-    create_distribution_plots,
+    plot_harmfulness_heatmap,
+    plot_locality_heatmap,
+    plot_harmfulness_distribution,
+    plot_locality_distribution,
+    generate_plot_filename,
 )

@@ -36,7 +36,9 @@ from refusal_directions import compute_refusal_direction
 from model_utils import apply_abliteration_with_hyperparams
 from evaluate.metrics import evaluate_responses, evaluate_locality
 from visualization.plots import (
-    create_harmfulness_heatmap, create_locality_heatmap, create_distribution_plots,
+    plot_harmfulness_heatmap, plot_locality_heatmap,
+    plot_harmfulness_distribution, plot_locality_distribution,
+    generate_plot_filename,
 )
 from baselines.hyperparams import HYPERPARAMS
 
@@ -311,21 +313,73 @@ def main():
         all_original_scores = []
         all_modified_scores = []
         all_locality_scores = []
+        heatmap_harm = []
+        heatmap_loc = []
+
         for result_data in category_results.values():
-            all_original_scores.extend(result_data.get("original_scores", []))
-            all_modified_scores.extend(result_data.get("modified_scores", []))
+            hp = result_data.get("hyperparameters", {})
+            orig = result_data.get("original_scores", [])
+            mod = result_data.get("modified_scores", [])
+            all_original_scores.extend(orig)
+            all_modified_scores.extend(mod)
+            if mod:
+                heatmap_harm.append({
+                    "max_weight": hp.get("max_weight"),
+                    "min_weight": hp.get("min_weight"),
+                    "mean_modified_score": np.mean(mod),
+                })
             if EVALUATE_LOCALITY:
-                all_locality_scores.extend(result_data.get("locality_scores", []))
+                loc = result_data.get("locality_scores", [])
+                all_locality_scores.extend(loc)
+                avg_loc = result_data.get("average_locality_change")
+                if avg_loc is not None:
+                    heatmap_loc.append({
+                        "max_weight": hp.get("max_weight"),
+                        "min_weight": hp.get("min_weight"),
+                        "average_locality_change": avg_loc,
+                    })
 
-        create_harmfulness_heatmap({"results": category_results}, category_name, HARMFULNESS_VALUES_DIR)
+        evaluator_name = JUDGE_MODEL
+        method_name = "graph_average"
 
-        if EVALUATE_LOCALITY and all_locality_scores:
-            create_locality_heatmap({"results": category_results}, category_name, LOCALITY_VALUES_DIR)
+        if heatmap_harm:
+            fname = generate_plot_filename("harmfulness_heatmap", category_name, evaluator_name)
+            plot_harmfulness_heatmap(
+                heatmap_harm, HARMFULNESS_VALUES_DIR / fname,
+                evaluator_name=evaluator_name, method_name=method_name,
+                category_name=category_name,
+            )
 
-        create_distribution_plots(
-            all_original_scores, all_modified_scores, all_locality_scores,
-            category_name, HARMFULNESS_DISTRIBUTION_DIR, LOCALITY_DISTRIBUTION_DIR,
-        )
+        if EVALUATE_LOCALITY and heatmap_loc:
+            fname = generate_plot_filename("locality_heatmap", category_name, evaluator_name)
+            plot_locality_heatmap(
+                heatmap_loc, LOCALITY_VALUES_DIR / fname,
+                evaluator_name=evaluator_name, method_name=method_name,
+                category_name=category_name,
+            )
+
+        if all_original_scores or all_modified_scores:
+            fname = generate_plot_filename("harmfulness_distribution", category_name, evaluator_name, ext=".png")
+            plot_harmfulness_distribution(
+                all_original_scores, all_modified_scores,
+                HARMFULNESS_DISTRIBUTION_DIR / fname,
+                evaluator_name=evaluator_name, method_name=method_name,
+                category_name=category_name,
+            )
+
+        if all_locality_scores:
+            orig_loc = [s["original_score"] for s in all_locality_scores]
+            mod_loc = [s["modified_score"] for s in all_locality_scores]
+            diffs = [s["difference"] for s in all_locality_scores if s["difference"] is not None]
+            if diffs:
+                fname = generate_plot_filename("locality_distribution", category_name, evaluator_name, ext=".png")
+                plot_locality_distribution(
+                    orig_loc, mod_loc, diffs,
+                    LOCALITY_DISTRIBUTION_DIR / fname,
+                    evaluator_name=evaluator_name, method_name=method_name,
+                    category_name=category_name,
+                )
+
         print(f"  Plots for category {category_name} created")
 
     print("\n" + "=" * 80)

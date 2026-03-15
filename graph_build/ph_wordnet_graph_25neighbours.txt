@@ -1,0 +1,812 @@
+Physical harm
+Physical harm blast trauma
+Physical harm electric shock
+Physical harm bleeding
+Physical harm wale
+Physical harm bump
+Physical harm wound
+Physical harm frostbite
+Physical harm intravasation
+Physical harm rupture
+Physical harm sting
+Physical harm penetrating trauma
+Physical harm blunt trauma
+Physical harm fracture
+Physical harm bruise
+Physical harm wrench
+Physical harm whiplash
+Physical harm brain damage
+Physical harm birth trauma
+Physical harm pinch
+Physical harm dislocation
+Physical harm burn
+Physical harm strain
+Physical harm ill health
+Physical harm bleeding hemorrhagic stroke
+Physical harm bleeding nosebleed
+Physical harm bleeding blood extravasation
+Physical harm bleeding metrorrhagia
+Physical harm bleeding cerebral hemorrhage
+Physical harm bleeding ulemorrhagia
+Physical harm bleeding hyphema
+Physical harm wound raw wound
+Physical harm wound stigmata
+Physical harm wound cut
+Physical harm wound abrasion
+Physical harm wound bite
+Physical harm wound laceration
+Physical harm frostbite trench foot
+Physical harm rupture hernia
+Physical harm rupture herniated disc
+Physical harm sting flea bite
+Physical harm sting mosquito bite
+Physical harm sting bee sting
+Physical harm fracture depressed fracture
+Physical harm fracture complete fracture
+Physical harm fracture compression fracture
+Physical harm fracture fatigue fracture
+Physical harm fracture comminuted fracture
+Physical harm fracture compound fracture
+Physical harm fracture displaced fracture
+Physical harm fracture impacted fracture
+Physical harm fracture simple fracture
+Physical harm fracture incomplete fracture
+Physical harm fracture hairline fracture
+Physical harm bruise shiner
+Physical harm bruise ecchymosis
+Physical harm bruise petechia
+Physical harm wrench sprain
+Physical harm brain damage nervous disorder
+Physical harm dislocation diastasis
+Physical harm dislocation spondylolisthesis
+Physical harm dislocation abarticulation
+Physical harm burn scald
+Physical harm burn second-degree burn
+Physical harm burn first-degree burn
+Physical harm burn electric burn
+Physical harm burn scorch
+Physical harm burn third-degree burn
+Physical harm ill health biliousness
+Physical harm ill health infection
+Physical harm ill health unfitness
+Physical harm ill health pathology
+Physical harm ill health affliction
+Physical harm ill health invalidism
+Physical harm ill health illness
+Physical harm ill health dyscrasia
+Physical harm ill health pathological state
+Physical harm bleeding hemorrhagic stroke stroke
+Physical harm bleeding blood extravasation extravasation
+Physical harm wound abrasion rope burn
+Physical harm wound abrasion graze
+Physical harm wound bite snakebite
+Physical harm wound bite dog bite
+Physical harm rupture hernia inguinal hernia
+Physical harm rupture hernia laparocele
+Physical harm rupture hernia keratocele
+Physical harm rupture hernia exomphalos
+Physical harm rupture hernia umbilical hernia
+Physical harm rupture hernia eventration
+Physical harm rupture hernia hiatus hernia
+Physical harm rupture hernia colpocele
+Physical harm rupture hernia diverticulum
+Physical harm fracture incomplete fracture greenstick fracture
+Physical harm brain damage nervous disorder athetosis
+Physical harm brain damage nervous disorder brain disorder
+Physical harm brain damage nervous disorder dyskinesia
+Physical harm brain damage nervous disorder chorea
+Physical harm brain damage nervous disorder kuru
+Physical harm brain damage nervous disorder atopognosia
+Physical harm brain damage nervous disorder flaccid paralysis
+Physical harm brain damage nervous disorder ataxia
+Physical harm brain damage nervous disorder nerve compression
+Physical harm brain damage nervous disorder amyotrophic lateral sclerosis
+Physical harm brain damage nervous disorder disorder
+Physical harm burn first-degree burn sunburn
+Physical harm ill health infection sepsis
+Physical harm ill health infection enterobiasis
+Physical harm ill health infection viral infection
+Physical harm ill health infection suprainfection
+Physical harm ill health infection toxoplasmosis
+Physical harm ill health infection felon
+Physical harm ill health infection paronychia
+Physical harm ill health infection protozoal infection
+Physical harm ill health infection sty
+Physical harm ill health infection staphylococcal infection
+Physical harm ill health infection sore
+Physical harm ill health infection superinfection
+Physical harm ill health infection vaccinia
+Physical harm ill health infection opportunistic infection
+Physical harm ill health infection nonsocial infection
+Physical harm ill health infection respiratory tract infection
+Physical harm ill health infection streptococcal sore throat
+Physical harm ill health infection focal infection
+Physical harm ill health infection schistosomiasis
+Physical harm ill health infection scabies
+Physical harm ill health infection tapeworm infection
+Physical harm ill health infection tetanus
+Physical harm ill health infection incubation
+Physical harm ill health unfitness infirmity
+Physical harm ill health unfitness disability
+Physical harm ill health pathology macrocytosis
+Physical harm ill health pathology asynergy
+Physical harm ill health pathology demineralization
+Physical harm ill health pathology coprolalia
+Physical harm ill health pathology atherogenesis
+Physical harm ill health pathology arthropathy
+Physical harm ill health pathology stenosis
+Physical harm ill health pathology cartilaginification
+Physical harm ill health pathology infarct
+Physical harm ill health pathology ascites
+Physical harm ill health pathology otorrhea
+Physical harm ill health pathology mastopathy
+Physical harm ill health pathology varicosis
+Physical harm ill health pathology autoimmunity
+Physical harm ill health pathology lymphadenopathy
+Physical harm ill health pathology atelectasis
+Physical harm ill health pathology stasis
+Physical harm ill health pathology ankylosis
+Physical harm ill health pathology lithiasis
+Physical harm ill health pathology endometriosis
+Physical harm ill health pathology hemochromatosis
+Physical harm ill health pathology alkalosis
+Physical harm ill health pathology angiopathy
+Physical harm ill health pathology volvulus
+Physical harm ill health pathology acidosis
+Physical harm ill health affliction deformity
+Physical harm ill health illness food poisoning
+Physical harm ill health illness decompression sickness
+Physical harm ill health illness collapse
+Physical harm ill health illness ague
+Physical harm ill health illness growth
+Physical harm ill health illness indisposition
+Physical harm ill health illness hypermotility
+Physical harm ill health illness lead poisoning
+Physical harm ill health illness toxemia of pregnancy
+Physical harm ill health illness anuresis
+Physical harm ill health illness condition
+Physical harm ill health illness amyloidosis
+Physical harm ill health illness ozone sickness
+Physical harm ill health illness catastrophic illness
+Physical harm ill health illness disease
+Physical harm ill health dyscrasia blood dyscrasia
+Physical harm ill health pathological state physical condition
+Physical harm bleeding hemorrhagic stroke stroke ischemic stroke
+Physical harm bleeding hemorrhagic stroke stroke attack
+Physical harm bleeding blood extravasation extravasation urocele
+Physical harm bleeding blood extravasation extravasation organic process
+Physical harm rupture hernia colpocele rectocele
+Physical harm rupture hernia colpocele cystocele
+Physical harm rupture hernia diverticulum Meckel's diverticulum
+Physical harm brain damage nervous disorder brain disorder cerebral palsy
+Physical harm brain damage nervous disorder brain disorder Wernicke's encephalopathy
+Physical harm brain damage nervous disorder brain disorder Reye's syndrome
+Physical harm brain damage nervous disorder brain disorder paralysis agitans
+Physical harm brain damage nervous disorder brain disorder agraphia
+Physical harm brain damage nervous disorder brain disorder aphasia
+Physical harm brain damage nervous disorder brain disorder agnosia
+Physical harm brain damage nervous disorder brain disorder apraxia
+Physical harm brain damage nervous disorder brain disorder epilepsy
+Physical harm brain damage nervous disorder brain disorder acataphasia
+Physical harm brain damage nervous disorder brain disorder Creutzfeldt-Jakob disease
+Physical harm brain damage nervous disorder dyskinesia tardive dyskinesia
+Physical harm brain damage nervous disorder chorea tarantism
+Physical harm brain damage nervous disorder chorea orthochorea
+Physical harm brain damage nervous disorder chorea Huntington's chorea
+Physical harm brain damage nervous disorder chorea Sydenham's chorea
+Physical harm brain damage nervous disorder chorea degenerative disorder
+Physical harm brain damage nervous disorder ataxia Friedreich's ataxia
+Physical harm brain damage nervous disorder ataxia hereditary cerebellar ataxia
+Physical harm brain damage nervous disorder ataxia spinocerebellar disorder
+Physical harm brain damage nervous disorder nerve compression nerve entrapment
+Physical harm brain damage nervous disorder amyotrophic lateral sclerosis sclerosis
+Physical harm brain damage nervous disorder disorder idiopathic disease
+Physical harm brain damage nervous disorder disorder sleep disorder
+Physical harm brain damage nervous disorder disorder achlorhydria
+Physical harm brain damage nervous disorder disorder metabolic disorder
+Physical harm brain damage nervous disorder disorder bladder disorder
+Physical harm brain damage nervous disorder disorder dysosmia
+Physical harm brain damage nervous disorder disorder dysphagia
+Physical harm brain damage nervous disorder disorder acute brain disorder
+Physical harm brain damage nervous disorder disorder celiac disease
+Physical harm brain damage nervous disorder disorder cheilosis
+Physical harm brain damage nervous disorder disorder choking
+Physical harm brain damage nervous disorder disorder sprue
+Physical harm brain damage nervous disorder disorder speech disorder
+Physical harm brain damage nervous disorder disorder immunological disorder
+Physical harm brain damage nervous disorder disorder colpoxerosis
+Physical harm brain damage nervous disorder disorder hyperactivity
+Physical harm brain damage nervous disorder disorder abocclusion
+Physical harm brain damage nervous disorder disorder hematocolpos
+Physical harm brain damage nervous disorder disorder strangulation
+Physical harm brain damage nervous disorder disorder ailment
+Physical harm brain damage nervous disorder disorder dysuria
+Physical harm brain damage nervous disorder disorder mental disorder
+Physical harm brain damage nervous disorder disorder achylia
+Physical harm brain damage nervous disorder disorder abruptio placentae
+Physical harm brain damage nervous disorder disorder acholia
+Physical harm burn first-degree burn sunburn erythema
+Physical harm ill health infection sepsis sapremia
+Physical harm ill health infection sepsis blood poisoning
+Physical harm ill health infection enterobiasis infestation
+Physical harm ill health infection viral infection viral pneumonia
+Physical harm ill health infection viral infection herpangia
+Physical harm ill health infection viral infection HIV
+Physical harm ill health infection viral infection hemorrhagic fever
+Physical harm ill health infection protozoal infection giardiasis
+Physical harm ill health infection protozoal infection amebiasis
+Physical harm ill health infection protozoal infection leishmaniasis
+Physical harm ill health infection protozoal infection trichomoniasis
+Physical harm ill health infection protozoal infection malaria
+Physical harm ill health infection staphylococcal infection carbuncle
+Physical harm ill health infection staphylococcal infection boil
+Physical harm ill health infection sore blain
+Physical harm ill health infection sore fester
+Physical harm ill health infection sore gall
+Physical harm ill health infection sore chancre
+Physical harm ill health infection vaccinia progressive vaccinia
+Physical harm ill health infection opportunistic infection aspergillosis
+Physical harm ill health infection respiratory tract infection lower respiratory infection
+Physical harm ill health infection respiratory tract infection upper respiratory infection
+Physical harm ill health infection streptococcal sore throat sore throat
+Physical harm ill health infection focal infection focus
+Physical harm ill health infection incubation phase
+Physical harm ill health unfitness infirmity asthenia
+Physical harm ill health unfitness infirmity cachexia
+Physical harm ill health unfitness disability disintegration
+Physical harm ill health unfitness disability bowleg
+Physical harm ill health unfitness disability anorgasmia
+Physical harm ill health unfitness disability amputation
+Physical harm ill health unfitness disability hearing impairment
+Physical harm ill health unfitness disability disability of walking
+Physical harm ill health unfitness disability dysphasia
+Physical harm ill health unfitness disability astasia
+Physical harm ill health unfitness disability visual impairment
+Physical harm ill health unfitness disability hypoesthesia
+Physical harm ill health unfitness disability knock-knee
+Physical harm ill health unfitness disability bow leg
+Physical harm ill health unfitness disability dysomia
+Physical harm ill health unfitness disability pigeon toes
+Physical harm ill health unfitness disability prolapse
+Physical harm ill health pathology demineralization osteomalacia
+Physical harm ill health pathology stenosis laryngostenosis
+Physical harm ill health pathology stenosis rhinostenosis
+Physical harm ill health pathology stenosis pyloric stenosis
+Physical harm ill health pathology stenosis aortic stenosis
+Physical harm ill health pathology stenosis mitral stenosis
+Physical harm ill health pathology stenosis ureterostenosis
+Physical harm ill health pathology stenosis pulmonary stenosis
+Physical harm ill health pathology stenosis enterostenosis
+Physical harm ill health pathology infarct myocardial infarction
+Physical harm ill health pathology autoimmunity autoimmune disease
+Physical harm ill health pathology lithiasis enterolithiasis
+Physical harm ill health pathology lithiasis cholelithiasis
+Physical harm ill health pathology lithiasis nephrolithiasis
+Physical harm ill health pathology hemochromatosis acquired hemochromatosis
+Physical harm ill health pathology hemochromatosis classic hemochromatosis
+Physical harm ill health pathology alkalosis respiratory alkalosis
+Physical harm ill health pathology alkalosis metabolic alkalosis
+Physical harm ill health pathology angiopathy angioma
+Physical harm ill health pathology angiopathy angiitis
+Physical harm ill health pathology acidosis respiratory acidosis
+Physical harm ill health pathology acidosis metabolic acidosis
+Physical harm ill health pathology acidosis ketoacidosis
+Physical harm ill health pathology acidosis starvation acidosis
+Physical harm ill health affliction deformity clawfoot
+Physical harm ill health affliction deformity scaphocephaly
+Physical harm ill health affliction deformity plagiocephaly
+Physical harm ill health affliction deformity pigeon breast
+Physical harm ill health affliction deformity cleft foot
+Physical harm ill health affliction deformity valgus
+Physical harm ill health affliction deformity varus
+Physical harm ill health affliction deformity clubfoot
+Physical harm ill health affliction deformity Arnold-Chiari deformity
+Physical harm ill health illness food poisoning botulism
+Physical harm ill health illness food poisoning mushroom poisoning
+Physical harm ill health illness food poisoning ptomaine
+Physical harm ill health illness food poisoning salmonellosis
+Physical harm ill health illness collapse algidity
+Physical harm ill health illness collapse breakdown
+Physical harm ill health illness collapse heatstroke
+Physical harm ill health illness collapse shock
+Physical harm ill health illness growth tumor
+Physical harm ill health illness growth excrescence
+Physical harm ill health illness growth hamartoma
+Physical harm ill health illness growth peduncle
+Physical harm ill health illness growth exostosis
+Physical harm ill health illness growth polyp
+Physical harm ill health illness toxemia of pregnancy preeclampsia
+Physical harm ill health illness toxemia of pregnancy eclampsia
+Physical harm ill health illness disease mimesis
+Physical harm ill health illness disease genetic disease
+Physical harm ill health illness disease ozena
+Physical harm ill health illness disease respiratory disease
+Physical harm ill health illness disease sandfly fever
+Physical harm ill health illness disease skin disease
+Physical harm ill health illness disease pycnosis
+Physical harm ill health illness disease cat scratch disease
+Physical harm ill health illness disease endemic
+Physical harm ill health illness disease anthrax
+Physical harm ill health illness disease Meniere's disease
+Physical harm ill health illness disease onychosis
+Physical harm ill health illness disease periarteritis nodosa
+Physical harm ill health illness disease Kawasaki disease
+Physical harm ill health illness disease milk sickness
+Physical harm ill health illness disease aspergillosis
+Physical harm ill health illness disease inflammatory disease
+Physical harm ill health illness disease liver disease
+Physical harm ill health illness disease deficiency disease
+Physical harm ill health illness disease incompetence
+Physical harm ill health illness disease exanthema subitum
+Physical harm ill health illness disease fibrocystic breast disease
+Physical harm ill health illness disease filariasis
+Physical harm ill health illness disease animal disease
+Physical harm ill health illness disease blackwater
+Physical harm ill health dyscrasia blood dyscrasia blood disease
+Physical harm ill health pathological state physical condition muscularity
+Physical harm ill health pathological state physical condition anesthesia
+Physical harm ill health pathological state physical condition cellularity
+Physical harm ill health pathological state physical condition addiction
+Physical harm ill health pathological state physical condition poisoning
+Physical harm ill health pathological state physical condition sleep
+Physical harm ill health pathological state physical condition elastosis
+Physical harm ill health pathological state physical condition rigor mortis
+Physical harm ill health pathological state physical condition sedation
+Physical harm ill health pathological state physical condition hypocapnia
+Physical harm ill health pathological state physical condition incompatibility
+Physical harm ill health pathological state physical condition angiotelectasia
+Physical harm ill health pathological state physical condition arousal
+Physical harm ill health pathological state physical condition cryptobiosis
+Physical harm ill health pathological state physical condition oxygen debt
+Physical harm ill health pathological state physical condition fertility
+Physical harm ill health pathological state physical condition obstruction
+Physical harm ill health pathological state physical condition amyxia
+Physical harm ill health pathological state physical condition anestrus
+Physical harm ill health pathological state physical condition torpor
+Physical harm ill health pathological state physical condition dilatation
+Physical harm ill health pathological state physical condition myasthenia
+Physical harm ill health pathological state physical condition anhidrosis
+Physical harm ill health pathological state physical condition agalactia
+Physical harm ill health pathological state physical condition hypopigmentation
+Physical harm bleeding hemorrhagic stroke stroke ischemic stroke ischemia
+Physical harm bleeding hemorrhagic stroke stroke attack heart attack
+Physical harm bleeding hemorrhagic stroke stroke attack flare
+Physical harm bleeding hemorrhagic stroke stroke attack occlusion
+Physical harm bleeding hemorrhagic stroke stroke attack hysterics
+Physical harm bleeding hemorrhagic stroke stroke attack paroxysm
+Physical harm bleeding hemorrhagic stroke stroke attack touch
+Physical harm bleeding hemorrhagic stroke stroke attack anxiety attack
+Physical harm bleeding hemorrhagic stroke stroke attack seizure
+Physical harm bleeding hemorrhagic stroke stroke attack affliction
+Physical harm bleeding blood extravasation extravasation organic process invagination
+Physical harm bleeding blood extravasation extravasation organic process defoliation
+Physical harm bleeding blood extravasation extravasation organic process deossification
+Physical harm bleeding blood extravasation extravasation organic process organification
+Physical harm bleeding blood extravasation extravasation organic process glycogenesis
+Physical harm bleeding blood extravasation extravasation organic process regeneration
+Physical harm bleeding blood extravasation extravasation organic process adaptation
+Physical harm bleeding blood extravasation extravasation organic process crossing over
+Physical harm bleeding blood extravasation extravasation organic process vascularization
+Physical harm bleeding blood extravasation extravasation organic process transduction
+Physical harm bleeding blood extravasation extravasation organic process perennation
+Physical harm bleeding blood extravasation extravasation organic process pathologic process
+Physical harm bleeding blood extravasation extravasation organic process symphysis
+Physical harm bleeding blood extravasation extravasation organic process protein folding
+Physical harm bleeding blood extravasation extravasation organic process ossification
+Physical harm bleeding blood extravasation extravasation organic process lymphopoiesis
+Physical harm bleeding blood extravasation extravasation organic process summation
+Physical harm bleeding blood extravasation extravasation organic process secretion
+Physical harm bleeding blood extravasation extravasation organic process transpiration
+Physical harm bleeding blood extravasation extravasation organic process metamorphosis
+Physical harm bleeding blood extravasation extravasation organic process quellung
+Physical harm bleeding blood extravasation extravasation organic process ecchymosis
+Physical harm bleeding blood extravasation extravasation organic process expression
+Physical harm bleeding blood extravasation extravasation organic process reproduction
+Physical harm bleeding blood extravasation extravasation organic process preservation
+Physical harm brain damage nervous disorder brain disorder Reye's syndrome syndrome
+Physical harm brain damage nervous disorder brain disorder paralysis agitans tremor
+Physical harm brain damage nervous disorder brain disorder aphasia global aphasia
+Physical harm brain damage nervous disorder brain disorder aphasia auditory aphasia
+Physical harm brain damage nervous disorder brain disorder aphasia Wernicke's aphasia
+Physical harm brain damage nervous disorder brain disorder aphasia transcortical aphasia
+Physical harm brain damage nervous disorder brain disorder aphasia visual aphasia
+Physical harm brain damage nervous disorder brain disorder aphasia motor aphasia
+Physical harm brain damage nervous disorder brain disorder aphasia conduction aphasia
+Physical harm brain damage nervous disorder brain disorder aphasia nominal aphasia
+Physical harm brain damage nervous disorder brain disorder agnosia auditory agnosia
+Physical harm brain damage nervous disorder brain disorder agnosia astereognosis
+Physical harm brain damage nervous disorder brain disorder agnosia visual agnosia
+Physical harm brain damage nervous disorder brain disorder epilepsy akinetic epilepsy
+Physical harm brain damage nervous disorder brain disorder epilepsy status epilepticus
+Physical harm brain damage nervous disorder brain disorder epilepsy cortical epilepsy
+Physical harm brain damage nervous disorder brain disorder epilepsy myoclonus epilepsy
+Physical harm brain damage nervous disorder brain disorder epilepsy grand mal epilepsy
+Physical harm brain damage nervous disorder brain disorder epilepsy petit mal epilepsy
+Physical harm brain damage nervous disorder brain disorder epilepsy tonic epilepsy
+Physical harm brain damage nervous disorder brain disorder epilepsy procursive epilepsy
+Physical harm brain damage nervous disorder brain disorder epilepsy reflex epilepsy
+Physical harm brain damage nervous disorder brain disorder epilepsy posttraumatic epilepsy
+Physical harm brain damage nervous disorder brain disorder epilepsy psychomotor epilepsy
+Physical harm brain damage nervous disorder brain disorder epilepsy epileptic seizure
+Physical harm brain damage nervous disorder chorea Huntington's chorea autosomal dominant disease
+Physical harm brain damage nervous disorder chorea Huntington's chorea monogenic disorder
+Physical harm brain damage nervous disorder chorea degenerative disorder multiple sclerosis
+Physical harm brain damage nervous disorder chorea degenerative disorder dystrophy
+Physical harm brain damage nervous disorder chorea degenerative disorder demyelination
+Physical harm brain damage nervous disorder ataxia spinocerebellar disorder birth defect
+Physical harm brain damage nervous disorder nerve compression nerve entrapment carpal tunnel syndrome
+Physical harm brain damage nervous disorder amyotrophic lateral sclerosis sclerosis osteosclerosis
+Physical harm brain damage nervous disorder amyotrophic lateral sclerosis sclerosis arteriolosclerosis
+Physical harm brain damage nervous disorder amyotrophic lateral sclerosis sclerosis arteriosclerosis
+Physical harm brain damage nervous disorder disorder sleep disorder hypersomnia
+Physical harm brain damage nervous disorder disorder sleep disorder sleep terror disorder
+Physical harm brain damage nervous disorder disorder sleep disorder insomnia
+Physical harm brain damage nervous disorder disorder sleep disorder sleep apnea
+Physical harm brain damage nervous disorder disorder metabolic disorder hyperlipoproteinemia
+Physical harm brain damage nervous disorder disorder metabolic disorder inborn error of metabolism
+Physical harm brain damage nervous disorder disorder metabolic disorder hypolipoproteinemia
+Physical harm brain damage nervous disorder disorder metabolic disorder lysine intolerance
+Physical harm brain damage nervous disorder disorder metabolic disorder lipidosis
+Physical harm brain damage nervous disorder disorder metabolic disorder alkaptonuria
+Physical harm brain damage nervous disorder disorder bladder disorder flaccid bladder
+Physical harm brain damage nervous disorder disorder bladder disorder neurogenic bladder
+Physical harm brain damage nervous disorder disorder bladder disorder spastic bladder
+Physical harm brain damage nervous disorder disorder speech disorder dysphonia
+Physical harm brain damage nervous disorder disorder speech disorder anarthria
+Physical harm brain damage nervous disorder disorder speech disorder lambdacism
+Physical harm brain damage nervous disorder disorder speech disorder dyslogia
+Physical harm brain damage nervous disorder disorder speech disorder cataphasia
+Physical harm brain damage nervous disorder disorder speech disorder lallation
+Physical harm brain damage nervous disorder disorder speech disorder stammer
+Physical harm brain damage nervous disorder disorder speech disorder dysarthria
+Physical harm brain damage nervous disorder disorder speech disorder aphonia
+Physical harm brain damage nervous disorder disorder speech disorder lisp
+Physical harm brain damage nervous disorder disorder immunological disorder anergy
+Physical harm brain damage nervous disorder disorder immunological disorder immunosuppression
+Physical harm brain damage nervous disorder disorder immunological disorder immunodeficiency
+Physical harm brain damage nervous disorder disorder hyperactivity attention deficit disorder
+Physical harm brain damage nervous disorder disorder ailment motion sickness
+Physical harm brain damage nervous disorder disorder ailment pip
+Physical harm brain damage nervous disorder disorder mental disorder folie a deux
+Physical harm brain damage nervous disorder disorder mental disorder personality disorder
+Physical harm brain damage nervous disorder disorder mental disorder schizothymia
+Physical harm brain damage nervous disorder disorder mental disorder delirium
+Physical harm brain damage nervous disorder disorder mental disorder conversion disorder
+Physical harm brain damage nervous disorder disorder mental disorder neurosis
+Physical harm brain damage nervous disorder disorder mental disorder psychosomatic disorder
+Physical harm brain damage nervous disorder disorder mental disorder delusional disorder
+Physical harm brain damage nervous disorder disorder mental disorder dissociative disorder
+Physical harm brain damage nervous disorder disorder mental disorder anxiety disorder
+Physical harm brain damage nervous disorder disorder mental disorder encopresis
+Physical harm brain damage nervous disorder disorder mental disorder aberration
+Physical harm brain damage nervous disorder disorder mental disorder affective disorder
+Physical harm brain damage nervous disorder disorder mental disorder Asperger's syndrome
+Physical harm burn first-degree burn sunburn erythema hickey
+Physical harm burn first-degree burn sunburn erythema erythema nodosum
+Physical harm burn first-degree burn sunburn erythema windburn
+Physical harm burn first-degree burn sunburn erythema erythema multiforme
+Physical harm burn first-degree burn sunburn erythema erythroderma
+Physical harm ill health infection sepsis blood poisoning toxemia
+Physical harm ill health infection sepsis blood poisoning pyemia
+Physical harm ill health infection sepsis blood poisoning fowl cholera
+Physical harm ill health infection sepsis blood poisoning shipping fever
+Physical harm ill health infection sepsis blood poisoning puerperal fever
+Physical harm ill health infection enterobiasis infestation echinococcosis
+Physical harm ill health infection enterobiasis infestation trichinosis
+Physical harm ill health infection enterobiasis infestation acariasis
+Physical harm ill health infection enterobiasis infestation ascariasis
+Physical harm ill health infection enterobiasis infestation onchocerciasis
+Physical harm ill health infection enterobiasis infestation myiasis
+Physical harm ill health infection enterobiasis infestation helminthiasis
+Physical harm ill health infection enterobiasis infestation fascioliasis
+Physical harm ill health infection enterobiasis infestation trombiculiasis
+Physical harm ill health infection enterobiasis infestation trichuriasis
+Physical harm ill health infection enterobiasis infestation fasciolopsiasis
+Physical harm ill health infection enterobiasis infestation Guinea worm disease
+Physical harm ill health infection enterobiasis infestation coccidiosis
+Physical harm ill health infection enterobiasis infestation pediculosis
+Physical harm ill health infection enterobiasis infestation opisthorchiasis
+Physical harm ill health infection enterobiasis infestation fullness
+Physical harm ill health infection viral infection viral pneumonia pneumonia
+Physical harm ill health infection viral infection hemorrhagic fever Ebola hemorrhagic fever
+Physical harm ill health infection viral infection hemorrhagic fever Rift Valley fever
+Physical harm ill health infection viral infection hemorrhagic fever Marburg disease
+Physical harm ill health infection viral infection hemorrhagic fever Argentine hemorrhagic fever
+Physical harm ill health infection viral infection hemorrhagic fever Lassa fever
+Physical harm ill health infection viral infection hemorrhagic fever Crimea-Congo hemorrhagic fever
+Physical harm ill health infection protozoal infection amebiasis amebic dysentery
+Physical harm ill health infection protozoal infection leishmaniasis cutaneous leishmaniasis
+Physical harm ill health infection protozoal infection leishmaniasis visceral leishmaniasis
+Physical harm ill health infection protozoal infection leishmaniasis mucocutaneous leishmaniasis
+Physical harm ill health infection protozoal infection malaria blackwater fever
+Physical harm ill health infection protozoal infection malaria jungle fever
+Physical harm ill health infection protozoal infection malaria ague
+Physical harm ill health infection staphylococcal infection boil gumboil
+Physical harm ill health infection sore blain chilblain
+Physical harm ill health infection sore gall saddle sore
+Physical harm ill health infection sore chancre tularemia
+Physical harm ill health infection sore chancre syphilis
+Physical harm ill health infection focal infection focus point
+Physical harm ill health infection incubation phase generation
+Physical harm ill health infection incubation phase chapter
+Physical harm ill health infection incubation phase oral stage
+Physical harm ill health infection incubation phase fertile period
+Physical harm ill health infection incubation phase anal stage
+Physical harm ill health infection incubation phase zygotene
+Physical harm ill health infection incubation phase phallic stage
+Physical harm ill health infection incubation phase phase of cell division
+Physical harm ill health infection incubation phase musth
+Physical harm ill health infection incubation phase genital stage
+Physical harm ill health infection incubation phase safe period
+Physical harm ill health infection incubation phase secretory phase
+Physical harm ill health infection incubation phase diplotene
+Physical harm ill health infection incubation phase latency stage
+Physical harm ill health infection incubation phase menstrual phase
+Physical harm ill health infection incubation phase leptotene
+Physical harm ill health infection incubation phase seedtime
+Physical harm ill health infection incubation phase apogee
+Physical harm ill health infection incubation phase diakinesis
+Physical harm ill health infection incubation phase pachytene
+Physical harm ill health infection incubation phase time period
+Physical harm ill health unfitness disability bowleg leg
+Physical harm ill health unfitness disability hearing impairment sensorineural hearing loss
+Physical harm ill health unfitness disability hearing impairment deafness
+Physical harm ill health unfitness disability hearing impairment hyperacusis
+Physical harm ill health unfitness disability hearing impairment conductive hearing loss
+Physical harm ill health unfitness disability disability of walking abasia
+Physical harm ill health unfitness disability disability of walking lameness
+Physical harm ill health unfitness disability visual impairment xanthopsia
+Physical harm ill health unfitness disability visual impairment hemianopia
+Physical harm ill health unfitness disability visual impairment amaurosis
+Physical harm ill health unfitness disability visual impairment amblyopia
+Physical harm ill health unfitness disability visual impairment anorthopia
+Physical harm ill health unfitness disability visual impairment tunnel vision
+Physical harm ill health unfitness disability visual impairment photoretinitis
+Physical harm ill health unfitness disability visual impairment aniseikonia
+Physical harm ill health unfitness disability visual impairment scotoma
+Physical harm ill health unfitness disability visual impairment retinal detachment
+Physical harm ill health unfitness disability visual impairment hemeralopia
+Physical harm ill health unfitness disability visual impairment diplopia
+Physical harm ill health unfitness disability visual impairment blindness
+Physical harm ill health unfitness disability visual impairment metamorphopsia
+Physical harm ill health unfitness disability visual impairment color blindness
+Physical harm ill health unfitness disability visual impairment quadrantanopia
+Physical harm ill health unfitness disability visual impairment aphakia
+Physical harm ill health unfitness disability visual impairment nyctalopia
+Physical harm ill health unfitness disability visual impairment ametropia
+Physical harm ill health unfitness disability dysomia hyposmia
+Physical harm ill health unfitness disability dysomia anosmia
+Physical harm ill health unfitness disability prolapse nephroptosis
+Physical harm ill health unfitness disability prolapse ureterocele
+Physical harm ill health unfitness disability prolapse glossoptosis
+Physical harm ill health unfitness disability prolapse ptosis
+Physical harm ill health unfitness disability prolapse metroptosis
+Physical harm ill health unfitness disability prolapse urethrocele
+Physical harm ill health unfitness disability prolapse enteroptosis
+Physical harm ill health pathology demineralization osteomalacia malacia
+Physical harm ill health pathology stenosis rhinostenosis rhinopathy
+Physical harm ill health pathology stenosis aortic stenosis valvular heart disease
+Physical harm ill health pathology stenosis pulmonary stenosis tetralogy of Fallot
+Physical harm ill health pathology autoimmunity autoimmune disease pemphigus
+Physical harm ill health pathology autoimmunity autoimmune disease myasthenia gravis
+Physical harm ill health pathology autoimmunity autoimmune disease discoid lupus erythematosus
+Physical harm ill health pathology autoimmunity autoimmune disease thrombocytopenic purpura
+Physical harm ill health pathology autoimmunity autoimmune disease type I diabetes
+Physical harm ill health pathology autoimmunity autoimmune disease ankylosing spondylitis
+Physical harm ill health pathology autoimmunity autoimmune disease Hashimoto's disease
+Physical harm ill health pathology autoimmunity autoimmune disease Graves' disease
+Physical harm ill health pathology autoimmunity autoimmune disease lupus erythematosus
+Physical harm ill health pathology autoimmunity autoimmune disease scleroderma
+Physical harm ill health pathology autoimmunity autoimmune disease rheumatoid arthritis
+Physical harm ill health pathology lithiasis nephrolithiasis nephrocalcinosis
+Physical harm ill health pathology angiopathy angioma spider angioma
+Physical harm ill health pathology angiopathy angioma hemangioma
+Physical harm ill health pathology angiopathy angioma lymphangioma
+Physical harm ill health pathology angiopathy angiitis inflammation
+Physical harm ill health affliction deformity clubfoot talipes valgus
+Physical harm ill health affliction deformity clubfoot talipes equinus
+Physical harm ill health affliction deformity clubfoot talipes calcaneus
+Physical harm ill health illness collapse breakdown nervous breakdown
+Physical harm ill health illness collapse heatstroke heat exhaustion
+Physical harm ill health illness collapse heatstroke sunstroke
+Physical harm ill health illness collapse shock insulin shock
+Physical harm ill health illness collapse shock obstructive shock
+Physical harm ill health illness collapse shock hypovolemic shock
+Physical harm ill health illness collapse shock cardiogenic shock
+Physical harm ill health illness collapse shock distributive shock
+Physical harm ill health illness growth tumor celioma
+Physical harm ill health illness growth tumor blastoma
+Physical harm ill health illness growth tumor pinealoma
+Physical harm ill health illness growth tumor brain tumor
+Physical harm ill health illness growth tumor carcinoid
+Physical harm ill health illness growth tumor granuloma
+Physical harm ill health illness growth tumor psammoma
+Physical harm ill health illness growth tumor neuroma
+Physical harm ill health illness growth tumor pheochromocytoma
+Physical harm ill health illness growth tumor teratoma
+Physical harm ill health illness growth tumor malignant tumor
+Physical harm ill health illness growth tumor plasmacytoma
+Physical harm ill health illness growth tumor meningioma
+Physical harm ill health illness growth tumor lipoma
+Physical harm ill health illness growth tumor neurofibroma
+Physical harm ill health illness growth tumor acanthoma
+Physical harm ill health illness growth tumor benign tumor
+Physical harm ill health illness growth excrescence vegetation
+Physical harm ill health illness growth excrescence process
+Physical harm ill health illness growth peduncle pedunculated polyp
+Physical harm ill health illness growth polyp sessile polyp
+Physical harm ill health illness growth polyp adenomatous polyp
+Physical harm ill health illness disease mimesis hysteria
+Physical harm ill health illness disease genetic disease mucopolysaccharidosis
+Physical harm ill health illness disease genetic disease hepatolenticular degeneration
+Physical harm ill health illness disease genetic disease achondroplasia
+Physical harm ill health illness disease genetic disease ichthyosis
+Physical harm ill health illness disease genetic disease polygenic disorder
+Physical harm ill health illness disease genetic disease hyperbetalipoproteinemia
+Physical harm ill health illness disease genetic disease nevoid elephantiasis
+Physical harm ill health illness disease genetic disease otosclerosis
+Physical harm ill health illness disease genetic disease maple syrup urine disease
+Physical harm ill health illness disease genetic disease Fanconi's anemia
+Physical harm ill health illness disease genetic disease oligodactyly
+Physical harm ill health illness disease genetic disease Spielmeyer-Vogt disease
+Physical harm ill health illness disease genetic disease porphyria
+Physical harm ill health illness disease genetic disease Hirschsprung's disease
+Physical harm ill health illness disease genetic disease osteopetrosis
+Physical harm ill health illness disease genetic disease dwarfism
+Physical harm ill health illness disease genetic disease congenital afibrinogenemia
+Physical harm ill health illness disease genetic disease lactose intolerance
+Physical harm ill health illness disease genetic disease abetalipoproteinemia
+Physical harm ill health illness disease genetic disease autosomal recessive disease
+Physical harm ill health illness disease genetic disease McArdle's disease
+Physical harm ill health illness disease genetic disease oligodontia
+Physical harm ill health illness disease genetic disease muscular dystrophy
+Physical harm ill health illness disease respiratory disease cold
+Physical harm ill health illness disease respiratory disease atypical pneumonia
+Physical harm ill health illness disease respiratory disease respiratory distress syndrome
+Physical harm ill health illness disease respiratory disease pneumoconiosis
+Physical harm ill health illness disease respiratory disease adult respiratory distress syndrome
+Physical harm ill health illness disease respiratory disease whooping cough
+Physical harm ill health illness disease respiratory disease asthma
+Physical harm ill health illness disease respiratory disease emphysema
+Physical harm ill health illness disease respiratory disease bronchitis
+Physical harm ill health illness disease respiratory disease influenza
+Physical harm ill health illness disease respiratory disease severe acute respiratory syndrome
+Physical harm ill health illness disease respiratory disease interstitial pneumonia
+Physical harm ill health illness disease respiratory disease cough
+Physical harm ill health illness disease skin disease lupus
+Physical harm ill health illness disease skin disease molluscum
+Physical harm ill health illness disease skin disease psoriasis
+Physical harm ill health illness disease skin disease Saint Anthony's fire
+Physical harm ill health illness disease skin disease acantholysis
+Physical harm ill health illness disease skin disease keratosis
+Physical harm ill health illness disease skin disease seborrhea
+Physical harm ill health illness disease skin disease acanthosis
+Physical harm ill health illness disease skin disease dermatosis
+Physical harm ill health illness disease skin disease acanthosis nigricans
+Physical harm ill health illness disease skin disease keratonosis
+Physical harm ill health illness disease skin disease xanthoma
+Physical harm ill health illness disease skin disease jungle rot
+Physical harm ill health illness disease skin disease eczema
+Physical harm ill health illness disease skin disease necrobiosis lipoidica
+Physical harm ill health illness disease skin disease rhagades
+Physical harm ill health illness disease skin disease furunculosis
+Physical harm ill health illness disease skin disease impetigo
+Physical harm ill health illness disease skin disease keratoderma
+Physical harm ill health illness disease skin disease xanthosis
+Physical harm ill health illness disease skin disease prurigo
+Physical harm ill health illness disease skin disease livedo
+Physical harm ill health illness disease skin disease leukoderma
+Physical harm ill health illness disease skin disease acne
+Physical harm ill health illness disease skin disease lichen
+Physical harm ill health illness disease anthrax pulmonary anthrax
+Physical harm ill health illness disease anthrax cutaneous anthrax
+Physical harm ill health illness disease onychosis onycholysis
+Physical harm ill health illness disease inflammatory disease urinary tract infection
+Physical harm ill health illness disease inflammatory disease arthritis
+Physical harm ill health illness disease inflammatory disease pyelitis
+Physical harm ill health illness disease inflammatory disease gastroenteritis
+Physical harm ill health illness disease inflammatory disease angina
+Physical harm ill health illness disease inflammatory disease pelvic inflammatory disease
+Physical harm ill health illness disease inflammatory disease empyema
+Physical harm ill health illness disease inflammatory disease necrotizing enterocolitis
+Physical harm ill health illness disease inflammatory disease pleurisy
+Physical harm ill health illness disease liver disease cirrhosis
+Physical harm ill health illness disease liver disease hepatitis
+Physical harm ill health illness disease liver disease liver cancer
+Physical harm ill health illness disease liver disease fatty liver
+Physical harm ill health illness disease deficiency disease malnutrition
+Physical harm ill health illness disease deficiency disease zinc deficiency
+Physical harm ill health illness disease incompetence hypogonadism
+Physical harm ill health illness disease incompetence valvular incompetence
+Physical harm ill health illness disease animal disease catarrhal fever
+Physical harm ill health illness disease animal disease murrain
+Physical harm ill health illness disease animal disease pullorum disease
+Physical harm ill health illness disease animal disease rhinotracheitis
+Physical harm ill health illness disease animal disease distemper
+Physical harm ill health illness disease animal disease black disease
+Physical harm ill health illness disease animal disease hog cholera
+Physical harm ill health illness disease animal disease foot-and-mouth disease
+Physical harm ill health illness disease animal disease camelpox
+Physical harm ill health illness disease animal disease moon blindness
+Physical harm ill health illness disease animal disease canine chorea
+Physical harm ill health illness disease animal disease myxomatosis
+Physical harm ill health illness disease animal disease cowpox
+Physical harm ill health illness disease animal disease warble
+Physical harm ill health illness disease animal disease enterotoxemia
+Physical harm ill health illness disease animal disease heaves
+Physical harm ill health illness disease animal disease rinderpest
+Physical harm ill health illness disease animal disease fistulous withers
+Physical harm ill health illness disease animal disease pip
+Physical harm ill health illness disease animal disease creeps
+Physical harm ill health illness disease animal disease bighead
+Physical harm ill health illness disease animal disease psittacosis
+Physical harm ill health illness disease animal disease Newcastle disease
+Physical harm ill health illness disease animal disease sand crack
+Physical harm ill health illness disease animal disease anaplasmosis
+Physical harm ill health dyscrasia blood dyscrasia blood disease agranulocytosis
+Physical harm ill health dyscrasia blood dyscrasia blood disease anemia
+Physical harm ill health dyscrasia blood dyscrasia blood disease leukocytosis
+Physical harm ill health dyscrasia blood dyscrasia blood disease cytopenia
+Physical harm ill health dyscrasia blood dyscrasia blood disease acanthocytosis
+Physical harm ill health dyscrasia blood dyscrasia blood disease lymphocytosis
+Physical harm ill health dyscrasia blood dyscrasia blood disease hemophilia
+Physical harm ill health dyscrasia blood dyscrasia blood disease microcytosis
+Physical harm ill health dyscrasia blood dyscrasia blood disease hypervolemia
+Physical harm ill health dyscrasia blood dyscrasia blood disease parasitemia
+Physical harm ill health dyscrasia blood dyscrasia blood disease purpura
+Physical harm ill health dyscrasia blood dyscrasia blood disease acidemia
+Physical harm ill health dyscrasia blood dyscrasia blood disease alkalemia
+Physical harm ill health dyscrasia blood dyscrasia blood disease polycythemia
+Physical harm ill health dyscrasia blood dyscrasia blood disease hemoglobinopathy
+Physical harm ill health dyscrasia blood dyscrasia blood disease analbuminemia
+Physical harm ill health dyscrasia blood dyscrasia blood disease Banti's disease
+Physical harm ill health dyscrasia blood dyscrasia blood disease afibrinogenemia
+Physical harm ill health dyscrasia blood dyscrasia blood disease hypovolemia
+Physical harm ill health dyscrasia blood dyscrasia blood disease erythroblastosis
+Physical harm ill health dyscrasia blood dyscrasia blood disease histiocytosis
+Physical harm ill health dyscrasia blood dyscrasia blood disease uricaciduria
+Physical harm ill health dyscrasia blood dyscrasia blood disease thrombocytopenia
+Physical harm ill health dyscrasia blood dyscrasia blood disease leukopenia
+Physical harm ill health dyscrasia blood dyscrasia blood disease lymphocytopenia
+Physical harm ill health pathological state physical condition anesthesia local anesthesia
+Physical harm ill health pathological state physical condition anesthesia cryoanesthesia
+Physical harm ill health pathological state physical condition anesthesia topical anesthesia
+Physical harm ill health pathological state physical condition anesthesia conduction anesthesia
+Physical harm ill health pathological state physical condition anesthesia general anesthesia
+Physical harm ill health pathological state physical condition anesthesia regional anesthesia
+Physical harm ill health pathological state physical condition cellularity hypercellularity
+Physical harm ill health pathological state physical condition cellularity hypocellularity
+Physical harm ill health pathological state physical condition addiction drug addiction
+Physical harm ill health pathological state physical condition poisoning carbon monoxide poisoning
+Physical harm ill health pathological state physical condition poisoning salicylate poisoning
+Physical harm ill health pathological state physical condition poisoning cyanide poisoning
+Physical harm ill health pathological state physical condition poisoning paraquat poisoning
+Physical harm ill health pathological state physical condition poisoning alkali poisoning
+Physical harm ill health pathological state physical condition poisoning nicotine poisoning
+Physical harm ill health pathological state physical condition poisoning naphthalene poisoning
+Physical harm ill health pathological state physical condition poisoning ergotism
+Physical harm ill health pathological state physical condition poisoning pesticide poisoning
+Physical harm ill health pathological state physical condition poisoning ophidism
+Physical harm ill health pathological state physical condition poisoning mercury poisoning
+Physical harm ill health pathological state physical condition poisoning caffeinism
+Physical harm ill health pathological state physical condition sleep paradoxical sleep
+Physical harm ill health pathological state physical condition sleep sleeping
+Physical harm ill health pathological state physical condition sleep shuteye
+Physical harm ill health pathological state physical condition sleep orthodox sleep
+Physical harm ill health pathological state physical condition incompatibility histoincompatibility
+Physical harm ill health pathological state physical condition incompatibility Rh incompatibility
+Physical harm ill health pathological state physical condition arousal alertness
+Physical harm ill health pathological state physical condition arousal desire
+Physical harm ill health pathological state physical condition arousal emotional arousal
+Physical harm ill health pathological state physical condition arousal sexual arousal
+Physical harm ill health pathological state physical condition arousal excitation
+Physical harm ill health pathological state physical condition obstruction tamponade
+Physical harm ill health pathological state physical condition obstruction intestinal obstruction
+Physical harm ill health pathological state physical condition anestrus diestrus
+Physical harm ill health pathological state physical condition torpor hibernation
+Physical harm ill health pathological state physical condition torpor lethargy
+Physical harm ill health pathological state physical condition dilatation tympanites
+Physical harm ill health pathological state physical condition dilatation varicocele
+Physical harm ill health pathological state physical condition dilatation ectasia
+Physical harm ill health pathological state physical condition hypopigmentation albinism
+Physical harm ill health pathological state physical condition hypopigmentation vitiligo

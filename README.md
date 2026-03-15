@@ -108,7 +108,7 @@ Edit the `CUDA_VISIBLE_DEVICES` line inside each script to select the target GPU
 ```python
 from config import MODEL_NAME, CATEGORIES, RESULTS_DIR, ...
 from evaluate.metrics import evaluate_responses, evaluate_locality
-from visualization.plots import create_harmfulness_heatmap, create_distribution_plots
+from visualization.plots import plot_harmfulness_heatmap, plot_harmfulness_distribution
 from model_utils import apply_abliteration_with_hyperparams
 from refusal_directions import compute_refusal_direction
 from data_utils import load_all_datasets_with_categories

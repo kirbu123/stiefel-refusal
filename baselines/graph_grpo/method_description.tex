@@ -1,0 +1,90 @@
+
+As mentioned before, prior methods require either training auxiliary models, performing explicit edits to model internals, or assembling manual datasets of harmful and harmless examples. To avoid these burdens, we employ GRPO with importance sampling to efficiently search the coefficient space.
+
+\textbf{Group Relative Policy Optimization.}
+Let us denote the language model parameterized by $\theta$ as a policy $\pi_\theta$.
+Given a query $x$ drawn from a query set $\mathcal{D}$, it induces a distribution over responses $y$, whose likelihood factorizes as 
+\begin{align*}
+\pi_\theta(y\mid x)=\prod_{t=1}^{|y|}\pi_\theta(y_t\mid x,y_{<t}),
+\end{align*} where $|y|$ denotes the number of tokens in $y$.
+A query-response pair $(x,y)$ is scored by a reward model $\mathcal{S}$, yielding a scalar score $\mathcal{S}(x,y)\in[0,1]$.
+The standard GRPO algorithm computes a relative advantage for each response within a group of $G$ responses generated for the same query from the old policy $\pi_{\theta_\text{old}}$.
+Specifically, GRPO optimizes
+\begin{align}
+\label{equ:grpo}
+\mathcal{J}_\text{GRPO}(\theta) =
+\mathbb{E}_{x \sim \mathcal{D},\, \{y_i\}_{i=1}^{G} \sim \pi_{\theta_\text{old}}(\cdot \mid x)}
+\Bigg[
+\frac{1}{G}\sum_{i=1}^{G}\frac{1}{|y_i|}\sum_{t=1}^{|y_i|}
+\notag\\
+\min\!\Big(
+w_{i,t}(\theta)\,\widehat{A}_{i},\;
+\mathrm{clip}\!\left(w_{i,t}(\theta),\,1-\varepsilon,\,1+\varepsilon\right)\widehat{A}_{i}
+\Big)
+\Bigg],
+\end{align}
+where the token-level importance ratio is 
+\begin{align*}
+    w_{i,t}(\theta)=\frac{\pi_\theta(y_{i,t}\mid x,y_{i,<t})}{\pi_{\theta_\text{old}}(y_{i,t}\mid x,y_{i,<t})},
+\end{align*} and all tokens in a response share the same group-relative advantage
+\begin{align*}
+\widehat{A}_{i}=\frac{\mathcal{S}(x,y_i)-\mathrm{mean}(\{\mathcal{S}(x,y_j)\}_{j=1}^{G})}{\mathrm{std}(\{\mathcal{S}(x,y_j)\}_{j=1}^{G})}.
+\end{align*}
+
+\textbf{Group Relative Policy Optimization with Importance Sampling.}
+In the standard GRPO formulation \eqref{equ:grpo}, the group of responses for each query is sampled from the old policy $\pi_{\theta_\text{old}}$, and the clipped objective uses the token-level importance ratio between the current and old policies.
+Here, we consider a stratified data-collection scheme. For each query $x$, we sample one response from each of $M$ behavior policies $\{\mu_m\}_{m=1}^M$ that are obtained by shifting the original model weights with formula \eqref{eq:weight_change}, i.e., $y_m \sim \mu_m(\cdot \mid x)$.
+As the resulting group is off-policy with respect to $\pi_{\theta_\text{old}}$, directly applying \eqref{equ:grpo} would generally yield a biased estimate of the GRPO objective.
+We introduce sequence-level importance sampling weights to correct this mismatch while retaining the original ratio against $\pi_{\theta_\text{old}}$.
+
+Specifically, for each response $y_m$ sampled from $\mu_m$, we define the sequence-level importance weight
+\begin{align*}
+v_m = \frac{\pi_{\theta_\text{old}}(y_m \mid x)}{\mu_m(y_m \mid x)}.
+\end{align*}
+In practice, we stabilize the weights $\{v_m\}_{m=1}^M$ by applying clipping, denoted as $\widetilde{v}_m$, and treat them as constants with respect to $\theta$ during optimization.
+This reweighting ensures that the overall objective remains consistent with the GRPO surrogate.
+
+Analogous to GRPO, we assign a shared advantage to all tokens in a response.
+However, to preserve the control-variate property under off-policy sampling, we compute the group baseline using the same sequence-level weights.
+Given the group $\{y_m\}_{m=1}^M$ for query $x$, we first form the importance-weighted baseline
+\begin{align*}
+b(x)=\frac{\sum_{m=1}^{M} \widetilde{v}_m \, \mathcal{S}(x,y_m)}{\sum_{m=1}^{M} \widetilde{v}_m},
+\end{align*}
+and define the normalized group-relative advantage as
+\begin{align*}
+\widehat{A}_m
+=
+\frac{\mathcal{S}(x,y_m)-b(x)}
+{\mathrm{std}\!\left(\{\mathcal{S}(x,y_j)\}_{j=1}^{M}\right)},
+\end{align*}
+where all tokens in $y_m$ share the same advantage, i.e., $\widehat{A}_{m,t}=\widehat{A}_m$ for all $t$.
+
+Finally, our GRPO objective with importance sampling is
+\begin{align}
+\label{equ:grpo_is_corrected}
+&\mathcal{J}_\text{GRPO-IS}(\theta)
+= \notag \\
+&=\mathbb{E}_{ x \sim \mathcal{D},\, \{y_m\}_{m=1}^M,\, y_m \sim \mu_m(\cdot \mid x) }
+\Bigg[
+\frac{1}{M}\sum_{m=1}^{M} \widetilde{v}_m\,
+\frac{1}{|y_m|}\sum_{t=1}^{|y_m|}
+\notag \\&\min \Big(
+w_{m,t}(\theta)\, \widehat{A}_{m},\;
+\mathrm{clip}\!\left( w_{m,t}(\theta),\, 1 - {\varepsilon},\, 1 + {\varepsilon}\right) \widehat{A}_{m}
+\Big)
+\Bigg],
+\end{align}
+where the token-level importance ratio is defined as
+\begin{align*}
+w_{m,t}(\theta)=\frac{ \pi_{\theta} (y_{m,t} \mid x, y_{m,<t}) }{ \pi_{\theta_\text{old}} (y_{m,t} \mid x, y_{m,<t}) }.
+\end{align*}
+Compared with standard GRPO, our objective \eqref{equ:grpo_is_corrected} differs in that the group is collected by stratified sampling from multiple behavior policies $\{\mu_m\}$, and a sequence-level importance weight $\widetilde{v}_m$ is used to correct the off-policy sampling back to $\pi_{\theta_\text{old}}$.
+
+As mentioned above, each behavior policy $\mu_m$ is obtained by applying layer-wise modification to the frozen base parameters $\theta_\text{old}$.
+Defining the corresponding layer parameters of $\mu_m$ as $\theta_{\mu_m}^{(l)}$, we can rewrite formula \eqref{eq:weight_change} as
+\begin{align}
+\label{eq:weight_change_app}
+\theta_{\mu_m}^{(l)} = \theta_\text{old}^{(l)} - \alpha_{m,l}\, P^{(l)} \theta_\text{old}^{(l)}, 
+\end{align}
+where $\alpha_{l}$ is a scalar coefficient,  and $\{P^{(l)}\}_l$ are the only trainable parameters.
+That is, we keep $\theta_\text{old}$ fixed and learn a set of layer-wise transformations $\{P^{(l)}\}_l$ that induces a family of behavior policies $\{\mu_m\}_{m=1}^M$ via equation \eqref{eq:weight_change_app}.
