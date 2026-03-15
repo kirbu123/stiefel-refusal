@@ -1,0 +1,34 @@
+[model]
+name = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+batch_size = 16
+max_response_length = 2048
+system_prompt = "You are a helpful assistant."
+
+[data]
+graph_file = "graph_build/Physical harm_graph.txt"
+
+[grpo]
+n_groups = 4
+n_epochs = 50
+learning_rate = 1e-3
+noise_scale = 1.0
+beta = 0.1
+gradient_scale = 1e6
+
+[abliteration]
+max_weight = 2.0
+max_weight_position = 0.7
+min_weight = 0.1
+min_weight_distance = 0.3
+
+[weights]
+init_type = "zero"
+
+[evaluation]
+backend = "local_llm_judge"
+evaluate_locality = true
+judge_api_url = "http://localhost:31181/v1/chat/completions"
+classifier_api_url = "http://localhost:31180/v1/chat/completions"
+llamaguard_model_name = "meta-llama/Meta-Llama-Guard-2-8B"
+llamaguard_device = "cuda"
+llamaguard_dtype = "bfloat16"
