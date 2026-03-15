@@ -8,10 +8,79 @@ This repository contains experiments on refusal directions and abliteration for 
 pip install -r requirements.txt
 ```
 
+## Interactive CLI
+
+The project includes an interactive CLI that guides you through model selection, editing, and post-processing -- no need to manually edit shell scripts or environment variables.
+
+### Quick Start
+
+```bash
+python -m cli
+```
+
+### CLI Flow
+
+1. **Enter model name** -- HuggingFace model ID (e.g. `deepseek-ai/DeepSeek-R1-Distill-Qwen-7B`) or a local path.
+2. **Select editing method** -- one of six available methods:
+   - **Basic Refusal** -- uses category questions as harmful prompts, uniform abliteration shift
+   - **Topic Ablation** -- uses the category name as the harmful prompt, grid search over hyperparameters
+   - **Tag Ablation** -- uses tags from `tag_filtered_questions.json`, one refusal direction per tag
+   - **Graph Average** -- averages refusal directions from all graph tags, grid search
+   - **Graph GRPO (IS)** -- trains learnable direction weights with importance sampling
+   - **Graph GRPO (old)** -- trains direction weights with noise-based GRPO
+3. **Configuration** -- default parameters are loaded from TOML config files in `configs/`. You can use the defaults or provide a custom config path.
+4. **Run** -- the selected method executes with the configured parameters.
+5. **Post-processing menu** -- after the experiment completes, choose from:
+   - **Save model locally** -- merge and save the edited model to a local directory
+   - **Upload to Hugging Face** -- push the model to a HuggingFace repository
+   - **Validate** -- generate responses and evaluate harmfulness scores
+   - **Generate plots** -- harmfulness/locality heatmaps and distribution histograms
+   - **Chat** -- interactive chat with the edited model
+
+### Configuration Files
+
+Each method has a default TOML config in `configs/`:
+
+```
+configs/
+├── basic_refusal.toml
+├── topic_ablation.toml
+├── tag_ablation.toml
+├── graph_average.toml
+├── graph_grpo.toml
+└── graph_grpo_old.toml
+```
+
+Example (`configs/graph_average.toml`):
+
+```toml
+[model]
+name = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+batch_size = 16
+max_response_length = 2048
+
+[data]
+graph_file = "graph_build/ph_wordnet_graph_25neighbours_actions_terms.txt"
+
+[grid_search]
+max_weight = [2.5, 3.0]
+max_weight_position = [0.7]
+min_weight = [0.0, 1.0]
+min_weight_distance = [0.3]
+
+[evaluation]
+backend = "llamaguard"
+evaluate_locality = true
+```
+
+The model name provided interactively always overrides the value in the config file.
+
 ## Project Structure
 
 ```
 LLM_editing/
+├── cli/                    # Interactive CLI (python -m cli)
+├── configs/                # TOML config files for each editing method
 ├── baselines/              # Experiment methods (each runnable independently)
 ├── evaluate/               # Evaluation functions and batch helpers
 ├── visualization/          # Plotting utilities (heatmaps, distributions)
@@ -145,3 +214,7 @@ results/
     ├── harmfulness/ ...
     └── locality/ ...
 ```
+
+## Credits
+
+- [Heretic codebase](https://github.com/p-e-w/heretic/)
