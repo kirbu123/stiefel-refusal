@@ -589,9 +589,9 @@ Examples:
 
 if __name__ == "__main__":
     paths = [
-        "results/graph_average/answers/answers_Physical_harm_max_weight=2.5_&max_weight_position=0.7_&min_weight=0.0_&min_weight_distance=0.3_20260311_235916.json",
-        "results/graph_average/answers/answers_Physical_harm_max_weight=2.5_&max_weight_position=0.7_&min_weight=1.0_&min_weight_distance=0.3_20260312_003330.json",
-        "results/graph_average/answers/answers_Physical_harm_max_weight=3.0_&max_weight_position=0.7_&min_weight=0.0_&min_weight_distance=0.3_20260312_010834.json",
-        "results/graph_average/answers/answers_Physical_harm_max_weight=3.0_&max_weight_position=0.7_&min_weight=1.0_&min_weight_distance=0.3_20260312_014338.json"
+        "results/graph_average/answers/graph_average_physical_harm_deepinfra_1.json",
+        "results/graph_average/answers/graph_average_physical_harm_deepinfra_2.json",
+        "results/graph_average/answers/graph_average_physical_harm_deepinfra_3.json",
+        "results/graph_average/answers/graph_average_physical_harm_deepinfra_4.json"
     ]
     main(paths)
