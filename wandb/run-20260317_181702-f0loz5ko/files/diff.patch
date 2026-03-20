@@ -1,0 +1,113 @@
+diff --git a/baselines/graph_grpo/log_probs.py b/baselines/graph_grpo/log_probs.py
+index 5bf5490..d30ccf3 100644
+--- a/baselines/graph_grpo/log_probs.py
++++ b/baselines/graph_grpo/log_probs.py
+@@ -103,6 +103,16 @@ def compute_sequence_log_probs(
+         all_log_probs.append(torch.stack(padded_log_probs))
+         all_masks.append(torch.stack(padded_masks))
+ 
+-    log_probs = torch.cat(all_log_probs, dim=0)
+-    response_mask = torch.cat(all_masks, dim=0)
++    global_max_len = max(t.shape[1] for t in all_log_probs)
++    padded_lp = []
++    padded_mk = []
++    for lp, mk in zip(all_log_probs, all_masks):
++        pad = global_max_len - lp.shape[1]
++        if pad > 0:
++            lp = F.pad(lp, (0, pad), value=0.0)
++            mk = F.pad(mk, (0, pad), value=0.0)
++        padded_lp.append(lp)
++        padded_mk.append(mk)
++    log_probs = torch.cat(padded_lp, dim=0)
++    response_mask = torch.cat(padded_mk, dim=0)
+     return log_probs, response_mask
+diff --git a/baselines/graph_grpo/trainer.py b/baselines/graph_grpo/trainer.py
+index 4eb8093..bf5d96f 100644
+--- a/baselines/graph_grpo/trainer.py
++++ b/baselines/graph_grpo/trainer.py
+@@ -116,7 +116,23 @@ def train_grpo_is_step(
+         responses = [extract_response_after_think(r) for r in responses_raw]
+         all_responses.append(responses)
+ 
+-        rollout_lp, rollout_mask = compute_sequence_log_probs(model, questions, responses)
++        # #region agent log
++        import json as _json, time as _time
++        _lp = "/home/rinya/LLM_editing/.cursor/debug-ebb21c.log"
++        _mem = torch.cuda.memory_allocated() / 1e9
++        _res = torch.cuda.memory_reserved() / 1e9
++        with open(_lp, "a") as _f: _f.write(_json.dumps({"sessionId":"ebb21c","hypothesisId":"A","location":"trainer.py:rollout_before_logprobs","message":"mem before rollout log_probs","data":{"alpha":alpha,"mem_alloc_gb":round(_mem,2),"mem_reserved_gb":round(_res,2),"grad_enabled":torch.is_grad_enabled()},"timestamp":int(_time.time()*1000)})+"\n")
++        # #endregion
++
++        with torch.no_grad():
++            rollout_lp, rollout_mask = compute_sequence_log_probs(model, questions, responses)
++
++        # #region agent log
++        _mem2 = torch.cuda.memory_allocated() / 1e9
++        _res2 = torch.cuda.memory_reserved() / 1e9
++        with open(_lp, "a") as _f: _f.write(_json.dumps({"sessionId":"ebb21c","hypothesisId":"A","location":"trainer.py:rollout_after_logprobs","message":"mem after rollout log_probs","data":{"alpha":alpha,"mem_alloc_gb":round(_mem2,2),"mem_reserved_gb":round(_res2,2),"lp_requires_grad":rollout_lp.requires_grad},"timestamp":int(_time.time()*1000)})+"\n")
++        # #endregion
++
+         all_rollout_log_probs.append(rollout_lp)
+         all_masks.append(rollout_mask)
+         empty_cache()
+@@ -125,7 +141,19 @@ def train_grpo_is_step(
+     model.reload_model()
+     all_old_log_probs = []
+     for m in range(len(alphas)):
+-        old_lp, _ = compute_sequence_log_probs(model, questions, all_responses[m])
++        # #region agent log
++        _mem = torch.cuda.memory_allocated() / 1e9
++        with open(_lp, "a") as _f: _f.write(_json.dumps({"sessionId":"ebb21c","hypothesisId":"B","location":"trainer.py:old_before_logprobs","message":"mem before old log_probs","data":{"m":m,"mem_alloc_gb":round(_mem,2),"grad_enabled":torch.is_grad_enabled()},"timestamp":int(_time.time()*1000)})+"\n")
++        # #endregion
++
++        with torch.no_grad():
++            old_lp, _ = compute_sequence_log_probs(model, questions, all_responses[m])
++
++        # #region agent log
++        _mem2 = torch.cuda.memory_allocated() / 1e9
++        with open(_lp, "a") as _f: _f.write(_json.dumps({"sessionId":"ebb21c","hypothesisId":"B","location":"trainer.py:old_after_logprobs","message":"mem after old log_probs","data":{"m":m,"mem_alloc_gb":round(_mem2,2),"lp_requires_grad":old_lp.requires_grad},"timestamp":int(_time.time()*1000)})+"\n")
++        # #endregion
++
+         all_old_log_probs.append(old_lp)
+     empty_cache()
+ 
+@@ -159,7 +187,7 @@ def train_grpo_is_step(
+     # Step 5: Rewards
+     scores = compute_reward(flat_questions, flat_responses, classifier_categories, backend)
+     scores_tensor = torch.tensor(scores, dtype=torch.float32, device=device)
+-    token_level_rewards = torch.zeros_like(rollout_log_probs, device=device)
++    token_level_rewards = torch.zeros(rollout_log_probs.shape, dtype=torch.float32, device=device)
+     last_valid = (response_mask > 0).sum(dim=-1).long() - 1
+     last_valid = torch.clamp(last_valid, min=0)
+     token_level_rewards.scatter_(1, last_valid.unsqueeze(1), scores_tensor.unsqueeze(1).to(device))
+diff --git a/scripts/run_graph_grpo.sh b/scripts/run_graph_grpo.sh
+index 7941768..34f7df7 100644
+--- a/scripts/run_graph_grpo.sh
++++ b/scripts/run_graph_grpo.sh
+@@ -1,7 +1,7 @@
+ #!/bin/bash
+ 
+ # ---- GPU ----
+-export CUDA_VISIBLE_DEVICES=0,1
++export CUDA_VISIBLE_DEVICES=0
+ 
+ # ---- Model ----
+ export MODEL_NAME="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+@@ -41,7 +41,7 @@ export CLASSIFIER_API_URL="http://localhost:31180/v1/chat/completions"
+ export LLAMAGUARD_MODEL_NAME="meta-llama/Meta-Llama-Guard-2-8B"
+ export LLAMAGUARD_DEVICE="cuda"
+ export LLAMAGUARD_DTYPE="bfloat16"
+-# export HF_TOKEN="<your_hf_token>"
++export HF_TOKEN="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"
+ 
+ # ---- Locality evaluation ----
+ export EVALUATE_LOCALITY="true"
+diff --git a/wandb/latest-run b/wandb/latest-run
+index 995f074..c949985 120000
+--- a/wandb/latest-run
++++ b/wandb/latest-run
+@@ -1 +1 @@
+-run-20260317_101145-ohw7z76p
+\ No newline at end of file
++run-20260317_181702-f0loz5ko
+\ No newline at end of file

@@ -1,0 +1,379 @@
+diff --git a/baselines/graph_grpo/advantage.py b/baselines/graph_grpo/advantage.py
+index f6670d3..061c7f3 100644
+--- a/baselines/graph_grpo/advantage.py
++++ b/baselines/graph_grpo/advantage.py
+@@ -47,6 +47,9 @@ def compute_grpo_is_advantage(
+         returns: (bs, response_length)
+     """
+     scores = token_level_rewards.sum(dim=-1)
++    print(f"      [advantage] {scores.shape[0]} responses, "
++          f"{len(set(index.tolist()))} unique groups, "
++          f"scores: mean={scores.mean():.3f}, std={scores.std():.3f}")
+ 
+     id2score = defaultdict(list)
+     id2is = defaultdict(list)
+diff --git a/baselines/graph_grpo/hooks.py b/baselines/graph_grpo/hooks.py
+index b4464c9..f46e479 100644
+--- a/baselines/graph_grpo/hooks.py
++++ b/baselines/graph_grpo/hooks.py
+@@ -22,10 +22,9 @@ def _create_abliteration_hook(
+     direction = direction.to(device)
+ 
+     def hook(module, input, output):
+-        # output shape: (..., hidden_size), direction: (hidden_size,)
+-        # projection: (output · d) * d
+-        dots = (output * direction).sum(dim=-1, keepdim=True)
+-        projection = dots * direction
++        d = direction.to(dtype=output.dtype)
++        dots = (output * d).sum(dim=-1, keepdim=True)
++        projection = dots * d
+         return output - weight * projection
+ 
+     return hook
+@@ -94,22 +93,27 @@ def register_abliteration_hooks(
+ 
+     handles = []
+     modules_list = _get_modules_for_hooks(model)
++    skipped_distance = 0
++    skipped_weight = 0
+ 
+     for module, layer_index in modules_list:
+         distance = abs(layer_index - max_weight_pos_abs)
+         if distance > min_weight_dist_abs:
++            skipped_distance += 1
+             continue
+         layer_weight = max_weight + (distance / min_weight_dist_abs) * (min_weight - max_weight)
+         effective_weight = alpha * layer_weight
+         if effective_weight < 1e-8:
++            skipped_weight += 1
+             continue
+ 
+-        # combined_direction[layer_index+1] for layer l (index 0 is embeddings)
+         direction = combined_direction[layer_index + 1]
+         hook_fn = _create_abliteration_hook(direction, effective_weight, device)
+         handle = module.register_forward_hook(hook_fn)
+         handles.append(handle)
+ 
++    print(f"      [hooks] {len(handles)} hooks registered out of {len(modules_list)} modules "
++          f"(skipped: {skipped_distance} by distance, {skipped_weight} by weight)")
+     return handles
+ 
+ 
+diff --git a/baselines/graph_grpo/log_probs.py b/baselines/graph_grpo/log_probs.py
+index 5bf5490..3793f05 100644
+--- a/baselines/graph_grpo/log_probs.py
++++ b/baselines/graph_grpo/log_probs.py
+@@ -5,6 +5,7 @@ Heretic's get_logprobs() only returns log-probs for 1 token.
+ This module computes per-token log-probs for entire (prompt, response) sequences.
+ """
+ 
++import time
+ from typing import List, Tuple
+ 
+ import torch
+@@ -36,8 +37,11 @@ def compute_sequence_log_probs(
+ 
+     all_log_probs = []
+     all_masks = []
++    total_t0 = time.time()
++    n_batches = (len(prompts) + batch_size - 1) // batch_size
++    skipped = 0
+ 
+-    for i in range(0, len(prompts), batch_size):
++    for bi, i in enumerate(range(0, len(prompts), batch_size)):
+         batch_prompts = prompts[i : i + batch_size]
+         batch_responses = responses[i : i + batch_size]
+ 
+@@ -74,6 +78,7 @@ def compute_sequence_log_probs(
+             if response_len <= 0:
+                 batch_log_probs.append(torch.zeros(1, device=device))
+                 batch_masks.append(torch.zeros(1, device=device))
++                skipped += 1
+                 continue
+ 
+             input_ids = full_ids.unsqueeze(0).to(device)
+@@ -103,6 +108,22 @@ def compute_sequence_log_probs(
+         all_log_probs.append(torch.stack(padded_log_probs))
+         all_masks.append(torch.stack(padded_masks))
+ 
+-    log_probs = torch.cat(all_log_probs, dim=0)
+-    response_mask = torch.cat(all_masks, dim=0)
++    global_max_len = max(t.shape[1] for t in all_log_probs)
++    padded_lp = []
++    padded_mk = []
++    for lp, mk in zip(all_log_probs, all_masks):
++        pad = global_max_len - lp.shape[1]
++        if pad > 0:
++            lp = F.pad(lp, (0, pad), value=0.0)
++            mk = F.pad(mk, (0, pad), value=0.0)
++        padded_lp.append(lp)
++        padded_mk.append(mk)
++    log_probs = torch.cat(padded_lp, dim=0)
++    response_mask = torch.cat(padded_mk, dim=0)
++
++    elapsed = time.time() - total_t0
++    n_valid = int(response_mask.sum().item())
++    print(f"      [log_probs] {len(prompts)} sequences in {n_batches} batches, "
++          f"{elapsed:.1f}s, max_len={global_max_len}, valid_tokens={n_valid}"
++          + (f", skipped={skipped}" if skipped else ""))
+     return log_probs, response_mask
+diff --git a/baselines/graph_grpo/reward.py b/baselines/graph_grpo/reward.py
+index fd604ee..f52cf09 100644
+--- a/baselines/graph_grpo/reward.py
++++ b/baselines/graph_grpo/reward.py
+@@ -2,6 +2,7 @@
+ Reward computation: wrapper around evaluate_harmfulness.
+ """
+ 
++import time
+ from typing import Dict, List, Optional
+ 
+ from evaluate.judges import evaluate_harmfulness
+@@ -25,10 +26,15 @@ def compute_reward(
+     Returns:
+         List of float scores (0-4 harmfulness scale)
+     """
++    t0 = time.time()
++    total = len(questions)
+     scores = []
+-    for question, response in zip(questions, responses):
++    empty_count = 0
++    error_count = 0
++    for idx, (question, response) in enumerate(zip(questions, responses)):
+         if not response:
+             scores.append(0.0)
++            empty_count += 1
+             continue
+         try:
+             result = evaluate_harmfulness(
+@@ -39,6 +45,13 @@ def compute_reward(
+             )
+             score = result.get("score")
+             scores.append(float(score) if score is not None else 0.0)
+-        except Exception:
++        except Exception as e:
+             scores.append(0.0)
++            error_count += 1
++        if (idx + 1) % 10 == 0 or (idx + 1) == total:
++            elapsed = time.time() - t0
++            print(f"      [reward] {idx+1}/{total} evaluated ({elapsed:.1f}s)", flush=True)
++
++    if empty_count or error_count:
++        print(f"      [reward] warnings: {empty_count} empty responses, {error_count} errors")
+     return scores
+diff --git a/baselines/graph_grpo/trainer.py b/baselines/graph_grpo/trainer.py
+index 4eb8093..5667cd2 100644
+--- a/baselines/graph_grpo/trainer.py
++++ b/baselines/graph_grpo/trainer.py
+@@ -3,6 +3,7 @@ GRPO-IS training step using verl components.
+ """
+ 
+ import sys
++import time
+ from pathlib import Path
+ from types import SimpleNamespace
+ from typing import Any, Dict, List, Optional
+@@ -94,8 +95,12 @@ def train_grpo_is_step(
+ 
+     extracted_directions_no_grad = [d.detach() if d.requires_grad else d for d in extracted_directions]
+ 
++    step_t0 = time.time()
++    print(f"  [Step 1-2] Rollout from {len(alphas)} behavior policies, {len(questions)} questions each")
++
+     # Step 1 & 2: Rollout from M behavior policies
+-    for alpha in alphas:
++    for ai, alpha in enumerate(alphas):
++        t0 = time.time()
+         with torch.no_grad():
+             combined_direction = direction_weights(extracted_directions_no_grad)
+ 
+@@ -112,22 +117,40 @@ def train_grpo_is_step(
+             n_layers,
+         )
+ 
++        print(f"    Policy {ai+1}/{len(alphas)} (alpha={alpha:.2f}): generating responses...", end=" ", flush=True)
+         responses_raw = model.get_responses_batched(questions)
+         responses = [extract_response_after_think(r) for r in responses_raw]
+         all_responses.append(responses)
++        avg_resp_len = sum(len(r) for r in responses) / max(len(responses), 1)
++        print(f"done ({len(responses)} responses, avg_len={avg_resp_len:.0f} chars)")
++
++        mem_gb = torch.cuda.memory_allocated() / 1e9
++        print(f"    Policy {ai+1}/{len(alphas)}: computing rollout log-probs (GPU mem: {mem_gb:.2f} GB)...", end=" ", flush=True)
++        with torch.no_grad():
++            rollout_lp, rollout_mask = compute_sequence_log_probs(model, questions, responses)
++        print(f"done (shape={list(rollout_lp.shape)}, mean_lp={rollout_lp.sum()/rollout_mask.sum():.4f})")
+ 
+-        rollout_lp, rollout_mask = compute_sequence_log_probs(model, questions, responses)
+         all_rollout_log_probs.append(rollout_lp)
+         all_masks.append(rollout_mask)
+         empty_cache()
++        print(f"    Policy {ai+1}/{len(alphas)} total: {time.time()-t0:.1f}s")
++
++    print(f"  [Step 1-2] Rollout complete: {time.time()-step_t0:.1f}s")
+ 
+     # Step 3: Compute log pi_theta_old (base model)
++    t0 = time.time()
++    print(f"  [Step 3] Computing old log-probs (base model) for {len(alphas)} response sets...")
+     model.reload_model()
+     all_old_log_probs = []
+     for m in range(len(alphas)):
+-        old_lp, _ = compute_sequence_log_probs(model, questions, all_responses[m])
++        mem_gb = torch.cuda.memory_allocated() / 1e9
++        print(f"    Set {m+1}/{len(alphas)}: computing (GPU mem: {mem_gb:.2f} GB)...", end=" ", flush=True)
++        with torch.no_grad():
++            old_lp, _ = compute_sequence_log_probs(model, questions, all_responses[m])
++        print(f"done (shape={list(old_lp.shape)})")
+         all_old_log_probs.append(old_lp)
+     empty_cache()
++    print(f"  [Step 3] Old log-probs complete: {time.time()-t0:.1f}s")
+ 
+     # Flatten: we have M*N responses
+     n_questions = len(questions)
+@@ -135,6 +158,7 @@ def train_grpo_is_step(
+     flat_responses = [r for m in range(n_m) for r in all_responses[m]]
+     flat_questions = [q for m in range(n_m) for q in questions]
+     question_indices = np.array([i for m in range(n_m) for i in range(n_questions)])
++    print(f"  [Flatten] {n_m} policies x {n_questions} questions = {len(flat_responses)} total responses")
+ 
+     # Stack and pad log probs to common max length
+     max_len = max(p.shape[1] for p in all_rollout_log_probs)
+@@ -143,8 +167,11 @@ def train_grpo_is_step(
+     rollout_log_probs = torch.cat([pad_fn(p) for p in all_rollout_log_probs], dim=0)
+     old_log_probs = torch.cat([pad_fn(p) for p in all_old_log_probs], dim=0)
+     response_mask = torch.cat([pad_fn(m) for m in all_masks], dim=0)
++    print(f"  [Flatten] Padded to max_len={max_len}, shapes: rollout={list(rollout_log_probs.shape)}, old={list(old_log_probs.shape)}")
+ 
+     # Step 4: IS weights (verl)
++    t0 = time.time()
++    print(f"  [Step 4] Computing IS weights (clip_ratio={is_clip_ratio})...", end=" ", flush=True)
+     from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_weights
+ 
+     log_ratio = old_log_probs - rollout_log_probs
+@@ -155,16 +182,25 @@ def train_grpo_is_step(
+         rollout_is_threshold=is_clip_ratio,
+     )
+     is_weights = is_weights.detach()
++    seq_is = is_weights.max(dim=-1).values if is_weights.dim() > 1 else is_weights
++    print(f"done ({time.time()-t0:.1f}s)")
++    print(f"    IS weights: mean={seq_is.mean():.4f}, min={seq_is.min():.4f}, max={seq_is.max():.4f}")
+ 
+     # Step 5: Rewards
++    t0 = time.time()
++    print(f"  [Step 5] Computing rewards for {len(flat_responses)} responses (backend={backend})...")
+     scores = compute_reward(flat_questions, flat_responses, classifier_categories, backend)
+     scores_tensor = torch.tensor(scores, dtype=torch.float32, device=device)
+-    token_level_rewards = torch.zeros_like(rollout_log_probs, device=device)
++    print(f"    Rewards: mean={scores_tensor.mean():.3f}, std={scores_tensor.std():.3f}, "
++          f"min={scores_tensor.min():.1f}, max={scores_tensor.max():.1f} ({time.time()-t0:.1f}s)")
++    token_level_rewards = torch.zeros(rollout_log_probs.shape, dtype=torch.float32, device=device)
+     last_valid = (response_mask > 0).sum(dim=-1).long() - 1
+     last_valid = torch.clamp(last_valid, min=0)
+     token_level_rewards.scatter_(1, last_valid.unsqueeze(1), scores_tensor.unsqueeze(1).to(device))
+ 
+     # Step 6: IS-corrected advantages
++    t0 = time.time()
++    print(f"  [Step 6] Computing IS-corrected advantages...", end=" ", flush=True)
+     advantages, returns = compute_grpo_is_advantage(
+         token_level_rewards=token_level_rewards,
+         response_mask=response_mask,
+@@ -172,9 +208,16 @@ def train_grpo_is_step(
+         is_weights=is_weights,
+     )
+     advantages = advantages.detach()
++    valid_adv = advantages[response_mask > 0]
++    print(f"done ({time.time()-t0:.1f}s)")
++    print(f"    Advantages: mean={valid_adv.mean():.4f}, std={valid_adv.std():.4f}, "
++          f"min={valid_adv.min():.4f}, max={valid_adv.max():.4f}")
+ 
+     # Step 7: Policy loss (verl, differentiable)
++    t0 = time.time()
++    print(f"  [Step 7] Computing policy loss (ref_alpha={ref_alpha}, clip={clip_ratio})...")
+     combined_direction = direction_weights(extracted_directions)
++    print(f"    Registering abliteration hooks...", end=" ", flush=True)
+     handles = register_abliteration_hooks(
+         model,
+         combined_direction,
+@@ -185,8 +228,11 @@ def train_grpo_is_step(
+         min_weight,
+         min_weight_distance,
+     )
++    print(f"registered {len(handles)} hooks")
+ 
++    print(f"    Forward pass (differentiable) on {len(flat_responses)} responses...", end=" ", flush=True)
+     log_probs, _ = compute_sequence_log_probs(model, flat_questions, flat_responses)
++    print(f"done (shape={list(log_probs.shape)}, requires_grad={log_probs.requires_grad})")
+     max_lp_len = log_probs.shape[1]
+     if max_lp_len < response_mask.shape[1]:
+         log_probs = torch.nn.functional.pad(log_probs, (0, response_mask.shape[1] - max_lp_len), value=0.0)
+@@ -205,14 +251,24 @@ def train_grpo_is_step(
+         rollout_is_weights=is_weights,
+         config=actor_config,
+     )
++    print(f"    Loss: {loss.item():.6f} ({time.time()-t0:.1f}s)")
++    for k, v in loss_metrics.items():
++        print(f"    {k}: {v}")
+ 
+     # Step 8: Update
++    t0 = time.time()
++    print(f"  [Step 8] Backward + optimizer step...", end=" ", flush=True)
+     optimizer.zero_grad()
+     loss.backward()
+     grad_norm = direction_weights.weights.grad.norm().item() if direction_weights.weights.grad is not None else 0.0
+     optimizer.step()
++    print(f"done ({time.time()-t0:.1f}s)")
++    print(f"    Grad norm: {grad_norm:.6f}")
++    print(f"    Weights norm: {direction_weights.weights.data.norm().item():.6f}")
++    print(f"    Weights range: [{direction_weights.weights.data.min().item():.4f}, {direction_weights.weights.data.max().item():.4f}]")
+ 
+     # Step 9: Off-policy metrics
++    print(f"  [Step 9] Computing off-policy metrics...", end=" ", flush=True)
+     from verl.trainer.ppo.rollout_corr_helper import compute_offpolicy_metrics
+ 
+     offpolicy_metrics = compute_offpolicy_metrics(
+@@ -220,6 +276,14 @@ def train_grpo_is_step(
+         rollout_log_prob=rollout_log_probs,
+         response_mask=response_mask,
+     )
++    print(f"done")
++    for k, v in offpolicy_metrics.items():
++        print(f"    offpolicy/{k}: {v}")
++
++    total_time = time.time() - step_t0
++    print(f"  [TOTAL] Training step completed in {total_time:.1f}s")
++    mem_gb = torch.cuda.memory_allocated() / 1e9
++    print(f"  [TOTAL] GPU memory allocated: {mem_gb:.2f} GB")
+ 
+     metrics = {
+         "mean_reward": float(scores_tensor.mean().item()),
+diff --git a/scripts/run_graph_grpo.sh b/scripts/run_graph_grpo.sh
+index 7941768..34f7df7 100644
+--- a/scripts/run_graph_grpo.sh
++++ b/scripts/run_graph_grpo.sh
+@@ -1,7 +1,7 @@
+ #!/bin/bash
+ 
+ # ---- GPU ----
+-export CUDA_VISIBLE_DEVICES=0,1
++export CUDA_VISIBLE_DEVICES=0
+ 
+ # ---- Model ----
+ export MODEL_NAME="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+@@ -41,7 +41,7 @@ export CLASSIFIER_API_URL="http://localhost:31180/v1/chat/completions"
+ export LLAMAGUARD_MODEL_NAME="meta-llama/Meta-Llama-Guard-2-8B"
+ export LLAMAGUARD_DEVICE="cuda"
+ export LLAMAGUARD_DTYPE="bfloat16"
+-# export HF_TOKEN="<your_hf_token>"
++export HF_TOKEN="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"
+ 
+ # ---- Locality evaluation ----
+ export EVALUATE_LOCALITY="true"
+diff --git a/wandb/latest-run b/wandb/latest-run
+index 995f074..4c95276 120000
+--- a/wandb/latest-run
++++ b/wandb/latest-run
+@@ -1 +1 @@
+-run-20260317_101145-ohw7z76p
+\ No newline at end of file
++run-20260318_133433-uquphanz
+\ No newline at end of file

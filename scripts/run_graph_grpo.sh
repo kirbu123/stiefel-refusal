@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ---- GPU ----
-export CUDA_VISIBLE_DEVICES=0,1
+export CUDA_VISIBLE_DEVICES=2
 
 # ---- Model ----
 export MODEL_NAME="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
@@ -41,7 +41,7 @@ export CLASSIFIER_API_URL="http://localhost:31180/v1/chat/completions"
 export LLAMAGUARD_MODEL_NAME="meta-llama/Meta-Llama-Guard-2-8B"
 export LLAMAGUARD_DEVICE="cuda"
 export LLAMAGUARD_DTYPE="bfloat16"
-# export HF_TOKEN="<your_hf_token>"
+export HF_TOKEN="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"
 
 # ---- Locality evaluation ----
 export EVALUATE_LOCALITY="true"

@@ -1,0 +1,22 @@
+diff --git a/scripts/run_graph_grpo.sh b/scripts/run_graph_grpo.sh
+index 7941768..f50cd72 100644
+--- a/scripts/run_graph_grpo.sh
++++ b/scripts/run_graph_grpo.sh
+@@ -1,7 +1,7 @@
+ #!/bin/bash
+ 
+ # ---- GPU ----
+-export CUDA_VISIBLE_DEVICES=0,1
++export CUDA_VISIBLE_DEVICES=1,2,3
+ 
+ # ---- Model ----
+ export MODEL_NAME="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+diff --git a/wandb/latest-run b/wandb/latest-run
+index 995f074..7e0669c 120000
+--- a/wandb/latest-run
++++ b/wandb/latest-run
+@@ -1 +1 @@
+-run-20260317_101145-ohw7z76p
+\ No newline at end of file
++run-20260317_112634-1a6g7eqj
+\ No newline at end of file

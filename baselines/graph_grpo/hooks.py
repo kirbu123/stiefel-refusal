@@ -22,10 +22,9 @@ def _create_abliteration_hook(
     direction = direction.to(device)
 
     def hook(module, input, output):
-        # output shape: (..., hidden_size), direction: (hidden_size,)
-        # projection: (output · d) * d
-        dots = (output * direction).sum(dim=-1, keepdim=True)
-        projection = dots * direction
+        d = direction.to(dtype=output.dtype)
+        dots = (output * d).sum(dim=-1, keepdim=True)
+        projection = dots * d
         return output - weight * projection
 
     return hook
@@ -94,22 +93,27 @@ def register_abliteration_hooks(
 
     handles = []
     modules_list = _get_modules_for_hooks(model)
+    skipped_distance = 0
+    skipped_weight = 0
 
     for module, layer_index in modules_list:
         distance = abs(layer_index - max_weight_pos_abs)
         if distance > min_weight_dist_abs:
+            skipped_distance += 1
             continue
         layer_weight = max_weight + (distance / min_weight_dist_abs) * (min_weight - max_weight)
         effective_weight = alpha * layer_weight
         if effective_weight < 1e-8:
+            skipped_weight += 1
             continue
 
-        # combined_direction[layer_index+1] for layer l (index 0 is embeddings)
         direction = combined_direction[layer_index + 1]
         hook_fn = _create_abliteration_hook(direction, effective_weight, device)
         handle = module.register_forward_hook(hook_fn)
         handles.append(handle)
 
+    print(f"      [hooks] {len(handles)} hooks registered out of {len(modules_list)} modules "
+          f"(skipped: {skipped_distance} by distance, {skipped_weight} by weight)")
     return handles
 
 

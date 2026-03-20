@@ -1,0 +1,59 @@
+diff --git a/baselines/graph_grpo/trainer.py b/baselines/graph_grpo/trainer.py
+index 4eb8093..441a33d 100644
+--- a/baselines/graph_grpo/trainer.py
++++ b/baselines/graph_grpo/trainer.py
+@@ -116,7 +116,23 @@ def train_grpo_is_step(
+         responses = [extract_response_after_think(r) for r in responses_raw]
+         all_responses.append(responses)
+ 
+-        rollout_lp, rollout_mask = compute_sequence_log_probs(model, questions, responses)
++        # #region agent log
++        import json as _json, time as _time
++        _lp = "/home/rinya/LLM_editing/.cursor/debug-ebb21c.log"
++        _mem = torch.cuda.memory_allocated() / 1e9
++        _res = torch.cuda.memory_reserved() / 1e9
++        with open(_lp, "a") as _f: _f.write(_json.dumps({"sessionId":"ebb21c","hypothesisId":"A","location":"trainer.py:rollout_before_logprobs","message":"mem before rollout log_probs","data":{"alpha":alpha,"mem_alloc_gb":round(_mem,2),"mem_reserved_gb":round(_res,2),"grad_enabled":torch.is_grad_enabled()},"timestamp":int(_time.time()*1000)})+"\n")
++        # #endregion
++
++        with torch.no_grad():
++            rollout_lp, rollout_mask = compute_sequence_log_probs(model, questions, responses)
++
++        # #region agent log
++        _mem2 = torch.cuda.memory_allocated() / 1e9
++        _res2 = torch.cuda.memory_reserved() / 1e9
++        with open(_lp, "a") as _f: _f.write(_json.dumps({"sessionId":"ebb21c","hypothesisId":"A","location":"trainer.py:rollout_after_logprobs","message":"mem after rollout log_probs","data":{"alpha":alpha,"mem_alloc_gb":round(_mem2,2),"mem_reserved_gb":round(_res2,2),"lp_requires_grad":rollout_lp.requires_grad},"timestamp":int(_time.time()*1000)})+"\n")
++        # #endregion
++
+         all_rollout_log_probs.append(rollout_lp)
+         all_masks.append(rollout_mask)
+         empty_cache()
+@@ -125,7 +141,19 @@ def train_grpo_is_step(
+     model.reload_model()
+     all_old_log_probs = []
+     for m in range(len(alphas)):
+-        old_lp, _ = compute_sequence_log_probs(model, questions, all_responses[m])
++        # #region agent log
++        _mem = torch.cuda.memory_allocated() / 1e9
++        with open(_lp, "a") as _f: _f.write(_json.dumps({"sessionId":"ebb21c","hypothesisId":"B","location":"trainer.py:old_before_logprobs","message":"mem before old log_probs","data":{"m":m,"mem_alloc_gb":round(_mem,2),"grad_enabled":torch.is_grad_enabled()},"timestamp":int(_time.time()*1000)})+"\n")
++        # #endregion
++
++        with torch.no_grad():
++            old_lp, _ = compute_sequence_log_probs(model, questions, all_responses[m])
++
++        # #region agent log
++        _mem2 = torch.cuda.memory_allocated() / 1e9
++        with open(_lp, "a") as _f: _f.write(_json.dumps({"sessionId":"ebb21c","hypothesisId":"B","location":"trainer.py:old_after_logprobs","message":"mem after old log_probs","data":{"m":m,"mem_alloc_gb":round(_mem2,2),"lp_requires_grad":old_lp.requires_grad},"timestamp":int(_time.time()*1000)})+"\n")
++        # #endregion
++
+         all_old_log_probs.append(old_lp)
+     empty_cache()
+ 
+diff --git a/wandb/latest-run b/wandb/latest-run
+index 995f074..469e374 120000
+--- a/wandb/latest-run
++++ b/wandb/latest-run
+@@ -1 +1 @@
+-run-20260317_101145-ohw7z76p
+\ No newline at end of file
++run-20260317_154807-4ob632x0
+\ No newline at end of file

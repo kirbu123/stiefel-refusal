@@ -274,6 +274,17 @@ class LlamaGuardEvaluator:
 _LLAMAGUARD_EVALUATOR: Optional[LlamaGuardEvaluator] = None
 
 
+def unload_llamaguard_evaluator() -> None:
+    """Free LlamaGuard model from GPU memory."""
+    global _LLAMAGUARD_EVALUATOR
+    if _LLAMAGUARD_EVALUATOR is not None:
+        del _LLAMAGUARD_EVALUATOR.model
+        del _LLAMAGUARD_EVALUATOR.tokenizer
+        _LLAMAGUARD_EVALUATOR = None
+        import gc; gc.collect()
+        torch.cuda.empty_cache()
+
+
 def get_llamaguard_evaluator() -> LlamaGuardEvaluator:
     """Lazily create and cache a single evaluator instance."""
     global _LLAMAGUARD_EVALUATOR
