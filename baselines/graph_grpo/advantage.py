@@ -47,6 +47,9 @@ def compute_grpo_is_advantage(
         returns: (bs, response_length)
     """
     scores = token_level_rewards.sum(dim=-1)
+    print(f"      [advantage] {scores.shape[0]} responses, "
+          f"{len(set(index.tolist()))} unique groups, "
+          f"scores: mean={scores.mean():.3f}, std={scores.std():.3f}")
 
     id2score = defaultdict(list)
     id2is = defaultdict(list)

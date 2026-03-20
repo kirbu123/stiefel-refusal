@@ -5,6 +5,7 @@ Heretic's get_logprobs() only returns log-probs for 1 token.
 This module computes per-token log-probs for entire (prompt, response) sequences.
 """
 
+import time
 from typing import List, Tuple
 
 import torch
@@ -36,8 +37,11 @@ def compute_sequence_log_probs(
 
     all_log_probs = []
     all_masks = []
+    total_t0 = time.time()
+    n_batches = (len(prompts) + batch_size - 1) // batch_size
+    skipped = 0
 
-    for i in range(0, len(prompts), batch_size):
+    for bi, i in enumerate(range(0, len(prompts), batch_size)):
         batch_prompts = prompts[i : i + batch_size]
         batch_responses = responses[i : i + batch_size]
 
@@ -74,6 +78,7 @@ def compute_sequence_log_probs(
             if response_len <= 0:
                 batch_log_probs.append(torch.zeros(1, device=device))
                 batch_masks.append(torch.zeros(1, device=device))
+                skipped += 1
                 continue
 
             input_ids = full_ids.unsqueeze(0).to(device)
@@ -103,6 +108,22 @@ def compute_sequence_log_probs(
         all_log_probs.append(torch.stack(padded_log_probs))
         all_masks.append(torch.stack(padded_masks))
 
-    log_probs = torch.cat(all_log_probs, dim=0)
-    response_mask = torch.cat(all_masks, dim=0)
+    global_max_len = max(t.shape[1] for t in all_log_probs)
+    padded_lp = []
+    padded_mk = []
+    for lp, mk in zip(all_log_probs, all_masks):
+        pad = global_max_len - lp.shape[1]
+        if pad > 0:
+            lp = F.pad(lp, (0, pad), value=0.0)
+            mk = F.pad(mk, (0, pad), value=0.0)
+        padded_lp.append(lp)
+        padded_mk.append(mk)
+    log_probs = torch.cat(padded_lp, dim=0)
+    response_mask = torch.cat(padded_mk, dim=0)
+
+    elapsed = time.time() - total_t0
+    n_valid = int(response_mask.sum().item())
+    print(f"      [log_probs] {len(prompts)} sequences in {n_batches} batches, "
+          f"{elapsed:.1f}s, max_len={global_max_len}, valid_tokens={n_valid}"
+          + (f", skipped={skipped}" if skipped else ""))
     return log_probs, response_mask
