@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from config import MMLU_CONFIG, PROJECT_ROOT, RESULTS_DIR
+from data_utils import extract_response_after_think
 
 
 CHOICE_LETTERS = ("A", "B", "C", "D")
@@ -40,7 +41,7 @@ def normalize_mmlu_config(config: dict[str, Any] | None = None) -> dict[str, Any
     normalized["mode"] = str(normalized.get("mode", "zero_shot")).lower()
     normalized["n_shots"] = int(normalized.get("n_shots", 5))
     normalized["sample_seed"] = int(normalized.get("sample_seed", 42))
-    normalized["max_new_tokens"] = int(normalized.get("max_new_tokens", 4))
+    normalized["max_new_tokens"] = int(normalized.get("max_new_tokens", 32))
     normalized["store_predictions"] = bool(normalized.get("store_predictions", False))
 
     sample_size = normalized.get("sample_size")
@@ -89,7 +90,10 @@ def parse_choice_letter(text: str) -> str | None:
     if not text:
         return None
 
-    stripped = text.strip().upper()
+    cleaned = extract_response_after_think(text)
+    cleaned = re.sub(r"<think>.*?</think>", " ", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"</?think>", " ", cleaned, flags=re.IGNORECASE)
+    stripped = cleaned.strip().upper()
     if len(stripped) == 1 and stripped in CHOICE_LETTERS:
         return stripped[:1]
 
@@ -199,12 +203,12 @@ def build_mmlu_prompt(
     subject = _extract_subject(record, "all")
     intro = (
         f"The following are multiple choice questions about {subject}. "
-        "Respond with only the letter A, B, C, or D."
+        "Respond with only the letter A, B, C, or D. Do not include reasoning or <think> tags."
     )
     if mode == "few_shot":
         intro = (
             f"The following are multiple choice questions (with answers) about {subject}. "
-            "Respond to the final question with only the letter A, B, C, or D."
+            "Respond to the final question with only the letter A, B, C, or D. Do not include reasoning or <think> tags."
         )
 
     blocks = [intro]
