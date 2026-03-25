@@ -127,6 +127,28 @@ def apply_config_to_env(config: dict[str, Any], model_name: str | None = None):
     if evl.get("llamaguard_dtype"):
         os.environ["LLAMAGUARD_DTYPE"] = evl["llamaguard_dtype"]
 
+    mmlu = config.get("mmlu", {})
+    if mmlu.get("enabled") is not None:
+        os.environ["MMLU_ENABLED"] = str(mmlu["enabled"]).lower()
+    if mmlu.get("dataset"):
+        os.environ["MMLU_DATASET"] = mmlu["dataset"]
+    if mmlu.get("subset"):
+        os.environ["MMLU_SUBSET"] = mmlu["subset"]
+    if mmlu.get("split"):
+        os.environ["MMLU_SPLIT"] = mmlu["split"]
+    if mmlu.get("mode"):
+        os.environ["MMLU_MODE"] = mmlu["mode"]
+    if mmlu.get("n_shots") is not None:
+        os.environ["MMLU_N_SHOTS"] = str(mmlu["n_shots"])
+    if "sample_size" in mmlu:
+        os.environ["MMLU_SAMPLE_SIZE"] = "none" if mmlu["sample_size"] is None else str(mmlu["sample_size"])
+    if mmlu.get("sample_seed") is not None:
+        os.environ["MMLU_SAMPLE_SEED"] = str(mmlu["sample_seed"])
+    if mmlu.get("max_new_tokens") is not None:
+        os.environ["MMLU_MAX_NEW_TOKENS"] = str(mmlu["max_new_tokens"])
+    if mmlu.get("store_predictions") is not None:
+        os.environ["MMLU_STORE_PREDICTIONS"] = str(mmlu["store_predictions"]).lower()
+
 
 def print_config_summary(config: dict[str, Any], model_name: str):
     """Display a summary of the loaded configuration."""
@@ -163,3 +185,9 @@ def print_config_summary(config: dict[str, Any], model_name: str):
         print(f"  [bold]Evaluation:[/]")
         print(f"    backend: {evl.get('backend', 'N/A')}")
         print(f"    evaluate_locality: {evl.get('evaluate_locality', 'N/A')}")
+
+    mmlu = config.get("mmlu", {})
+    if mmlu:
+        print("  [bold]MMLU:[/]")
+        for k, v in mmlu.items():
+            print(f"    {k}: {v}")

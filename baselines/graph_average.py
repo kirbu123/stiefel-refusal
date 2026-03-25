@@ -29,12 +29,17 @@ torch.set_grad_enabled(False)
 from config import (
     MODEL_NAME, CATEGORIES, GOOD_PROMPTS_DATASET, RESULTS_DIR,
     JUDGE_API_URL, CLASSIFIER_API_URL, JUDGE_MODEL, FEW_SHOTS_PATH,
-    HARMLESS_EVAL_DATASET, EVALUATE_LOCALITY, GRAPH_FILE,
+    HARMLESS_EVAL_DATASET, EVALUATE_LOCALITY, GRAPH_FILE, MMLU_CONFIG,
 )
 from data_utils import load_all_datasets_with_categories, extract_response_after_think
 from refusal_directions import compute_refusal_direction
 from model_utils import apply_abliteration_with_hyperparams
 from evaluate.metrics import evaluate_responses, evaluate_locality
+from evaluate.mmlu import (
+    build_mmlu_result,
+    evaluate_model_on_mmlu,
+    get_cached_or_evaluate_original_mmlu,
+)
 from visualization.plots import (
     plot_harmfulness_heatmap, plot_locality_heatmap,
     plot_harmfulness_distribution, plot_locality_distribution,
@@ -125,6 +130,17 @@ def main():
         print("\nLoading harmless questions for locality...")
         harmless_eval_prompts = load_prompts(HARMLESS_EVAL_DATASET)
         print(f"Loaded {len(harmless_eval_prompts)} harmless questions")
+
+    original_mmlu_result = None
+    if MMLU_CONFIG["enabled"]:
+        print("\nEvaluating original model on MMLU...")
+        original_mmlu_result = get_cached_or_evaluate_original_mmlu(
+            model,
+            model_name=MODEL_NAME,
+            config=MMLU_CONFIG,
+        )
+        if original_mmlu_result is not None:
+            print(f"Original MMLU accuracy: {original_mmlu_result['summary']['accuracy']:.4f}")
 
     param_names = list(HYPERPARAMS.keys())
     param_values = list(HYPERPARAMS.values())
@@ -217,6 +233,24 @@ def main():
                 modified_harmless_responses = [extract_response_after_think(resp) for resp in modified_harmless_responses_raw]
                 print(f"    Got {len(modified_harmless_responses)} modified responses for harmless questions")
 
+            category_safe_name = category_name.replace('/', '_').replace(' ', '_')
+            mmlu_block = None
+            if MMLU_CONFIG["enabled"] and original_mmlu_result is not None:
+                print("    Evaluating modified model on MMLU...")
+                modified_mmlu_result = evaluate_model_on_mmlu(model, MMLU_CONFIG)
+                mmlu_block = build_mmlu_result(
+                    config=MMLU_CONFIG,
+                    original_result=original_mmlu_result,
+                    modified_result=modified_mmlu_result,
+                    method_results_dir=BASELINE_RESULTS_DIR,
+                    detail_prefix=f"mmlu_{category_safe_name}_{param_idx}",
+                )
+                if mmlu_block is not None:
+                    print(
+                        f"    MMLU accuracy original -> modified: "
+                        f"{mmlu_block['original']['accuracy']:.4f} -> {mmlu_block['modified']['accuracy']:.4f}"
+                    )
+
             original_scores, original_score_data_list = evaluate_responses(
                 category_questions, original_responses, classifier_categories,
                 description=f"original responses (experiment {param_key})",
@@ -273,8 +307,9 @@ def main():
                 }
 
             category_results[param_key]["timestamp"] = datetime.now().isoformat()
+            if mmlu_block is not None:
+                category_results[param_key]["mmlu"] = mmlu_block
 
-            category_safe_name = category_name.replace('/', '_').replace(' ', '_')
             answers_file = ANSWERS_DIR / f"answers_{category_safe_name}_{param_key}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
 
             answers_data = {
@@ -292,6 +327,8 @@ def main():
                     "modified_evaluations": modified_score_data_list,
                 },
             }
+            if mmlu_block is not None:
+                answers_data["mmlu"] = mmlu_block
 
             if EVALUATE_LOCALITY:
                 answers_data["harmless_questions"] = {

@@ -137,6 +137,9 @@ def summarize_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
         harmless = result.get("harmless_questions", {})
         avg_locality = harmless.get("average_locality_change")
+        mmlu = result.get("mmlu", {})
+        mmlu_original_accuracy = mmlu.get("original", {}).get("accuracy")
+        mmlu_modified_accuracy = mmlu.get("modified", {}).get("accuracy")
 
         summaries.append({
             "category": category,
@@ -144,6 +147,8 @@ def summarize_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "param_key": param_key,
             "mean_score": mean_score,
             "avg_locality_change": avg_locality,
+            "mmlu_original_accuracy": mmlu_original_accuracy,
+            "mmlu_modified_accuracy": mmlu_modified_accuracy,
             "n_scores": len(modified_scores),
             "source_file": result.get("_source_file", ""),
             "raw": result,

@@ -414,6 +414,11 @@ def post_process_menu(
             label += f"Mean score: {s['mean_score']:.2f} | "
         if s["avg_locality_change"] is not None:
             label += f"Locality change: {s['avg_locality_change']:+.2f} | "
+        if s["mmlu_original_accuracy"] is not None and s["mmlu_modified_accuracy"] is not None:
+            label += (
+                f"MMLU: {s['mmlu_original_accuracy']:.2f} -> "
+                f"{s['mmlu_modified_accuracy']:.2f} | "
+            )
         if s["param_key"]:
             label += f"Params: {s['param_key']}"
         elif s["hyperparams"]:

@@ -38,6 +38,7 @@ from config import (
     MODEL_NAME, CATEGORIES, GOOD_PROMPTS_DATASET, RESULTS_DIR,
     GRPO_CONFIG, ABLITERATION_PARAMS, FEW_SHOTS_PATH,
     HARMLESS_EVAL_DATASET, EVALUATE_LOCALITY, WEIGHTS_INIT_TYPE, GRAPH_FILE, EVALUATION_BACKEND,
+    MMLU_CONFIG,
 )
 from data_utils import load_all_datasets_with_categories, extract_response_after_think
 from refusal_directions import (
@@ -46,6 +47,11 @@ from refusal_directions import (
 from model_utils import LearnableDirectionWeights, apply_abliteration_with_hyperparams
 from training import train_grpo_epoch
 from evaluate.judges import evaluate_harmfulness
+from evaluate.mmlu import (
+    build_mmlu_result,
+    evaluate_model_on_mmlu,
+    get_cached_or_evaluate_original_mmlu,
+)
 
 
 def _fmt(v: float) -> str:
@@ -289,6 +295,17 @@ def main():
 
     n_layers = len(model.get_layers())
     print(f"Number of layers: {n_layers}")
+
+    original_mmlu_result = None
+    if MMLU_CONFIG["enabled"]:
+        print("\nEvaluating original model on MMLU...")
+        original_mmlu_result = get_cached_or_evaluate_original_mmlu(
+            model,
+            model_name=MODEL_NAME,
+            config=MMLU_CONFIG,
+        )
+        if original_mmlu_result is not None:
+            print(f"Original MMLU accuracy: {original_mmlu_result['summary']['accuracy']:.4f}")
 
     print("Loading good prompts...")
     good_prompts = load_prompts(GOOD_PROMPTS_DATASET)
@@ -541,6 +558,23 @@ def main():
         n_layers,
     )
 
+    mmlu_block = None
+    if MMLU_CONFIG["enabled"] and original_mmlu_result is not None:
+        print("Evaluating modified model on MMLU...")
+        modified_mmlu_result = evaluate_model_on_mmlu(model, MMLU_CONFIG)
+        mmlu_block = build_mmlu_result(
+            config=MMLU_CONFIG,
+            original_result=original_mmlu_result,
+            modified_result=modified_mmlu_result,
+            method_results_dir=GRPO_RESULTS_DIR,
+            detail_prefix="mmlu_graph_grpo_old_final",
+        )
+        if mmlu_block is not None:
+            print(
+                f"MMLU accuracy original -> modified: "
+                f"{mmlu_block['original']['accuracy']:.4f} -> {mmlu_block['modified']['accuracy']:.4f}"
+            )
+
     print("Getting final responses...")
     final_responses_raw = model.get_responses_batched(category_questions)
     final_responses = [extract_response_after_think(resp) for resp in final_responses_raw]
@@ -703,6 +737,8 @@ def main():
         },
         "timestamp": datetime.now().isoformat(),
     }
+    if mmlu_block is not None:
+        answers_data["mmlu"] = mmlu_block
 
     if EVALUATE_LOCALITY:
         answers_data["locality_evaluation"] = {
