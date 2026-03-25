@@ -32,3 +32,15 @@ classifier_api_url = "http://localhost:31180/v1/chat/completions"
 llamaguard_model_name = "meta-llama/Meta-Llama-Guard-2-8B"
 llamaguard_device = "cuda"
 llamaguard_dtype = "bfloat16"
+
+[mmlu]
+enabled = true
+dataset = "cais/mmlu"
+subset = "all"
+split = "test"
+mode = "zero_shot"
+n_shots = 5
+sample_size = 100
+sample_seed = 42
+max_new_tokens = 4
+store_predictions = false

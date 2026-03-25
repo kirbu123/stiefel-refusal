@@ -37,6 +37,8 @@ python -m cli
    - **Generate plots** -- harmfulness/locality heatmaps and distribution histograms
    - **Chat** -- interactive chat with the edited model
 
+Every run can also compute MMLU accuracy before and after editing. For grid-search methods, the original-model MMLU baseline is computed once and cached, while post-edit MMLU is stored per saved configuration.
+
 ### Configuration Files
 
 Each method has a default TOML config in `configs/`:
@@ -71,9 +73,43 @@ min_weight_distance = [0.3]
 [evaluation]
 backend = "llamaguard"
 evaluate_locality = true
+
+[mmlu]
+enabled = true
+dataset = "cais/mmlu"
+subset = "all"
+split = "test"
+mode = "zero_shot"
+n_shots = 5
+sample_size = 100
+sample_seed = 42
+max_new_tokens = 4
+store_predictions = false
 ```
 
 The model name provided interactively always overrides the value in the config file.
+
+### MMLU Configuration
+
+Each config file can include an optional `[mmlu]` section:
+
+- `enabled` -- turn MMLU evaluation on or off
+- `dataset` -- Hugging Face dataset ID, default `cais/mmlu`
+- `subset` -- `"all"` for all subjects, or a single subject config
+- `split` -- evaluation split, default `test`
+- `mode` -- `zero_shot` or `few_shot`
+- `n_shots` -- number of demonstrations for `few_shot`
+- `sample_size` -- integer sample limit for fast runs, or `null` for full MMLU
+- `sample_seed` -- deterministic sampling seed
+- `max_new_tokens` -- generation budget for answer letters
+- `store_predictions` -- when `true`, store per-example predictions in `results/<method>/mmlu/`
+
+Notes:
+
+- `sample_size = 100` is the default fast path for regular experiments.
+- Set `sample_size = null` to evaluate on the full selected MMLU split.
+- `zero_shot` asks the model to answer one question with `A/B/C/D`.
+- `few_shot` prepends demonstrations from the corresponding MMLU `dev` split.
 
 ## Project Structure
 
@@ -122,6 +158,7 @@ python -m baselines.graph_grpo_old
 |---|---|
 | `judges.py` | Core scoring functions: `evaluate_harmfulness_with_local_judge()` (LLM-as-a-Judge, 0-4 scale) and `classify_question_category_with_local_llm()` |
 | `metrics.py` | Batch helpers: `evaluate_responses()` scores a list of question-response pairs; `evaluate_locality()` measures harmfulness change on harmless questions before/after modification |
+| `mmlu.py` | Shared MMLU evaluation helpers: prompt building, deterministic sampling, caching, and result serialization |
 | `runner.py` | Standalone script to evaluate saved ablation results from JSON files |
 
 ### `visualization/`
@@ -195,6 +232,7 @@ Each baseline writes outputs to `results/<method_name>/` with the following stru
 results/
 ├── graph_average/
 │   ├── answers/                          # One JSON per hyperparameter combination
+│   ├── mmlu/                             # Optional per-example MMLU predictions
 │   ├── harmfulness/
 │   │   ├── distribution_plots/
 │   │   └── heatmap_plots/
@@ -214,6 +252,18 @@ results/
     ├── harmfulness/ ...
     └── locality/ ...
 ```
+
+Saved answer files can now include a top-level `mmlu` block with:
+
+- `original` -- baseline accuracy before editing
+- `modified` -- accuracy after editing
+- `delta_accuracy` -- `modified - original`
+- `config` -- the exact MMLU settings used
+- `details_file` -- optional JSON with per-example predictions
+
+## Verification Notes
+
+The code changes are intended to be verified with lightweight unit tests and static checks only. Long-running editing methods are not required for validating the MMLU integration.
 
 ## Credits
 

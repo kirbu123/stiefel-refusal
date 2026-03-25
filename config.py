@@ -82,3 +82,18 @@ EVALUATE_LOCALITY = os.getenv("EVALUATE_LOCALITY", "true").lower() in ("true", "
 EVALUATION_BACKEND = os.getenv("EVALUATION_BACKEND", "local_llm_judge")
 
 WEIGHTS_INIT_TYPE = os.getenv("WEIGHTS_INIT_TYPE", "zero")
+
+_mmlu_sample_size = os.getenv("MMLU_SAMPLE_SIZE", "100").strip()
+
+MMLU_CONFIG = {
+    "enabled": os.getenv("MMLU_ENABLED", "true").lower() in ("true", "1", "yes"),
+    "dataset": os.getenv("MMLU_DATASET", "cais/mmlu"),
+    "subset": os.getenv("MMLU_SUBSET", "all"),
+    "split": os.getenv("MMLU_SPLIT", "test"),
+    "mode": os.getenv("MMLU_MODE", "zero_shot"),
+    "n_shots": int(os.getenv("MMLU_N_SHOTS", 5)),
+    "sample_size": None if _mmlu_sample_size.lower() in ("", "none", "null", "all") else int(_mmlu_sample_size),
+    "sample_seed": int(os.getenv("MMLU_SAMPLE_SEED", 42)),
+    "max_new_tokens": int(os.getenv("MMLU_MAX_NEW_TOKENS", 4)),
+    "store_predictions": os.getenv("MMLU_STORE_PREDICTIONS", "false").lower() in ("true", "1", "yes"),
+}
