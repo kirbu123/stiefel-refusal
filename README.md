@@ -101,7 +101,7 @@ Each config file can include an optional `[mmlu]` section:
 - `n_shots` -- number of demonstrations for `few_shot`
 - `sample_size` -- integer sample limit for fast runs, or `null` for full MMLU
 - `sample_seed` -- deterministic sampling seed
-- `max_new_tokens` -- generation budget for answer letters
+- `max_new_tokens` -- generation budget for answer letters, default `32` to give reasoning models enough room to reach the final choice
 - `store_predictions` -- when `true`, store per-example predictions in `results/<method>/mmlu/`
 
 Notes:
@@ -110,6 +110,7 @@ Notes:
 - Set `sample_size = null` to evaluate on the full selected MMLU split.
 - `zero_shot` asks the model to answer one question with `A/B/C/D`.
 - `few_shot` prepends demonstrations from the corresponding MMLU `dev` split.
+- For reasoning models that emit `<think>...</think>`, MMLU parsing strips the thinking block before extracting the final answer letter.
 
 ## Project Structure
 
