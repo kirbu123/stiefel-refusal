@@ -198,7 +198,8 @@ def main():
             extracted_directions=extracted_directions,
             model=model,
             questions=category_questions,
-            alphas=GRPO_CONFIG["alphas"],
+            n_groups=GRPO_CONFIG["n_groups"],
+            noise_scale=GRPO_CONFIG["noise_scale"],
             abliteration_params=ABLITERATION_PARAMS,
             optimizer=optimizer,
             classifier_categories=classifier_categories,
@@ -225,8 +226,10 @@ def main():
     model.reload_model()
     apply_abliteration_with_hyperparams(
         model, final_direction,
-        ABLITERATION_PARAMS["max_weight"], ABLITERATION_PARAMS["max_weight_position"],
-        ABLITERATION_PARAMS["min_weight"], ABLITERATION_PARAMS["min_weight_distance"],
+        ABLITERATION_PARAMS["max_weight"] * GRPO_CONFIG["ref_alpha"],
+        ABLITERATION_PARAMS["max_weight_position"],
+        ABLITERATION_PARAMS["min_weight"] * GRPO_CONFIG["ref_alpha"],
+        ABLITERATION_PARAMS["min_weight_distance"],
         n_layers,
     )
 

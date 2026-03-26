@@ -47,6 +47,28 @@ class LearnableDirectionWeights(torch.nn.Module):
             init_weights = torch.randn(n_directions, n_layers + 1, hidden_size) * init_scale
         
         self.weights = torch.nn.Parameter(init_weights)
+
+    def combine_with_weights(
+        self,
+        refusal_directions: List[torch.Tensor],
+        weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute a weighted sum of refusal directions using an arbitrary weight tensor.
+
+        Args:
+            refusal_directions: List of tensors (n_layers+1, hidden_size)
+            weights: Tensor with shape (n_directions, n_layers+1, hidden_size)
+
+        Returns:
+            Weighted, layer-wise normalized sum with shape (n_layers+1, hidden_size)
+        """
+        directions_tensor = torch.stack(refusal_directions, dim=0)
+        weights = weights.to(device=directions_tensor.device, dtype=directions_tensor.dtype)
+        weighted_directions = weights * directions_tensor
+        combined_direction = weighted_directions.sum(dim=0)
+        combined_direction = F.normalize(combined_direction, p=2, dim=1)
+        return combined_direction
     
     def forward(self, refusal_directions: List[torch.Tensor]) -> torch.Tensor:
         """
@@ -58,12 +80,7 @@ class LearnableDirectionWeights(torch.nn.Module):
         Returns:
             Weighted sum (n_layers+1, hidden_size)
         """
-        directions_tensor = torch.stack(refusal_directions, dim=0)
-        weighted_directions = self.weights * directions_tensor
-        combined_direction = weighted_directions.sum(dim=0)
-        combined_direction = F.normalize(combined_direction, p=2, dim=1)
-        
-        return combined_direction
+        return self.combine_with_weights(refusal_directions, self.weights)
 
 
 def apply_abliteration_with_hyperparams(

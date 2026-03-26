@@ -10,11 +10,12 @@ export MODEL_NAME="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 export GRAPH_FILE="graphs/physical harm_wordnet_graph_actions_terms.txt"
 
 # ---- GRPO-IS training hyperparameters ----
+export GRPO_N_GROUPS=4
 export GRPO_N_EPOCHS=10
 export GRPO_LEARNING_RATE=1e-3
+export GRPO_NOISE_SCALE=0.1
 
-# ---- GRPO-IS specific: predefined alpha coefficients for M behavior policies ----
-export GRPO_ALPHAS="3.0,3.0,3.0,3.0"
+# ---- GRPO-IS specific: shared intervention scale for all sampled W rollout policies ----
 export GRPO_REF_ALPHA=1.0
 export IS_CLIP_RATIO=5.0
 export GRPO_CLIP_RATIO=0.2
