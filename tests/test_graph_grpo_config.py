@@ -41,6 +41,7 @@ class TestGraphGrpoConfig(unittest.TestCase):
 
         self.assertIn("GRPO_N_GROUPS", script_text)
         self.assertIn("GRPO_NOISE_SCALE", script_text)
+        self.assertIn("DEBUG=false", script_text)
         self.assertNotIn("GRPO_ALPHAS", script_text)
 
 
