@@ -51,6 +51,17 @@ class TestMMLU(unittest.TestCase):
         self.assertIn("Answer: B", few_shot_prompt)
         self.assertTrue(few_shot_prompt.strip().endswith("Answer:"))
 
+    def test_normalize_mmlu_config_uses_notebook_style_defaults(self):
+        normalized = mmlu.normalize_mmlu_config()
+
+        self.assertEqual(normalized["mode"], "zero_shot")
+        self.assertEqual(normalized["answer_mode"], "generate")
+        self.assertEqual(normalized["n_shots"], 0)
+        self.assertEqual(normalized["sample_size"], 100)
+        self.assertEqual(normalized["sample_seed"], 42)
+        self.assertEqual(normalized["max_new_tokens"], 2048)
+        self.assertTrue(normalized["store_predictions"])
+
     def test_prepare_mmlu_data_sampling_is_deterministic(self):
         eval_records = [make_record(i, subject="math", answer=i % 4) for i in range(10)]
 

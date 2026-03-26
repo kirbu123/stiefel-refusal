@@ -95,6 +95,6 @@ MMLU_CONFIG = {
     "n_shots": int(os.getenv("MMLU_N_SHOTS", 5)),
     "sample_size": None if _mmlu_sample_size.lower() in ("", "none", "null", "all") else int(_mmlu_sample_size),
     "sample_seed": int(os.getenv("MMLU_SAMPLE_SEED", 42)),
-    "max_new_tokens": int(os.getenv("MMLU_MAX_NEW_TOKENS", 32)),
-    "store_predictions": os.getenv("MMLU_STORE_PREDICTIONS", "false").lower() in ("true", "1", "yes"),
+    "max_new_tokens": int(os.getenv("MMLU_MAX_NEW_TOKENS", 2048)),
+    "store_predictions": os.getenv("MMLU_STORE_PREDICTIONS", "true").lower() in ("true", "1", "yes"),
 }
