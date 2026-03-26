@@ -39,6 +39,12 @@ python -m cli
 
 Every run can also compute MMLU accuracy before and after editing. For grid-search methods, the original-model MMLU baseline is computed once and cached, while post-edit MMLU is stored per saved configuration.
 
+For non-interactive runs from a TOML file, use:
+
+```bash
+python -m cli.run_config --method graph_average --config configs/graph_average.toml
+```
+
 ### Configuration Files
 
 Each method has a default TOML config in `configs/`:
@@ -53,6 +59,18 @@ configs/
 └── graph_grpo_old.toml
 ```
 
+Blocking-only grid-search configs live under `configs/blocking/` and write to a separate results root:
+
+```
+configs/blocking/
+├── basic_refusal.toml
+├── topic_ablation.toml
+├── tag_ablation.toml
+└── graph_average.toml
+```
+
+`graph_grpo` and `graph_grpo_old` are intentionally excluded from this blocking pack because they need a reward/objective change, not just sign-inverted abliteration weights.
+
 Example (`configs/graph_average.toml`):
 
 ```toml
@@ -60,6 +78,9 @@ Example (`configs/graph_average.toml`):
 name = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 batch_size = 16
 max_response_length = 2048
+
+[output]
+results_root = "results"
 
 [data]
 graph_file = "graph_build/ph_wordnet_graph_25neighbours_actions_terms.txt"
@@ -93,6 +114,10 @@ The model name provided interactively always overrides the value in the config f
 ### MMLU Configuration
 
 Each config file can include an optional `[mmlu]` section:
+
+Each config file can also include an optional `[output]` section:
+
+- `results_root` -- root directory for experiment outputs; defaults to `results`
 
 - `enabled` -- turn MMLU evaluation on or off
 - `dataset` -- Hugging Face dataset ID, default `cais/mmlu`
@@ -209,6 +234,15 @@ bash scripts/run_tag_ablation.sh
 bash scripts/run_graph_grpo_old.sh
 ```
 
+Blocking scripts are kept separately and write to `results/blocking/<method>/...`:
+
+```bash
+bash scripts/blocking/run_basic_refusal.sh
+bash scripts/blocking/run_topic_ablation.sh
+bash scripts/blocking/run_tag_ablation.sh
+bash scripts/blocking/run_graph_average.sh
+```
+
 Edit the `CUDA_VISIBLE_DEVICES` line inside each script to select the target GPU.
 
 ## Adding New Components
@@ -230,7 +264,7 @@ from data_utils import load_all_datasets_with_categories
 
 ## Results
 
-Each baseline writes outputs to `results/<method_name>/` with the following structure:
+Each baseline writes outputs to `<results_root>/<method_name>/` with the following structure:
 
 ```
 results/
@@ -256,6 +290,8 @@ results/
     ├── harmfulness/ ...
     └── locality/ ...
 ```
+
+For blocking configs, the same structure is created under `results/blocking/`.
 
 Saved answer files can now include a top-level `mmlu` block with:
 

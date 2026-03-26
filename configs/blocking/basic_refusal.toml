@@ -1,0 +1,36 @@
+[model]
+name = "Orenguteng/Llama-3.1-8B-Lexi-Uncensored-V2"
+batch_size = 16
+max_response_length = 2048
+system_prompt = "You are a helpful assistant."
+
+[output]
+results_root = "results/blocking"
+
+[grid_search]
+max_weight = [-1.0]
+max_weight_position = [0.7]
+min_weight = [-1.0]
+min_weight_distance = [1.0]
+
+[evaluation]
+backend = "llamaguard"
+evaluate_locality = true
+judge_api_url = "http://localhost:31181/v1/chat/completions"
+classifier_api_url = "http://localhost:31180/v1/chat/completions"
+llamaguard_model_name = "meta-llama/Meta-Llama-Guard-2-8B"
+llamaguard_device = "cuda"
+llamaguard_dtype = "bfloat16"
+
+[mmlu]
+enabled = true
+dataset = "cais/mmlu"
+subset = "all"
+split = "test"
+mode = "zero_shot"
+answer_mode = "generate"
+n_shots = 0
+sample_size = 100
+sample_seed = 42
+max_new_tokens = 2048
+store_predictions = true

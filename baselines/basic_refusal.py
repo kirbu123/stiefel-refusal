@@ -28,9 +28,9 @@ torch.manual_seed(42)
 torch.set_grad_enabled(False)
 
 from config import (
-    MODEL_NAME, CATEGORIES, GOOD_PROMPTS_DATASET, RESULTS_DIR,
+    MODEL_NAME, CATEGORIES, GOOD_PROMPTS_DATASET,
     JUDGE_API_URL, CLASSIFIER_API_URL, JUDGE_MODEL, FEW_SHOTS_PATH,
-    HARMLESS_EVAL_DATASET, EVALUATE_LOCALITY, MMLU_CONFIG,
+    HARMLESS_EVAL_DATASET, EVALUATE_LOCALITY, MMLU_CONFIG, get_method_results_dir,
 )
 from data_utils import load_all_datasets_with_categories, extract_response_after_think
 from refusal_directions import compute_refusal_direction
@@ -48,8 +48,7 @@ from visualization.plots import (
 )
 from baselines.hyperparams import HYPERPARAMS
 
-BASELINE_RESULTS_DIR = RESULTS_DIR / "basic_refusal"
-BASELINE_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+BASELINE_RESULTS_DIR = get_method_results_dir("basic_refusal")
 
 ANSWERS_DIR = BASELINE_RESULTS_DIR / "answers"
 ANSWERS_DIR.mkdir(parents=True, exist_ok=True)

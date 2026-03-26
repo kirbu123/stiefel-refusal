@@ -8,6 +8,14 @@ from heretic.config import DatasetSpecification
 
 PROJECT_ROOT = Path(__file__).parent
 
+
+def _resolve_results_dir() -> Path:
+    raw_results_root = os.getenv("RESULTS_ROOT", "results").strip() or "results"
+    results_root = Path(raw_results_root).expanduser()
+    if not results_root.is_absolute():
+        results_root = PROJECT_ROOT / results_root
+    return results_root
+
 MODEL_NAME = os.getenv("MODEL_NAME", "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B")
 
 N_SAMPLES_PER_CATEGORY = 10
@@ -44,8 +52,15 @@ HARMLESS_EVAL_DATASET = DatasetSpecification(
     column="text"
 )
 
-RESULTS_DIR = PROJECT_ROOT / "results"
-RESULTS_DIR.mkdir(exist_ok=True)
+RESULTS_ROOT = Path(os.getenv("RESULTS_ROOT", "results").strip() or "results")
+RESULTS_DIR = _resolve_results_dir()
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def get_method_results_dir(method_name: str) -> Path:
+    method_dir = RESULTS_DIR / method_name
+    method_dir.mkdir(parents=True, exist_ok=True)
+    return method_dir
 
 GRPO_CONFIG = {
     "n_groups": int(os.getenv("GRPO_N_GROUPS", 4)),
