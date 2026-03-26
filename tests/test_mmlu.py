@@ -35,6 +35,7 @@ class TestMMLU(unittest.TestCase):
         self.assertEqual(mmlu.parse_choice_letter("A"), "A")
         self.assertEqual(mmlu.parse_choice_letter("B."), "B")
         self.assertEqual(mmlu.parse_choice_letter("Answer: c"), "C")
+        self.assertEqual(mmlu.parse_choice_letter("<think>reasoning</think>\nD"), "D")
         self.assertIsNone(mmlu.parse_choice_letter("I am not sure"))
 
     def test_build_prompt_variants(self):
@@ -123,6 +124,7 @@ class TestMMLU(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertAlmostEqual(result["delta_accuracy"], 0.2)
         self.assertIsNotNone(result["details_file"])
+        self.assertTrue(result["answer_comparison_preview"])
 
     def test_evaluate_model_on_mmlu_smoke_with_mocks(self):
         eval_records = [
@@ -159,6 +161,42 @@ class TestMMLU(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertAlmostEqual(result["summary"]["accuracy"], 1.0)
         self.assertEqual(len(result["predictions"]), 2)
+        self.assertEqual(len(result["prediction_preview"]), 2)
+
+    def test_evaluate_model_on_mmlu_logits_mode(self):
+        entries = [
+            {
+                "index": 0,
+                "subject": "math",
+                "question": "Question 0?",
+                "choices": ["A0", "B0", "C0", "D0"],
+                "correct_letter": "B",
+                "prompt": "prompt-0",
+            }
+        ]
+
+        fake_predictions = [
+            {
+                "index": 0,
+                "subject": "math",
+                "question": "Question 0?",
+                "choices": ["A0", "B0", "C0", "D0"],
+                "correct_letter": "B",
+                "predicted_letter": "B",
+                "is_correct": True,
+                "raw_response": None,
+                "choice_scores": {"A": -2.0, "B": -0.1, "C": -1.0, "D": -3.0},
+            }
+        ]
+
+        with patch.object(mmlu, "prepare_mmlu_data", return_value={"entries": entries, "config_snapshot": {"answer_mode": "logits"}}):
+            with patch.object(mmlu, "_predict_with_logits", return_value=fake_predictions):
+                result = mmlu.evaluate_model_on_mmlu(object(), {"enabled": True, "answer_mode": "logits"})
+
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result["summary"]["accuracy"], 1.0)
+        self.assertEqual(result["prediction_preview"][0]["predicted_letter"], "B")
+        self.assertIn("choice_scores", result["prediction_preview"][0])
 
 
 if __name__ == "__main__":
