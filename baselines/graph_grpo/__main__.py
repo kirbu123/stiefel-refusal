@@ -18,6 +18,7 @@ if str(_verl_path) not in sys.path:
     sys.path.insert(0, str(_verl_path))
 
 import json
+import os
 import random
 from datetime import datetime
 from typing import Dict, List
@@ -41,7 +42,7 @@ torch.manual_seed(42)
 from config import (
     MODEL_NAME, CATEGORIES, GOOD_PROMPTS_DATASET, RESULTS_DIR,
     GRPO_CONFIG, ABLITERATION_PARAMS, FEW_SHOTS_PATH,
-    HARMLESS_EVAL_DATASET, EVALUATE_LOCALITY, WEIGHTS_INIT_TYPE, GRAPH_FILE, EVALUATION_BACKEND,
+    HARMLESS_EVAL_DATASET, EVALUATE_LOCALITY, GRAPH_FILE, EVALUATION_BACKEND,
     MMLU_CONFIG, DEBUG, get_method_results_dir,
 )
 from data_utils import load_all_datasets_with_categories, extract_response_after_think
@@ -57,16 +58,22 @@ from evaluate.mmlu import (
 )
 
 from baselines.graph_grpo.trainer import train_grpo_is_step
+from baselines.graph_grpo.runtime_config import (
+    resolve_graph_grpo_weights_init_type,
+    validate_graph_grpo_weights_init_type,
+)
 
 
 def main():
+    weights_init_type = resolve_graph_grpo_weights_init_type(os.getenv("WEIGHTS_INIT_TYPE"))
+
     print("=" * 80)
     print("GRPO-IS: GRPO with Importance Sampling")
     print("=" * 80)
     print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"GRPO Config: {GRPO_CONFIG}")
     print(f"Abliteration Params: {ABLITERATION_PARAMS}")
-    print(f"Weights Init Type: {WEIGHTS_INIT_TYPE}")
+    print(f"Weights Init Type: {weights_init_type}")
     print(f"Evaluation backend: {EVALUATION_BACKEND}")
     print()
 
@@ -148,9 +155,18 @@ def main():
             physical_harm_idx = idx
             break
 
+    validate_graph_grpo_weights_init_type(weights_init_type)
+
+    print(f"Using weights init type '{weights_init_type}'")
+    if weights_init_type == "topic":
+        print(
+            f"Topic init root index for category 'Physical harm': "
+            f"{physical_harm_idx} (tag='{bad_tags[physical_harm_idx]}')"
+        )
+
     direction_weights = LearnableDirectionWeights(
         n_directions=n_directions, n_layers=n_layers, hidden_size=hidden_size,
-        init_type=WEIGHTS_INIT_TYPE, topic_idx=physical_harm_idx,
+        init_type=weights_init_type, topic_idx=physical_harm_idx,
     )
     device = extracted_directions[0].device
     direction_weights = direction_weights.to(device)

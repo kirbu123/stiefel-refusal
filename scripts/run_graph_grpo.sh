@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ---- GPU ----
-export CUDA_VISIBLE_DEVICES=2
+export CUDA_VISIBLE_DEVICES=3
 
 # ---- Fast smoke debug ----
 # When true, graph_grpo uses only one category question during answer generation/training.
@@ -32,7 +32,7 @@ export ABLITERATION_MIN_WEIGHT=0.1
 export ABLITERATION_MIN_WEIGHT_DISTANCE=0.3
 
 # ---- Weight initialization ----
-export WEIGHTS_INIT_TYPE="zero"
+export WEIGHTS_INIT_TYPE="average"
 
 # ---- Evaluation backend ----
 # Options: local_llm_judge | llamaguard
