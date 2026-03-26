@@ -285,7 +285,6 @@ def train_grpo_is_step(
 
     t0 = time.time()
     print(f"  [Step 7+8] Policy loss + backward (ref_alpha={ref_alpha}, clip={clip_ratio})...")
-    combined_direction = direction_weights(extracted_directions)
     actor_config = _make_actor_config(clip_ratio=clip_ratio, loss_agg_mode=loss_agg_mode)
     optimizer.zero_grad()
 
@@ -307,6 +306,10 @@ def train_grpo_is_step(
         mb_mask = response_mask[mb_start:mb_end]
         mb_is = is_weights[mb_start:mb_end]
 
+        # Rebuild the differentiable direction per micro-batch so each backward pass
+        # owns its own autograd graph. Reusing the same tensor across multiple
+        # backward() calls triggers "Trying to backward through the graph a second time".
+        combined_direction = direction_weights(extracted_directions)
         handles = register_abliteration_hooks(
             model, combined_direction, ref_alpha, n_layers,
             max_weight, max_weight_position, min_weight, min_weight_distance,
@@ -334,7 +337,7 @@ def train_grpo_is_step(
         accumulated_loss += mb_loss.item() * weight
         loss_metrics = mb_metrics
 
-        del mb_lp, mb_loss
+        del combined_direction, mb_lp, mb_loss
         empty_cache()
 
         if (mb_start // micro_bs) % 50 == 0:

@@ -63,7 +63,7 @@ class TestGraphGrpoTrainer(unittest.TestCase):
             torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32),
             torch.tensor([[0.5, 0.5], [1.0, -1.0]], dtype=torch.float32),
         ]
-        questions = ["q1", "q2"]
+        questions = ["q1", "q2", "q3", "q4"]
         hook_state = {"current_direction": None}
         rollout_calls = []
 
@@ -176,7 +176,7 @@ class TestGraphGrpoTrainer(unittest.TestCase):
                                                     extracted_directions=extracted_directions,
                                                     model=model,
                                                     questions=questions,
-                                                    n_groups=3,
+                                                    n_groups=4,
                                                     noise_scale=0.2,
                                                     abliteration_params={
                                                         "max_weight": 2.0,
@@ -197,12 +197,13 @@ class TestGraphGrpoTrainer(unittest.TestCase):
         rollout_abliterations = [call for call in rollout_calls if "direction" in call]
         hook_calls = [call for call in rollout_calls if "hook_alpha" in call]
 
-        self.assertEqual(len(rollout_abliterations), 3)
-        self.assertEqual(model.reload_calls, 4)
+        self.assertEqual(len(rollout_abliterations), 4)
+        self.assertEqual(model.reload_calls, 5)
         self.assertTrue(all(call["max_weight"] == 3.0 for call in rollout_abliterations))
         self.assertTrue(all(call["min_weight"] == 0.75 for call in rollout_abliterations))
         self.assertTrue(any(not torch.equal(call["direction"], rollout_abliterations[0]["direction"]) for call in rollout_abliterations[1:]))
         self.assertTrue(all(call["hook_alpha"] == 1.5 for call in hook_calls))
+        self.assertEqual(len(hook_calls), 4)
         self.assertIsNotNone(direction_weights.weights.grad)
         self.assertGreater(direction_weights.weights.grad.abs().sum().item(), 0.0)
         self.assertIn("mean_reward", metrics)
