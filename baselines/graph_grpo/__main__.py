@@ -42,7 +42,7 @@ from config import (
     MODEL_NAME, CATEGORIES, GOOD_PROMPTS_DATASET, RESULTS_DIR,
     GRPO_CONFIG, ABLITERATION_PARAMS, FEW_SHOTS_PATH,
     HARMLESS_EVAL_DATASET, EVALUATE_LOCALITY, WEIGHTS_INIT_TYPE, GRAPH_FILE, EVALUATION_BACKEND,
-    MMLU_CONFIG,
+    MMLU_CONFIG, get_method_results_dir,
 )
 from data_utils import load_all_datasets_with_categories, extract_response_after_think
 from refusal_directions import (
@@ -70,8 +70,7 @@ def main():
     print(f"Evaluation backend: {EVALUATION_BACKEND}")
     print()
 
-    GRPO_RESULTS_DIR = RESULTS_DIR / "graph_grpo"
-    GRPO_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    GRPO_RESULTS_DIR = get_method_results_dir("graph_grpo")
     GRPO_ANSWERS_DIR = GRPO_RESULTS_DIR / "answers"
     GRPO_ANSWERS_DIR.mkdir(parents=True, exist_ok=True)
 

@@ -14,7 +14,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .ui import print
+try:
+    from .ui import print
+except ModuleNotFoundError:
+    from builtins import print
 
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -83,7 +86,10 @@ def run_method(method: str, config: dict[str, Any], model_name: str) -> Path:
     finally:
         os.chdir(original_dir)
 
-    results_dir = PROJECT_ROOT / "results" / method
+    results_root = Path(os.environ.get("RESULTS_ROOT", "results")).expanduser()
+    if not results_root.is_absolute():
+        results_root = PROJECT_ROOT / results_root
+    results_dir = results_root / method
     return results_dir
 
 

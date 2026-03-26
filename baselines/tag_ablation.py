@@ -29,9 +29,10 @@ torch.manual_seed(42)
 torch.set_grad_enabled(False)
 
 from config import (
-    MODEL_NAME, GOOD_PROMPTS_DATASET, RESULTS_DIR,
+    MODEL_NAME, GOOD_PROMPTS_DATASET,
     JUDGE_API_URL, CLASSIFIER_API_URL, JUDGE_MODEL, FEW_SHOTS_PATH,
     HARMLESS_EVAL_DATASET, EVALUATE_LOCALITY, TAG_FILTERED_QUESTIONS_FILE, MMLU_CONFIG,
+    get_method_results_dir,
 )
 from data_utils import extract_response_after_think
 from refusal_directions import compute_refusal_direction
@@ -49,8 +50,7 @@ from visualization.plots import (
 )
 from baselines.hyperparams import HYPERPARAMS
 
-BASELINE_RESULTS_DIR = RESULTS_DIR / "tag_ablation"
-BASELINE_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+BASELINE_RESULTS_DIR = get_method_results_dir("tag_ablation")
 
 ANSWERS_DIR = BASELINE_RESULTS_DIR / "answers"
 ANSWERS_DIR.mkdir(parents=True, exist_ok=True)

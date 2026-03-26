@@ -12,7 +12,10 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib
 
-from .ui import print
+try:
+    from .ui import print
+except ModuleNotFoundError:
+    from builtins import print
 
 PROJECT_ROOT = Path(__file__).parent.parent
 CONFIGS_DIR = PROJECT_ROOT / "configs"
@@ -72,6 +75,9 @@ def apply_config_to_env(config: dict[str, Any], model_name: str | None = None):
         os.environ["GRAPH_FILE"] = data["graph_file"]
     if data.get("tag_filtered_questions_file"):
         os.environ["TAG_FILTERED_QUESTIONS_FILE"] = data["tag_filtered_questions_file"]
+
+    output = config.get("output", {})
+    os.environ["RESULTS_ROOT"] = str(output.get("results_root", "results"))
 
     grpo = config.get("grpo", {})
     if grpo.get("n_groups") is not None:
@@ -180,6 +186,12 @@ def print_config_summary(config: dict[str, Any], model_name: str):
     if data:
         print("  [bold]Data:[/]")
         for k, v in data.items():
+            print(f"    {k}: {v}")
+
+    output = config.get("output", {})
+    if output:
+        print("  [bold]Output:[/]")
+        for k, v in output.items():
             print(f"    {k}: {v}")
 
     evl = config.get("evaluation", {})
