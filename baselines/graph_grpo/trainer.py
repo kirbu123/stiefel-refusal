@@ -47,12 +47,37 @@ def _make_actor_config(
     )
 
 
+def _get_cuda_memory_gb(fn_name: str = "memory_allocated") -> float:
+    """Return CUDA memory in GB when available, otherwise 0."""
+    if not torch.cuda.is_available():
+        return 0.0
+    return float(getattr(torch.cuda, fn_name)() / 1e9)
+
+
+def _build_rollout_weight_variants(
+    base_weights: torch.Tensor,
+    n_groups: int,
+    noise_scale: float,
+) -> List[torch.Tensor]:
+    """Build detached per-step rollout variants in W-space."""
+    if n_groups < 1:
+        raise ValueError(f"n_groups must be >= 1, got {n_groups}")
+
+    base_weights = base_weights.detach()
+    variants = [base_weights.clone()]
+    for _ in range(1, n_groups):
+        noise = torch.randn_like(base_weights) * noise_scale
+        variants.append((base_weights + noise).detach())
+    return variants
+
+
 def train_grpo_is_step(
     direction_weights: LearnableDirectionWeights,
     extracted_directions: List[torch.Tensor],
     model,
     questions: List[str],
-    alphas: List[float],
+    n_groups: int,
+    noise_scale: float,
     abliteration_params: Dict[str, float],
     optimizer: torch.optim.Optimizer,
     classifier_categories: List[Dict],
@@ -67,11 +92,12 @@ def train_grpo_is_step(
     One GRPO-IS training step.
 
     Args:
-        direction_weights: Trainable P^{(l)}
+        direction_weights: Trainable aggregation weights W
         extracted_directions: Frozen refusal direction vectors
         model: Heretic model
         questions: Batch of queries
-        alphas: Predefined alpha coefficients for M behavior policies
+        n_groups: Number of rollout behavior policies sampled in W-space
+        noise_scale: Stddev of Gaussian perturbations for sampled rollout W variants
         abliteration_params: max_weight, max_weight_position, min_weight, min_weight_distance
         optimizer: Optimizer for direction_weights
         classifier_categories: For evaluate_harmfulness
@@ -91,46 +117,66 @@ def train_grpo_is_step(
     min_weight = abliteration_params["min_weight"]
     min_weight_distance = abliteration_params["min_weight_distance"]
 
-    max_weight_pos_abs = max_weight_position * (n_layers - 1)
-    min_weight_dist_abs = min_weight_distance * (n_layers - 1)
-
     all_responses = []
     all_rollout_log_probs = []
     all_masks = []
 
     extracted_directions_no_grad = [d.detach() if d.requires_grad else d for d in extracted_directions]
+    base_weights = direction_weights.weights.detach()
+    rollout_weight_variants = _build_rollout_weight_variants(
+        base_weights=base_weights,
+        n_groups=n_groups,
+        noise_scale=noise_scale,
+    )
+    rollout_max_weight = max_weight * ref_alpha
+    rollout_min_weight = min_weight * ref_alpha
 
     step_t0 = time.time()
-    print(f"  [Step 1-2] Rollout from {len(alphas)} behavior policies, {len(questions)} questions each")
+    print(
+        f"  [Step 1-2] Rollout from {len(rollout_weight_variants)} sampled behavior policies, "
+        f"{len(questions)} questions each"
+    )
 
     # Step 1 & 2: Rollout from M behavior policies
-    for ai, alpha in enumerate(alphas):
+    for ai, rollout_weights in enumerate(rollout_weight_variants):
         t0 = time.time()
         with torch.no_grad():
-            combined_direction = direction_weights(extracted_directions_no_grad)
+            combined_direction = direction_weights.combine_with_weights(
+                extracted_directions_no_grad,
+                rollout_weights,
+            )
 
         model.reload_model()
-        scaled_max = max_weight * alpha
-        scaled_min = min_weight * alpha
         apply_abliteration_with_hyperparams(
             model,
             combined_direction,
-            scaled_max,
+            rollout_max_weight,
             max_weight_position,
-            scaled_min,
+            rollout_min_weight,
             min_weight_distance,
             n_layers,
         )
 
-        print(f"    Policy {ai+1}/{len(alphas)} (alpha={alpha:.2f}): generating responses...", end=" ", flush=True)
+        delta_norm = (rollout_weights - base_weights).norm().item()
+        print(
+            f"    Policy {ai+1}/{len(rollout_weight_variants)} "
+            f"(sampled W variant, delta_norm={delta_norm:.6f}): generating responses...",
+            end=" ",
+            flush=True,
+        )
         responses_raw = model.get_responses_batched(questions)
         responses = [extract_response_after_think(r) for r in responses_raw]
         all_responses.append(responses)
         avg_resp_len = sum(len(r) for r in responses) / max(len(responses), 1)
         print(f"done ({len(responses)} responses, avg_len={avg_resp_len:.0f} chars)")
 
-        mem_gb = torch.cuda.memory_allocated() / 1e9
-        print(f"    Policy {ai+1}/{len(alphas)}: computing rollout log-probs (GPU mem: {mem_gb:.2f} GB)...", end=" ", flush=True)
+        mem_gb = _get_cuda_memory_gb()
+        print(
+            f"    Policy {ai+1}/{len(rollout_weight_variants)}: computing rollout log-probs "
+            f"(GPU mem: {mem_gb:.2f} GB)...",
+            end=" ",
+            flush=True,
+        )
         with torch.no_grad():
             rollout_lp, rollout_mask = compute_sequence_log_probs(model, questions, responses)
         print(f"done (shape={list(rollout_lp.shape)}, mean_lp={rollout_lp.sum()/rollout_mask.sum():.4f})")
@@ -138,18 +184,26 @@ def train_grpo_is_step(
         all_rollout_log_probs.append(rollout_lp)
         all_masks.append(rollout_mask)
         empty_cache()
-        print(f"    Policy {ai+1}/{len(alphas)} total: {time.time()-t0:.1f}s")
+        print(f"    Policy {ai+1}/{len(rollout_weight_variants)} total: {time.time()-t0:.1f}s")
 
     print(f"  [Step 1-2] Rollout complete: {time.time()-step_t0:.1f}s")
 
     # Step 3: Compute log pi_theta_old (base model)
     t0 = time.time()
-    print(f"  [Step 3] Computing old log-probs (base model) for {len(alphas)} response sets...")
+    print(
+        f"  [Step 3] Computing old log-probs (base model) for "
+        f"{len(rollout_weight_variants)} response sets..."
+    )
     model.reload_model()
     all_old_log_probs = []
-    for m in range(len(alphas)):
-        mem_gb = torch.cuda.memory_allocated() / 1e9
-        print(f"    Set {m+1}/{len(alphas)}: computing (GPU mem: {mem_gb:.2f} GB)...", end=" ", flush=True)
+    for m in range(len(rollout_weight_variants)):
+        mem_gb = _get_cuda_memory_gb()
+        print(
+            f"    Set {m+1}/{len(rollout_weight_variants)}: computing "
+            f"(GPU mem: {mem_gb:.2f} GB)...",
+            end=" ",
+            flush=True,
+        )
         with torch.no_grad():
             old_lp, _ = compute_sequence_log_probs(model, questions, all_responses[m])
         print(f"done (shape={list(old_lp.shape)})")
@@ -159,7 +213,7 @@ def train_grpo_is_step(
 
     # Flatten: we have M*N responses
     n_questions = len(questions)
-    n_m = len(alphas)
+    n_m = len(rollout_weight_variants)
     flat_responses = [r for m in range(n_m) for r in all_responses[m]]
     flat_questions = [q for m in range(n_m) for q in questions]
     question_indices = np.array([i for m in range(n_m) for i in range(n_questions)])
@@ -286,12 +340,6 @@ def train_grpo_is_step(
         if (mb_start // micro_bs) % 50 == 0:
             print(f"    micro-batch {mb_start//micro_bs + 1}/{(n_total + micro_bs - 1)//micro_bs}", flush=True)
 
-    # #region agent log
-    _mem = torch.cuda.memory_allocated() / 1e9
-    _res = torch.cuda.memory_reserved() / 1e9
-    with open(_lp, "a") as _f: _f.write(_json.dumps({"sessionId":"ebb21c","hypothesisId":"E","location":"trainer.py:after_grad_accum","message":"mem after gradient accumulation","data":{"accumulated_loss":round(accumulated_loss,6),"mem_alloc_gb":round(_mem,2),"mem_reserved_gb":round(_res,2),"has_grad":direction_weights.weights.grad is not None},"timestamp":int(_time.time()*1000)})+"\n")
-    # #endregion
-
     grad_norm = direction_weights.weights.grad.norm().item() if direction_weights.weights.grad is not None else 0.0
     optimizer.step()
     print(f"    Loss: {accumulated_loss:.6f} ({time.time()-t0:.1f}s)")
@@ -316,7 +364,7 @@ def train_grpo_is_step(
 
     total_time = time.time() - step_t0
     print(f"  [TOTAL] Training step completed in {total_time:.1f}s")
-    mem_gb = torch.cuda.memory_allocated() / 1e9
+    mem_gb = _get_cuda_memory_gb()
     print(f"  [TOTAL] GPU memory allocated: {mem_gb:.2f} GB")
 
     metrics = {

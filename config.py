@@ -69,7 +69,6 @@ GRPO_CONFIG = {
     "noise_scale": float(os.getenv("GRPO_NOISE_SCALE", 1.0)),
     "beta": float(os.getenv("GRPO_BETA", 0.1)),
     "gradient_scale": float(os.getenv("GRPO_GRADIENT_SCALE", 1e6)),
-    "alphas": [float(x) for x in os.getenv("GRPO_ALPHAS", "0.5,1.0,1.5,2.0").split(",")],
     "ref_alpha": float(os.getenv("GRPO_REF_ALPHA", 1.0)),
     "is_clip_ratio": float(os.getenv("IS_CLIP_RATIO", 5.0)),
     "clip_ratio": float(os.getenv("GRPO_CLIP_RATIO", 0.2)),

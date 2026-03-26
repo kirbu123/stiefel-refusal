@@ -25,15 +25,21 @@
 ### Шаг 1–2: Роллаут из M поведенческих политик
 
 ```
-для каждого alpha_m из GRPO_ALPHAS:
-    combined_direction = LearnableDirectionWeights(extracted_directions)  # взвешенная сумма
+base_W = stopgrad(direction_weights.weights)
+для m = 1..GRPO_N_GROUPS:
+    W_m = base_W                    # для первой политики
+    W_m = base_W + noise_m          # для остальных, noise_m ~ N(0, GRPO_NOISE_SCALE^2)
+    combined_direction = combine_with_weights(extracted_directions, W_m)
     model.reload_model()
-    apply_abliteration(model, combined_direction, alpha_m * max_weight, ...)  # постоянная аблитерация
+    apply_abliteration(model, combined_direction, ref_alpha * max_weight, ...)  # общая фиксированная аблитерация
     responses_m = model.get_responses_batched(questions)
     rollout_log_probs_m = compute_sequence_log_probs(model, questions, responses_m)
 ```
 
 Реализовано в `trainer.py`, функция `train_grpo_is_step()`.
+Обучаемый параметр остаётся один: `LearnableDirectionWeights.weights`.
+Разные behaviour policies `μ_m` отличаются только detached-копиями текущего `W`,
+а не разными `alpha`.
 
 ### Шаг 3: Лог-вероятности базовой политики (π_θ_old)
 
@@ -62,7 +68,7 @@ is_weights, is_metrics = compute_rollout_correction_weights(
 )
 ```
 
-IS-веса корректируют разницу между behaviour policy (μ_m, с аблитерацией) и
+IS-веса корректируют разницу между behaviour policy (μ_m, с sampled `W_m`) и
 целевой политикой (π_old, без аблитерации). `rollout_is_threshold` обрезает
 слишком большие веса для стабильности.
 
@@ -217,7 +223,8 @@ python -m baselines.graph_grpo
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
-| `GRPO_ALPHAS` | `3.0,3.0,3.0,3.0` | Коэффициенты аблитерации для M поведенческих политик |
+| `GRPO_N_GROUPS` | `4` | Число sampled rollout-политик `μ_m` на шаг |
+| `GRPO_NOISE_SCALE` | `0.1` | Stddev гауссова шума для detached rollout-копий `W_m` |
 | `GRPO_REF_ALPHA` | `1.0` | Коэффициент аблитерации для политики при вычислении policy loss |
 | `IS_CLIP_RATIO` | `5.0` | Порог обрезки IS-весов |
 | `GRPO_CLIP_RATIO` | `0.2` | ε для PPO-clip |

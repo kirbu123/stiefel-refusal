@@ -92,8 +92,6 @@ def apply_config_to_env(config: dict[str, Any], model_name: str | None = None):
         os.environ["GRPO_BETA"] = str(grpo["beta"])
     if grpo.get("gradient_scale") is not None:
         os.environ["GRPO_GRADIENT_SCALE"] = str(grpo["gradient_scale"])
-    if grpo.get("alphas") is not None:
-        os.environ["GRPO_ALPHAS"] = grpo["alphas"]
     if grpo.get("ref_alpha") is not None:
         os.environ["GRPO_REF_ALPHA"] = str(grpo["ref_alpha"])
     if grpo.get("is_clip_ratio") is not None:
