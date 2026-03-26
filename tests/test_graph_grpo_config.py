@@ -11,6 +11,8 @@ fake_ui.print = print
 sys.modules.setdefault("cli.ui", fake_ui)
 
 from baselines.graph_grpo.runtime_config import (
+    resolve_graph_grpo_debug_noise_scale,
+    resolve_graph_grpo_debug_question_count,
     resolve_graph_grpo_weights_init_type,
     validate_graph_grpo_weights_init_type,
 )
@@ -49,6 +51,8 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertIn("GRPO_N_GROUPS", script_text)
         self.assertIn("GRPO_NOISE_SCALE", script_text)
         self.assertIn("DEBUG=false", script_text)
+        self.assertIn("DEBUG_N_QUESTIONS=4", script_text)
+        self.assertIn("DEBUG_NOISE_SCALE=0.02", script_text)
         self.assertIn('WEIGHTS_INIT_TYPE="average"', script_text)
         self.assertNotIn("GRPO_ALPHAS", script_text)
 
@@ -67,12 +71,31 @@ class TestGraphGrpoConfig(unittest.TestCase):
         validate_graph_grpo_weights_init_type("average")
         validate_graph_grpo_weights_init_type("topic")
 
-    def test_graph_grpo_debug_mode_keeps_single_question_smoke_path(self):
+    def test_graph_grpo_runtime_debug_defaults(self):
+        self.assertEqual(resolve_graph_grpo_debug_question_count(None), 4)
+        self.assertEqual(resolve_graph_grpo_debug_question_count("8"), 8)
+        self.assertEqual(resolve_graph_grpo_debug_noise_scale(0.1, None), 0.02)
+        self.assertEqual(resolve_graph_grpo_debug_noise_scale(0.01, None), 0.01)
+        self.assertEqual(resolve_graph_grpo_debug_noise_scale(0.1, "0.005"), 0.005)
+
+        with self.assertRaisesRegex(ValueError, "DEBUG_N_QUESTIONS must be >= 1"):
+            resolve_graph_grpo_debug_question_count("0")
+
+        with self.assertRaisesRegex(ValueError, "DEBUG_NOISE_SCALE must be >= 0"):
+            resolve_graph_grpo_debug_noise_scale(0.1, "-1")
+
+    def test_graph_grpo_debug_mode_uses_configurable_question_subset(self):
         main_text = (PROJECT_ROOT / "baselines" / "graph_grpo" / "__main__.py").read_text(encoding="utf-8")
+        trainer_text = (PROJECT_ROOT / "baselines" / "graph_grpo" / "trainer.py").read_text(encoding="utf-8")
 
         self.assertIn("if DEBUG and category_questions:", main_text)
-        self.assertIn("category_questions = category_questions[:1]", main_text)
+        self.assertIn("category_questions = category_questions[:debug_question_count]", main_text)
+        self.assertIn("effective_noise_scale = debug_noise_scale if DEBUG else GRPO_CONFIG[\"noise_scale\"]", main_text)
+        self.assertIn("resolve_graph_grpo_debug_question_count(os.getenv(\"DEBUG_N_QUESTIONS\"))", main_text)
+        self.assertIn("resolve_graph_grpo_debug_noise_scale(", main_text)
         self.assertIn("resolve_graph_grpo_weights_init_type(os.getenv(\"WEIGHTS_INIT_TYPE\"))", main_text)
+        self.assertIn("Loss: {accumulated_loss:.6e}", trainer_text)
+        self.assertIn("Grad norm: {grad_norm:.6e}", trainer_text)
 
 
 if __name__ == "__main__":

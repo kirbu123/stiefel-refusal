@@ -223,6 +223,9 @@ python -m baselines.graph_grpo
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
+| `DEBUG` | `false` | Быстрый smoke-режим для `graph_grpo` |
+| `DEBUG_N_QUESTIONS` | `4` | Сколько вопросов из категории использовать при `DEBUG=true` |
+| `DEBUG_NOISE_SCALE` | `0.02` | Effective rollout noise scale при `DEBUG=true` |
 | `GRPO_N_GROUPS` | `4` | Число sampled rollout-политик `μ_m` на шаг |
 | `GRPO_NOISE_SCALE` | `0.1` | Stddev гауссова шума для detached rollout-копий `W_m` |
 | `GRPO_REF_ALPHA` | `1.0` | Коэффициент аблитерации для политики при вычислении policy loss |
@@ -236,3 +239,5 @@ python -m baselines.graph_grpo
 | `EVALUATION_BACKEND` | `llamaguard` | Бэкенд оценки (`llamaguard` / `local_llm_judge`) |
 
 `graph_grpo` должен стартовать с ненулевой инициализации. По умолчанию используется `average`; `topic` остаётся доступным явным override, а `zero` намеренно запрещён, потому что при текущем hook-based differentiable path даёт dead start с нулевым градиентом.
+
+При `DEBUG=true` метод не переходит в другую алгоритмическую ветку: он просто ограничивает число category-вопросов до `DEBUG_N_QUESTIONS` и использует меньший rollout noise scale `DEBUG_NOISE_SCALE`, чтобы smoke-run был быстрее и давал менее вырожденный градиентный сигнал.

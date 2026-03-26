@@ -4,8 +4,10 @@
 export CUDA_VISIBLE_DEVICES=3
 
 # ---- Fast smoke debug ----
-# When true, graph_grpo uses only one category question during answer generation/training.
+# When true, graph_grpo uses only a small subset of category questions and a smaller rollout noise scale.
 export DEBUG=false
+export DEBUG_N_QUESTIONS=4
+export DEBUG_NOISE_SCALE=0.02
 
 # ---- Model ----
 export MODEL_NAME="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
