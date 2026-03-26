@@ -232,5 +232,7 @@ python -m baselines.graph_grpo
 | `GRPO_LEARNING_RATE` | `1e-3` | Learning rate (Adam) |
 | `ABLITERATION_MAX_WEIGHT` | `2.0` | Максимальная интенсивность аблитерации |
 | `ABLITERATION_MAX_WEIGHT_POSITION` | `0.7` | Позиция пика (доля от числа слоёв) |
-| `WEIGHTS_INIT_TYPE` | `zero` | Инициализация весов (`zero` / `uniform` / `topic`) |
+| `WEIGHTS_INIT_TYPE` | `average` | Инициализация весов (`average` / `topic`; `zero` не поддерживается в текущем differentiable trainer) |
 | `EVALUATION_BACKEND` | `llamaguard` | Бэкенд оценки (`llamaguard` / `local_llm_judge`) |
+
+`graph_grpo` должен стартовать с ненулевой инициализации. По умолчанию используется `average`; `topic` остаётся доступным явным override, а `zero` намеренно запрещён, потому что при текущем hook-based differentiable path даёт dead start с нулевым градиентом.

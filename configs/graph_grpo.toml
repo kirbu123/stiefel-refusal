@@ -24,7 +24,7 @@ min_weight = 0.1
 min_weight_distance = 0.3
 
 [weights]
-init_type = "zero"
+init_type = "average"
 
 [evaluation]
 backend = "llamaguard"
