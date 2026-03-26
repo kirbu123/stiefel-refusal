@@ -342,12 +342,16 @@ def train_grpo_is_step(
 
     grad_norm = direction_weights.weights.grad.norm().item() if direction_weights.weights.grad is not None else 0.0
     optimizer.step()
-    print(f"    Loss: {accumulated_loss:.6f} ({time.time()-t0:.1f}s)")
+    print(f"    Loss: {accumulated_loss:.6e} ({time.time()-t0:.1f}s)")
     for k, v in loss_metrics.items():
         print(f"    {k}: {v}")
-    print(f"    Grad norm: {grad_norm:.6f}")
-    print(f"    Weights norm: {direction_weights.weights.data.norm().item():.6f}")
-    print(f"    Weights range: [{direction_weights.weights.data.min().item():.4f}, {direction_weights.weights.data.max().item():.4f}]")
+    print(f"    Grad norm: {grad_norm:.6e}")
+    print(f"    Weights norm: {direction_weights.weights.data.norm().item():.6e}")
+    print(
+        f"    Weights range: ["
+        f"{direction_weights.weights.data.min().item():.6e}, "
+        f"{direction_weights.weights.data.max().item():.6e}]"
+    )
 
     # Step 9: Off-policy metrics
     print(f"  [Step 9] Computing off-policy metrics...", end=" ", flush=True)

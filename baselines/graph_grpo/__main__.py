@@ -59,6 +59,8 @@ from evaluate.mmlu import (
 
 from baselines.graph_grpo.trainer import train_grpo_is_step
 from baselines.graph_grpo.runtime_config import (
+    resolve_graph_grpo_debug_noise_scale,
+    resolve_graph_grpo_debug_question_count,
     resolve_graph_grpo_weights_init_type,
     validate_graph_grpo_weights_init_type,
 )
@@ -66,6 +68,12 @@ from baselines.graph_grpo.runtime_config import (
 
 def main():
     weights_init_type = resolve_graph_grpo_weights_init_type(os.getenv("WEIGHTS_INIT_TYPE"))
+    debug_question_count = resolve_graph_grpo_debug_question_count(os.getenv("DEBUG_N_QUESTIONS"))
+    debug_noise_scale = resolve_graph_grpo_debug_noise_scale(
+        base_noise_scale=GRPO_CONFIG["noise_scale"],
+        env_value=os.getenv("DEBUG_NOISE_SCALE"),
+    )
+    effective_noise_scale = debug_noise_scale if DEBUG else GRPO_CONFIG["noise_scale"]
 
     print("=" * 80)
     print("GRPO-IS: GRPO with Importance Sampling")
@@ -177,8 +185,12 @@ def main():
     category_items = data_by_category.get(category_name, [])
     category_questions = [item.get("instruction", "") for item in category_items if item.get("instruction")]
     if DEBUG and category_questions:
-        category_questions = category_questions[:1]
-        print("DEBUG mode enabled: using 1 question from the category for fast smoke testing")
+        category_questions = category_questions[:debug_question_count]
+        print(
+            f"DEBUG mode enabled: using {len(category_questions)} question(s) from the category "
+            f"and rollout noise_scale={effective_noise_scale:g} "
+            f"(base noise_scale={GRPO_CONFIG['noise_scale']:g})"
+        )
     print(f"Loaded {len(category_questions)} questions for category '{category_name}'")
 
     classifier_categories = []
@@ -218,7 +230,7 @@ def main():
             model=model,
             questions=category_questions,
             n_groups=GRPO_CONFIG["n_groups"],
-            noise_scale=GRPO_CONFIG["noise_scale"],
+            noise_scale=effective_noise_scale,
             abliteration_params=ABLITERATION_PARAMS,
             optimizer=optimizer,
             classifier_categories=classifier_categories,
