@@ -80,6 +80,7 @@ dataset = "cais/mmlu"
 subset = "all"
 split = "test"
 mode = "zero_shot"
+answer_mode = "generate"
 n_shots = 5
 sample_size = 100
 sample_seed = 42
@@ -98,6 +99,7 @@ Each config file can include an optional `[mmlu]` section:
 - `subset` -- `"all"` for all subjects, or a single subject config
 - `split` -- evaluation split, default `test`
 - `mode` -- `zero_shot` or `few_shot`
+- `answer_mode` -- `generate` to parse the generated `A/B/C/D`, or `logits` to pick the answer by choice log-probabilities
 - `n_shots` -- number of demonstrations for `few_shot`
 - `sample_size` -- integer sample limit for fast runs, or `null` for full MMLU
 - `sample_seed` -- deterministic sampling seed
@@ -110,6 +112,7 @@ Notes:
 - Set `sample_size = null` to evaluate on the full selected MMLU split.
 - `zero_shot` asks the model to answer one question with `A/B/C/D`.
 - `few_shot` prepends demonstrations from the corresponding MMLU `dev` split.
+- `answer_mode = "logits"` scores `A/B/C/D` directly from the model probabilities instead of parsing generated text.
 - For reasoning models that emit `<think>...</think>`, MMLU parsing strips the thinking block before extracting the final answer letter.
 
 ## Project Structure
@@ -260,6 +263,7 @@ Saved answer files can now include a top-level `mmlu` block with:
 - `modified` -- accuracy after editing
 - `delta_accuracy` -- `modified - original`
 - `config` -- the exact MMLU settings used
+- `answer_comparison_preview` -- a compact before/after preview of how the model answered the same MMLU questions
 - `details_file` -- optional JSON with per-example predictions
 
 ## Verification Notes

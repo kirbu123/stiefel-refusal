@@ -138,6 +138,8 @@ def apply_config_to_env(config: dict[str, Any], model_name: str | None = None):
         os.environ["MMLU_SPLIT"] = mmlu["split"]
     if mmlu.get("mode"):
         os.environ["MMLU_MODE"] = mmlu["mode"]
+    if mmlu.get("answer_mode"):
+        os.environ["MMLU_ANSWER_MODE"] = mmlu["answer_mode"]
     if mmlu.get("n_shots") is not None:
         os.environ["MMLU_N_SHOTS"] = str(mmlu["n_shots"])
     if "sample_size" in mmlu:

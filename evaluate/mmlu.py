@@ -21,6 +21,7 @@ from data_utils import extract_response_after_think
 
 
 CHOICE_LETTERS = ("A", "B", "C", "D")
+PREDICTION_PREVIEW_LIMIT = 10
 _DATASET_RECORDS_CACHE: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
 _PREPARED_DATA_CACHE: dict[str, dict[str, Any]] = {}
 
@@ -39,6 +40,7 @@ def normalize_mmlu_config(config: dict[str, Any] | None = None) -> dict[str, Any
     normalized["subset"] = str(normalized.get("subset", "all"))
     normalized["split"] = str(normalized.get("split", "test"))
     normalized["mode"] = str(normalized.get("mode", "zero_shot")).lower()
+    normalized["answer_mode"] = str(normalized.get("answer_mode", "generate")).lower()
     normalized["n_shots"] = int(normalized.get("n_shots", 5))
     normalized["sample_seed"] = int(normalized.get("sample_seed", 42))
     normalized["max_new_tokens"] = int(normalized.get("max_new_tokens", 32))
@@ -62,6 +64,7 @@ def get_mmlu_config_snapshot(config: dict[str, Any] | None = None) -> dict[str, 
         "subset": normalized["subset"],
         "split": normalized["split"],
         "mode": normalized["mode"],
+        "answer_mode": normalized["answer_mode"],
         "n_shots": normalized["n_shots"],
         "sample_size": normalized["sample_size"],
         "sample_seed": normalized["sample_seed"],
@@ -312,8 +315,82 @@ def _build_prediction_rows(entries: list[dict[str, Any]], responses: list[str]) 
                 "predicted_letter": predicted,
                 "is_correct": predicted == entry["correct_letter"],
                 "raw_response": raw_response,
+                "choice_scores": None,
             }
         )
+    return rows
+
+
+def _build_chat_prompts(model: Any, prompts: list[str]) -> list[str]:
+    chats = [model.get_chat(prompt) for prompt in prompts]
+    return model.tokenizer.apply_chat_template(
+        chats,
+        add_generation_prompt=True,
+        tokenize=False,
+    )
+
+
+def _score_completion_logprob(model: Any, prompt_text: str, completion_text: str) -> float:
+    import torch
+    import torch.nn.functional as F
+
+    prompt_inputs = model.tokenizer(
+        prompt_text,
+        return_tensors="pt",
+        return_token_type_ids=False,
+        add_special_tokens=False,
+    )
+    full_inputs = model.tokenizer(
+        prompt_text + completion_text,
+        return_tensors="pt",
+        return_token_type_ids=False,
+        add_special_tokens=False,
+    ).to(model.model.device)
+
+    prompt_len = prompt_inputs["input_ids"].shape[1]
+    candidate_ids = full_inputs["input_ids"][:, prompt_len:]
+    if candidate_ids.shape[1] == 0:
+        return float("-inf")
+
+    with torch.no_grad():
+        outputs = model.model(**full_inputs)
+        log_probs = F.log_softmax(outputs.logits[:, :-1, :], dim=-1)
+
+    total = 0.0
+    start_position = prompt_len - 1
+    for step, token_id in enumerate(candidate_ids[0]):
+        total += log_probs[0, start_position + step, token_id.item()].item()
+    return total
+
+
+def _predict_with_logits(model: Any, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    chat_prompts = _build_chat_prompts(model, [entry["prompt"] for entry in entries])
+
+    for entry, prompt_text in zip(entries, chat_prompts):
+        choice_scores = {}
+        for letter in CHOICE_LETTERS:
+            variants = (letter, f" {letter}")
+            choice_scores[letter] = max(
+                _score_completion_logprob(model, prompt_text, variant)
+                for variant in variants
+            )
+
+        predicted = max(choice_scores, key=choice_scores.get)
+        rows.append(
+            {
+                "index": entry["index"],
+                "subject": entry["subject"],
+                "question": entry["question"],
+                "choices": entry["choices"],
+                "correct_letter": entry["correct_letter"],
+                "predicted_letter": predicted,
+                "is_correct": predicted == entry["correct_letter"],
+                "raw_response": None,
+                "choice_scores": choice_scores,
+            }
+        )
+
     return rows
 
 
@@ -357,18 +434,72 @@ def summarize_mmlu_predictions(
     }
 
 
+def _build_prediction_preview(predictions: list[dict[str, Any]], limit: int = PREDICTION_PREVIEW_LIMIT) -> list[dict[str, Any]]:
+    preview = []
+    for row in predictions[:limit]:
+        preview.append(
+            {
+                "index": row["index"],
+                "subject": row["subject"],
+                "question": row["question"],
+                "correct_letter": row["correct_letter"],
+                "predicted_letter": row["predicted_letter"],
+                "is_correct": row["is_correct"],
+                "raw_response": row.get("raw_response"),
+                "choice_scores": copy.deepcopy(row.get("choice_scores")),
+            }
+        )
+    return preview
+
+
+def _build_answer_comparison_preview(
+    original_predictions: list[dict[str, Any]],
+    modified_predictions: list[dict[str, Any]],
+    limit: int = PREDICTION_PREVIEW_LIMIT,
+) -> list[dict[str, Any]]:
+    preview = []
+    for original_row, modified_row in zip(original_predictions[:limit], modified_predictions[:limit]):
+        preview.append(
+            {
+                "index": original_row.get("index"),
+                "subject": original_row.get("subject"),
+                "question": original_row.get("question"),
+                "correct_letter": original_row.get("correct_letter"),
+                "original": {
+                    "predicted_letter": original_row.get("predicted_letter"),
+                    "is_correct": original_row.get("is_correct"),
+                    "raw_response": original_row.get("raw_response"),
+                    "choice_scores": copy.deepcopy(original_row.get("choice_scores")),
+                },
+                "modified": {
+                    "predicted_letter": modified_row.get("predicted_letter"),
+                    "is_correct": modified_row.get("is_correct"),
+                    "raw_response": modified_row.get("raw_response"),
+                    "choice_scores": copy.deepcopy(modified_row.get("choice_scores")),
+                },
+            }
+        )
+    return preview
+
+
 def evaluate_model_on_mmlu(model: Any, config: dict[str, Any] | None = None) -> dict[str, Any] | None:
     normalized = normalize_mmlu_config(config)
     if not normalized["enabled"]:
         return None
 
     prepared = prepare_mmlu_data(normalized)
-    prompts = [entry["prompt"] for entry in prepared["entries"]]
-    responses = _generate_choice_responses(model, prompts, normalized["max_new_tokens"])
-    predictions = _build_prediction_rows(prepared["entries"], responses)
+    if normalized["answer_mode"] == "logits":
+        predictions = _predict_with_logits(model, prepared["entries"])
+    else:
+        prompts = [entry["prompt"] for entry in prepared["entries"]]
+        responses = _generate_choice_responses(model, prompts, normalized["max_new_tokens"])
+        predictions = _build_prediction_rows(prepared["entries"], responses)
     summary = summarize_mmlu_predictions(predictions, prepared["config_snapshot"])
 
-    result = {"summary": summary}
+    result = {
+        "summary": summary,
+        "prediction_preview": _build_prediction_preview(predictions),
+    }
     if normalized["store_predictions"]:
         result["predictions"] = predictions
     return result
@@ -460,5 +591,9 @@ def build_mmlu_result(
         "modified": modified_summary,
         "delta_accuracy": modified_summary["accuracy"] - original_summary["accuracy"],
         "config": get_mmlu_config_snapshot(normalized),
+        "answer_comparison_preview": _build_answer_comparison_preview(
+            original_result.get("predictions", original_result.get("prediction_preview", [])),
+            modified_result.get("predictions", modified_result.get("prediction_preview", [])),
+        ),
         "details_file": details_file,
     }

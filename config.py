@@ -91,6 +91,7 @@ MMLU_CONFIG = {
     "subset": os.getenv("MMLU_SUBSET", "all"),
     "split": os.getenv("MMLU_SPLIT", "test"),
     "mode": os.getenv("MMLU_MODE", "zero_shot"),
+    "answer_mode": os.getenv("MMLU_ANSWER_MODE", "generate"),
     "n_shots": int(os.getenv("MMLU_N_SHOTS", 5)),
     "sample_size": None if _mmlu_sample_size.lower() in ("", "none", "null", "all") else int(_mmlu_sample_size),
     "sample_seed": int(os.getenv("MMLU_SAMPLE_SEED", 42)),
