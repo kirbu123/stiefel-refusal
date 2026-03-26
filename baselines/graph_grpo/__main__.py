@@ -42,7 +42,7 @@ from config import (
     MODEL_NAME, CATEGORIES, GOOD_PROMPTS_DATASET, RESULTS_DIR,
     GRPO_CONFIG, ABLITERATION_PARAMS, FEW_SHOTS_PATH,
     HARMLESS_EVAL_DATASET, EVALUATE_LOCALITY, WEIGHTS_INIT_TYPE, GRAPH_FILE, EVALUATION_BACKEND,
-    MMLU_CONFIG, get_method_results_dir,
+    MMLU_CONFIG, DEBUG, get_method_results_dir,
 )
 from data_utils import load_all_datasets_with_categories, extract_response_after_think
 from refusal_directions import (
@@ -160,6 +160,9 @@ def main():
     category_name = "Physical harm"
     category_items = data_by_category.get(category_name, [])
     category_questions = [item.get("instruction", "") for item in category_items if item.get("instruction")]
+    if DEBUG and category_questions:
+        category_questions = category_questions[:1]
+        print("DEBUG mode enabled: using 1 question from the category for fast smoke testing")
     print(f"Loaded {len(category_questions)} questions for category '{category_name}'")
 
     classifier_categories = []

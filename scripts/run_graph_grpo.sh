@@ -3,6 +3,10 @@
 # ---- GPU ----
 export CUDA_VISIBLE_DEVICES=2
 
+# ---- Fast smoke debug ----
+# When true, graph_grpo uses only one category question during answer generation/training.
+export DEBUG=false
+
 # ---- Model ----
 export MODEL_NAME="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 
