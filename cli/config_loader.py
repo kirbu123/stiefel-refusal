@@ -60,6 +60,10 @@ def apply_config_to_env(config: dict[str, Any], model_name: str | None = None):
     elif config.get("model", {}).get("name"):
         os.environ["MODEL_NAME"] = config["model"]["name"]
 
+    model = config.get("model", {})
+    if model.get("batch_size") is not None:
+        os.environ["BATCH_SIZE"] = str(model["batch_size"])
+
     grid = config.get("grid_search", {})
     if grid.get("max_weight") is not None:
         os.environ["GRID_MAX_WEIGHT"] = ",".join(str(v) for v in grid["max_weight"])

@@ -40,7 +40,7 @@ np.random.seed(42)
 torch.manual_seed(42)
 
 from config import (
-    MODEL_NAME, CATEGORIES, GOOD_PROMPTS_DATASET, RESULTS_DIR,
+    MODEL_NAME, MODEL_BATCH_SIZE, CATEGORIES, GOOD_PROMPTS_DATASET, RESULTS_DIR,
     GRPO_CONFIG, ABLITERATION_PARAMS, FEW_SHOTS_PATH,
     HARMLESS_EVAL_DATASET, EVALUATE_LOCALITY, GRAPH_FILE, EVALUATION_BACKEND,
     MMLU_CONFIG, DEBUG, get_method_results_dir,
@@ -82,6 +82,7 @@ def main():
     print(f"GRPO Config: {GRPO_CONFIG}")
     print(f"Abliteration Params: {ABLITERATION_PARAMS}")
     print(f"Weights Init Type: {weights_init_type}")
+    print(f"Batch Size: {MODEL_BATCH_SIZE}")
     print(f"Evaluation backend: {EVALUATION_BACKEND}")
     print()
 
@@ -102,7 +103,7 @@ def main():
     try:
         sys.argv = [sys.argv[0]] if sys.argv else ["script"]
         settings = Settings(
-            model=MODEL_NAME, batch_size=16,
+            model=MODEL_NAME, batch_size=MODEL_BATCH_SIZE,
             max_response_length=2048, system_prompt="You are a helpful assistant.",
         )
     finally:
@@ -183,9 +184,22 @@ def main():
 
     category_name = "Physical harm"
     category_items = data_by_category.get(category_name, [])
-    category_questions = [item.get("instruction", "") for item in category_items if item.get("instruction")]
+    all_category_questions = [item.get("instruction", "") for item in category_items if item.get("instruction")]
+    effective_question_count = min(MODEL_BATCH_SIZE, len(all_category_questions))
+    if DEBUG:
+        effective_question_count = min(effective_question_count, debug_question_count)
+
+    if effective_question_count < len(all_category_questions):
+        category_questions = random.sample(all_category_questions, k=effective_question_count)
+    else:
+        category_questions = list(all_category_questions)
+
+    print(
+        f"Sampled {len(category_questions)} question(s) from {len(all_category_questions)} available "
+        f"in category '{category_name}' using batch_size={MODEL_BATCH_SIZE}"
+    )
+
     if DEBUG and category_questions:
-        category_questions = category_questions[:debug_question_count]
         print(
             f"DEBUG mode enabled: using {len(category_questions)} question(s) from the category "
             f"and rollout noise_scale={effective_noise_scale:g} "

@@ -223,6 +223,7 @@ python -m baselines.graph_grpo
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
+| `BATCH_SIZE` | `32` | Сколько случайно sampled вопросов из категории использовать в одном запуске `graph_grpo` |
 | `DEBUG` | `false` | Быстрый smoke-режим для `graph_grpo` |
 | `DEBUG_N_QUESTIONS` | `4` | Сколько вопросов из категории использовать при `DEBUG=true` |
 | `DEBUG_NOISE_SCALE` | `0.02` | Effective rollout noise scale при `DEBUG=true` |
@@ -240,4 +241,4 @@ python -m baselines.graph_grpo
 
 `graph_grpo` должен стартовать с ненулевой инициализации. По умолчанию используется `average`; `topic` остаётся доступным явным override, а `zero` намеренно запрещён, потому что при текущем hook-based differentiable path даёт dead start с нулевым градиентом.
 
-При `DEBUG=true` метод не переходит в другую алгоритмическую ветку: он просто ограничивает число category-вопросов до `DEBUG_N_QUESTIONS` и использует меньший rollout noise scale `DEBUG_NOISE_SCALE`, чтобы smoke-run был быстрее и давал менее вырожденный градиентный сигнал.
+Обычный запуск `graph_grpo` больше не идёт по всем вопросам категории: на каждый run берётся случайный subset размера `BATCH_SIZE` (или меньше, если в категории вопросов меньше). При `DEBUG=true` этот subset дополнительно ограничивается сверху через `DEBUG_N_QUESTIONS`, а rollout noise scale заменяется на `DEBUG_NOISE_SCALE`, чтобы smoke-run был быстрее и давал менее вырожденный градиентный сигнал.
