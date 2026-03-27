@@ -23,6 +23,8 @@ class _DummyHandle:
 class _DummyModel:
     def __init__(self):
         self.reload_calls = 0
+        if torch is not None:
+            self.model = torch.nn.Linear(1, 1)
 
     def reload_model(self):
         self.reload_calls += 1
@@ -204,6 +206,7 @@ class TestGraphGrpoTrainer(unittest.TestCase):
         self.assertTrue(any(not torch.equal(call["direction"], rollout_abliterations[0]["direction"]) for call in rollout_abliterations[1:]))
         self.assertTrue(all(call["hook_alpha"] == 1.5 for call in hook_calls))
         self.assertEqual(len(hook_calls), 4)
+        self.assertTrue(all(not param.requires_grad for param in model.model.parameters()))
         self.assertIsNotNone(direction_weights.weights.grad)
         self.assertGreater(direction_weights.weights.grad.abs().sum().item(), 0.0)
         self.assertIn("mean_reward", metrics)
