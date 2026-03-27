@@ -11,6 +11,7 @@ export DEBUG_NOISE_SCALE=0.02
 
 # ---- Model ----
 export MODEL_NAME="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+export BATCH_SIZE=32
 
 # ---- Graph file (tags for refusal directions) ----
 export GRAPH_FILE="graphs/physical harm_wordnet_graph_actions_terms.txt"

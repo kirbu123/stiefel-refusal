@@ -17,6 +17,7 @@ def _resolve_results_dir() -> Path:
     return results_root
 
 MODEL_NAME = os.getenv("MODEL_NAME", "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B")
+MODEL_BATCH_SIZE = int(os.getenv("BATCH_SIZE", 32))
 
 N_SAMPLES_PER_CATEGORY = 10
 

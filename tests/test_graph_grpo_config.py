@@ -25,9 +25,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 class TestGraphGrpoConfig(unittest.TestCase):
     def test_graph_grpo_config_uses_w_sampling_knobs(self):
         config = load_config("graph_grpo")
+        model = config["model"]
         grpo = config["grpo"]
         weights = config["weights"]
 
+        self.assertEqual(model["batch_size"], 32)
         self.assertEqual(grpo["n_groups"], 4)
         self.assertEqual(grpo["noise_scale"], 0.1)
         self.assertNotIn("alphas", grpo)
@@ -39,6 +41,7 @@ class TestGraphGrpoConfig(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             apply_config_to_env(config)
 
+            self.assertEqual(os.environ["BATCH_SIZE"], "32")
             self.assertEqual(os.environ["GRPO_N_GROUPS"], "4")
             self.assertEqual(os.environ["GRPO_NOISE_SCALE"], "0.1")
             self.assertEqual(os.environ["GRPO_REF_ALPHA"], "1.0")
@@ -50,6 +53,7 @@ class TestGraphGrpoConfig(unittest.TestCase):
 
         self.assertIn("GRPO_N_GROUPS", script_text)
         self.assertIn("GRPO_NOISE_SCALE", script_text)
+        self.assertIn("BATCH_SIZE=32", script_text)
         self.assertIn("DEBUG=false", script_text)
         self.assertIn("DEBUG_N_QUESTIONS=4", script_text)
         self.assertIn("DEBUG_NOISE_SCALE=0.02", script_text)
@@ -88,8 +92,11 @@ class TestGraphGrpoConfig(unittest.TestCase):
         main_text = (PROJECT_ROOT / "baselines" / "graph_grpo" / "__main__.py").read_text(encoding="utf-8")
         trainer_text = (PROJECT_ROOT / "baselines" / "graph_grpo" / "trainer.py").read_text(encoding="utf-8")
 
-        self.assertIn("if DEBUG and category_questions:", main_text)
-        self.assertIn("category_questions = category_questions[:debug_question_count]", main_text)
+        self.assertIn("model=MODEL_NAME, batch_size=MODEL_BATCH_SIZE", main_text)
+        self.assertIn("effective_question_count = min(MODEL_BATCH_SIZE, len(all_category_questions))", main_text)
+        self.assertIn("category_questions = random.sample(all_category_questions, k=effective_question_count)", main_text)
+        self.assertIn("if DEBUG:", main_text)
+        self.assertIn("effective_question_count = min(effective_question_count, debug_question_count)", main_text)
         self.assertIn("effective_noise_scale = debug_noise_scale if DEBUG else GRPO_CONFIG[\"noise_scale\"]", main_text)
         self.assertIn("resolve_graph_grpo_debug_question_count(os.getenv(\"DEBUG_N_QUESTIONS\"))", main_text)
         self.assertIn("resolve_graph_grpo_debug_noise_scale(", main_text)
