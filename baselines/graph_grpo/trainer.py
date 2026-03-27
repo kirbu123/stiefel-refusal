@@ -54,6 +54,14 @@ def _get_cuda_memory_gb(fn_name: str = "memory_allocated") -> float:
     return float(getattr(torch.cuda, fn_name)() / 1e9)
 
 
+def _freeze_model_parameters(model) -> None:
+    """Ensure policy-loss backprop only targets direction weights, not the base LM."""
+    with torch.no_grad():
+        for param in model.model.parameters():
+            param.requires_grad_(False)
+            param.grad = None
+
+
 def _build_rollout_weight_variants(
     base_weights: torch.Tensor,
     n_groups: int,
@@ -285,6 +293,7 @@ def train_grpo_is_step(
 
     t0 = time.time()
     print(f"  [Step 7+8] Policy loss + backward (ref_alpha={ref_alpha}, clip={clip_ratio})...")
+    _freeze_model_parameters(model)
     actor_config = _make_actor_config(clip_ratio=clip_ratio, loss_agg_mode=loss_agg_mode)
     optimizer.zero_grad()
 
