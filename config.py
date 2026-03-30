@@ -96,6 +96,9 @@ TAG_FILTERED_QUESTIONS_FILE = Path(os.getenv("TAG_FILTERED_QUESTIONS_FILE", str(
 EVALUATE_LOCALITY = os.getenv("EVALUATE_LOCALITY", "true").lower() in ("true", "1", "yes")
 EVALUATION_BACKEND = os.getenv("EVALUATION_BACKEND", "local_llm_judge")
 DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
+CATEGORY_DATASET_SOURCE = os.getenv("CATEGORY_DATASET_SOURCE", "combined").strip() or "combined"
+_category_filter = os.getenv("CATEGORY_FILTER", "").strip()
+CATEGORY_FILTER = _category_filter or None
 
 WEIGHTS_INIT_TYPE = os.getenv("WEIGHTS_INIT_TYPE", "zero")
 

@@ -27,11 +27,12 @@ torch.manual_seed(42)
 torch.set_grad_enabled(False)
 
 from config import (
-    MODEL_NAME, CATEGORIES, GOOD_PROMPTS_DATASET,
+    MODEL_NAME, GOOD_PROMPTS_DATASET,
     JUDGE_API_URL, CLASSIFIER_API_URL, JUDGE_MODEL, FEW_SHOTS_PATH,
-    HARMLESS_EVAL_DATASET, EVALUATE_LOCALITY, GRAPH_FILE, MMLU_CONFIG, get_method_results_dir,
+    HARMLESS_EVAL_DATASET, EVALUATE_LOCALITY, GRAPH_FILE, MMLU_CONFIG,
+    CATEGORY_DATASET_SOURCE, CATEGORY_FILTER, get_method_results_dir,
 )
-from data_utils import load_all_datasets_with_categories, extract_response_after_think
+from data_utils import load_datasets_with_categories, extract_response_after_think
 from refusal_directions import compute_refusal_direction
 from model_utils import apply_abliteration_with_hyperparams
 from evaluate.metrics import evaluate_responses, evaluate_locality
@@ -71,22 +72,28 @@ def main():
     print("=" * 80)
     print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Model: {MODEL_NAME}")
-    print(f"Categories: {len(CATEGORIES)}")
+    print(f"Category dataset source: {CATEGORY_DATASET_SOURCE}")
+    if CATEGORY_FILTER:
+        print(f"Category filter: {CATEGORY_FILTER}")
     print(f"Hyperparameters: {HYPERPARAMS}")
     print()
 
     print("Loading data...")
-    all_data = load_all_datasets_with_categories()
+    all_data, categories = load_datasets_with_categories(
+        CATEGORY_DATASET_SOURCE,
+        CATEGORY_FILTER,
+    )
     print(f"Total samples loaded: {len(all_data)}")
+    print(f"Categories: {len(categories)}")
 
-    data_by_category = {cat: [] for cat in CATEGORIES}
+    data_by_category = {cat: [] for cat in categories}
     for item in all_data:
         cat = item.get('category', '')
         if cat in data_by_category:
             data_by_category[cat].append(item)
 
     print("\nSamples per category:")
-    for cat in CATEGORIES:
+    for cat in categories:
         print(f"  {cat}: {len(data_by_category[cat])}")
 
     print("\nLoading model...")
@@ -146,16 +153,13 @@ def main():
     param_combinations = list(product(*param_values))
 
     print(f"\nTotal hyperparameter combinations: {len(param_combinations)}")
-    print(f"Total categories: {len(CATEGORIES)}")
-    print(f"Total experiments: {len(CATEGORIES) * len(param_combinations)}")
+    print(f"Total categories: {len(categories)}")
+    print(f"Total experiments: {len(categories) * len(param_combinations)}")
     print()
 
-    for category_idx, category_name in enumerate(CATEGORIES, 1):
-        if category_name != "Physical harm":
-            print(category_name)
-            continue
+    for category_idx, category_name in enumerate(categories, 1):
         print("\n" + "=" * 80)
-        print(f"CATEGORY {category_idx}/{len(CATEGORIES)}: {category_name}")
+        print(f"CATEGORY {category_idx}/{len(categories)}: {category_name}")
         print("=" * 80)
 
         category_items = data_by_category.get(category_name, [])
