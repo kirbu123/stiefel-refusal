@@ -1,8 +1,13 @@
 # GRPO-IS: Graph-Based Refusal Direction Learning via GRPO with Importance Sampling
 
-Метод обучает скалярные веса `LearnableDirectionWeights` для взвешенного суммирования
-**замороженных** refusal-направлений графа вершин. Поведение модели меняется через
-аблитерацию — итоговые веса определяют, насколько сильно «стирать» каждое направление.
+Метод обучает веса `LearnableDirectionWeights` для взвешенного суммирования
+**замороженных** refusal-направлений графа вершин. Поддерживаются два режима:
+
+- `WEIGHTS_MODE=scalar` — один обучаемый скаляр на каждое refusal-направление
+- `WEIGHTS_MODE=dense` — полная матрица коэффициентов `(n_layers+1, hidden_size)` на направление
+
+Поведение модели меняется через аблитерацию — итоговые веса определяют, насколько
+сильно «стирать» каждое направление.
 
 ---
 
@@ -12,9 +17,10 @@
 Каждой вершине соответствует refusal-direction — вектор `(n_layers+1, hidden_size)`,
 вычисленный как разность активаций модели на harmful и harmless примерах.
 
-Задача: найти веса `w ∈ ℝ^{n_vertices}` такие, что взвешенная сумма направлений,
+Задача: найти веса для направлений графа такие, что взвешенная сумма направлений,
 применённая как аблитерация, максимизирует вредоносность ответов модели
-(то есть успешно обходит отказ).
+(то есть успешно обходит отказ). В scalar-режиме это `w ∈ ℝ^{n_vertices}`,
+в dense-режиме — тензор коэффициентов на весь `(layer, hidden)` профиль каждого направления.
 
 Обучение — через GRPO с importance sampling (off-policy rollout).
 
@@ -40,6 +46,15 @@ base_W = stopgrad(direction_weights.weights)
 Обучаемый параметр остаётся один: `LearnableDirectionWeights.weights`.
 Разные behaviour policies `μ_m` отличаются только detached-копиями текущего `W`,
 а не разными `alpha`.
+
+- В `scalar`-режиме `W_m.shape == (n_directions,)`, а `noise_m` добавляет одно независимое
+  гауссово смещение на каждое refusal-направление.
+- В `dense`-режиме `W_m.shape == (n_directions, n_layers+1, hidden_size)`, и шум
+  добавляется поэлементно ко всей матрице коэффициентов.
+- Для rollout'ов всегда используется общий `ref_alpha`; sampled policies отличаются
+  только самими весами `W_m`.
+- В `scalar`-режиме итоговое направление задаётся как
+  `combined_direction_m = normalize_layerwise(sum_i W_m[i] * d_i)`.
 
 ### Шаг 3: Лог-вероятности базовой политики (π_θ_old)
 
@@ -236,9 +251,18 @@ python -m baselines.graph_grpo
 | `GRPO_LEARNING_RATE` | `1e-3` | Learning rate (Adam) |
 | `ABLITERATION_MAX_WEIGHT` | `2.0` | Максимальная интенсивность аблитерации |
 | `ABLITERATION_MAX_WEIGHT_POSITION` | `0.7` | Позиция пика (доля от числа слоёв) |
+| `WEIGHTS_MODE` | `scalar` | Параметризация весов (`scalar` / `dense`) |
 | `WEIGHTS_INIT_TYPE` | `average` | Инициализация весов (`average` / `topic`; `zero` не поддерживается в текущем differentiable trainer) |
 | `EVALUATION_BACKEND` | `llamaguard` | Бэкенд оценки (`llamaguard` / `local_llm_judge`) |
 
-`graph_grpo` должен стартовать с ненулевой инициализации. По умолчанию используется `average`; `topic` остаётся доступным явным override, а `zero` намеренно запрещён, потому что при текущем hook-based differentiable path даёт dead start с нулевым градиентом.
+`graph_grpo` по умолчанию использует `WEIGHTS_MODE=scalar`, то есть один обучаемый
+скаляр на направление. Режим `dense` сохраняет старую полную параметризацию и
+доступен явным override.
+
+`graph_grpo` должен стартовать с ненулевой инициализации. По умолчанию используется
+`average`; `topic` остаётся доступным явным override, а `zero` намеренно запрещён,
+потому что при текущем hook-based differentiable path даёт dead start с нулевым
+градиентом. В scalar-режиме это означает `1 / n_directions` для всех направлений
+или `1` только у выбранного topic-направления.
 
 Обычный запуск `graph_grpo` больше не идёт по всем вопросам категории: на каждый run берётся случайный subset размера `BATCH_SIZE` (или меньше, если в категории вопросов меньше). При `DEBUG=true` этот subset дополнительно ограничивается сверху через `DEBUG_N_QUESTIONS`, а rollout noise scale заменяется на `DEBUG_NOISE_SCALE`, чтобы smoke-run был быстрее и давал менее вырожденный градиентный сигнал.

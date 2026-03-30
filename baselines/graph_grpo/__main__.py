@@ -61,12 +61,15 @@ from baselines.graph_grpo.trainer import train_grpo_is_step
 from baselines.graph_grpo.runtime_config import (
     resolve_graph_grpo_debug_noise_scale,
     resolve_graph_grpo_debug_question_count,
+    resolve_graph_grpo_weights_mode,
     resolve_graph_grpo_weights_init_type,
+    validate_graph_grpo_weights_mode,
     validate_graph_grpo_weights_init_type,
 )
 
 
 def main():
+    weights_mode = resolve_graph_grpo_weights_mode(os.getenv("WEIGHTS_MODE"))
     weights_init_type = resolve_graph_grpo_weights_init_type(os.getenv("WEIGHTS_INIT_TYPE"))
     debug_question_count = resolve_graph_grpo_debug_question_count(os.getenv("DEBUG_N_QUESTIONS"))
     debug_noise_scale = resolve_graph_grpo_debug_noise_scale(
@@ -81,6 +84,7 @@ def main():
     print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"GRPO Config: {GRPO_CONFIG}")
     print(f"Abliteration Params: {ABLITERATION_PARAMS}")
+    print(f"Weights Mode: {weights_mode}")
     print(f"Weights Init Type: {weights_init_type}")
     print(f"Batch Size: {MODEL_BATCH_SIZE}")
     print(f"Evaluation backend: {EVALUATION_BACKEND}")
@@ -164,8 +168,10 @@ def main():
             physical_harm_idx = idx
             break
 
+    validate_graph_grpo_weights_mode(weights_mode)
     validate_graph_grpo_weights_init_type(weights_init_type)
 
+    print(f"Using weights mode '{weights_mode}'")
     print(f"Using weights init type '{weights_init_type}'")
     if weights_init_type == "topic":
         print(
@@ -175,10 +181,12 @@ def main():
 
     direction_weights = LearnableDirectionWeights(
         n_directions=n_directions, n_layers=n_layers, hidden_size=hidden_size,
-        init_type=weights_init_type, topic_idx=physical_harm_idx,
+        init_type=weights_init_type, topic_idx=physical_harm_idx, mode=weights_mode,
     )
     device = extracted_directions[0].device
     direction_weights = direction_weights.to(device)
+    weights_shape = list(direction_weights.weights.shape)
+    print(f"Trainable weights shape: {weights_shape}")
 
     optimizer = torch.optim.Adam(direction_weights.parameters(), lr=GRPO_CONFIG["learning_rate"])
 
@@ -227,6 +235,9 @@ def main():
             config={
                 "model": MODEL_NAME, "category": category_name,
                 "n_directions": n_directions, "n_layers": n_layers,
+                "weights_mode": weights_mode,
+                "weights_init_type": weights_init_type,
+                "weights_shape": weights_shape,
                 "grpo_config": GRPO_CONFIG, "abliteration_params": ABLITERATION_PARAMS,
             },
         )
@@ -308,6 +319,8 @@ def main():
         "experiment_config": {
             "model": MODEL_NAME, "category": category_name,
             "n_questions": len(category_questions), "n_directions": n_directions,
+            "weights_mode": weights_mode, "weights_init_type": weights_init_type,
+            "weights_shape": weights_shape,
             "grpo_config": GRPO_CONFIG, "abliteration_params": ABLITERATION_PARAMS,
             "training_history": training_history,
         },
@@ -333,7 +346,14 @@ def main():
     weights_pt_file = GRPO_RESULTS_DIR / f"coefficients_{category_safe_name}_{timestamp_str}.pt"
     torch.save({
         "weights": direction_weights.weights.data.cpu(),
-        "metadata": {"model": MODEL_NAME, "n_directions": n_directions, "n_layers": n_layers},
+        "metadata": {
+            "model": MODEL_NAME,
+            "n_directions": n_directions,
+            "n_layers": n_layers,
+            "weights_mode": weights_mode,
+            "weights_init_type": weights_init_type,
+            "weights_shape": weights_shape,
+        },
     }, weights_pt_file)
     print(f"Coefficients saved to: {weights_pt_file}")
 
