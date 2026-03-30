@@ -3,6 +3,25 @@ Runtime-only configuration helpers for graph_grpo.
 """
 
 
+def resolve_graph_grpo_weights_mode(env_value: str | None) -> str:
+    """Default graph_grpo to scalar-per-direction weights when env is unset."""
+    if env_value is None:
+        return "scalar"
+
+    normalized = env_value.strip()
+    if not normalized:
+        return "scalar"
+    return normalized
+
+
+def validate_graph_grpo_weights_mode(mode: str) -> None:
+    """Validate graph_grpo weight parameterization."""
+    if mode not in {"scalar", "dense"}:
+        raise ValueError(
+            f"graph_grpo only supports WEIGHTS_MODE in {{'scalar', 'dense'}}, got '{mode}'."
+        )
+
+
 def resolve_graph_grpo_debug_question_count(
     env_value: str | None,
     default: int = 4,

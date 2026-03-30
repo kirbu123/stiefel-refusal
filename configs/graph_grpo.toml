@@ -24,6 +24,7 @@ min_weight = 0.1
 min_weight_distance = 0.3
 
 [weights]
+mode = "scalar"
 init_type = "average"
 
 [evaluation]

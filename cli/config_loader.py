@@ -118,6 +118,8 @@ def apply_config_to_env(config: dict[str, Any], model_name: str | None = None):
     weights = config.get("weights", {})
     if weights.get("init_type"):
         os.environ["WEIGHTS_INIT_TYPE"] = weights["init_type"]
+    if weights.get("mode"):
+        os.environ["WEIGHTS_MODE"] = weights["mode"]
 
     evl = config.get("evaluation", {})
     if evl.get("backend"):

@@ -35,6 +35,7 @@ export ABLITERATION_MIN_WEIGHT=0.1
 export ABLITERATION_MIN_WEIGHT_DISTANCE=0.3
 
 # ---- Weight initialization ----
+export WEIGHTS_MODE="scalar"
 export WEIGHTS_INIT_TYPE="average"
 
 # ---- Evaluation backend ----

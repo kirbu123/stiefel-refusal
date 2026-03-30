@@ -13,7 +13,9 @@ sys.modules.setdefault("cli.ui", fake_ui)
 from baselines.graph_grpo.runtime_config import (
     resolve_graph_grpo_debug_noise_scale,
     resolve_graph_grpo_debug_question_count,
+    resolve_graph_grpo_weights_mode,
     resolve_graph_grpo_weights_init_type,
+    validate_graph_grpo_weights_mode,
     validate_graph_grpo_weights_init_type,
 )
 from cli.config_loader import apply_config_to_env, load_config
@@ -33,6 +35,7 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertEqual(grpo["n_groups"], 4)
         self.assertEqual(grpo["noise_scale"], 0.1)
         self.assertNotIn("alphas", grpo)
+        self.assertEqual(weights["mode"], "scalar")
         self.assertEqual(weights["init_type"], "average")
 
     def test_apply_config_to_env_sets_new_grpo_env_vars_without_alphas(self):
@@ -45,6 +48,7 @@ class TestGraphGrpoConfig(unittest.TestCase):
             self.assertEqual(os.environ["GRPO_N_GROUPS"], "4")
             self.assertEqual(os.environ["GRPO_NOISE_SCALE"], "0.1")
             self.assertEqual(os.environ["GRPO_REF_ALPHA"], "1.0")
+            self.assertEqual(os.environ["WEIGHTS_MODE"], "scalar")
             self.assertEqual(os.environ["WEIGHTS_INIT_TYPE"], "average")
             self.assertNotIn("GRPO_ALPHAS", os.environ)
 
@@ -57,8 +61,24 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertIn("DEBUG=false", script_text)
         self.assertIn("DEBUG_N_QUESTIONS=4", script_text)
         self.assertIn("DEBUG_NOISE_SCALE=0.02", script_text)
+        self.assertIn('WEIGHTS_MODE="scalar"', script_text)
         self.assertIn('WEIGHTS_INIT_TYPE="average"', script_text)
         self.assertNotIn("GRPO_ALPHAS", script_text)
+
+    def test_graph_grpo_runtime_defaults_weights_mode_to_scalar(self):
+        self.assertEqual(resolve_graph_grpo_weights_mode(None), "scalar")
+        self.assertEqual(resolve_graph_grpo_weights_mode(""), "scalar")
+        self.assertEqual(resolve_graph_grpo_weights_mode("dense"), "dense")
+
+    def test_graph_grpo_runtime_validates_weights_mode(self):
+        validate_graph_grpo_weights_mode("scalar")
+        validate_graph_grpo_weights_mode("dense")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "graph_grpo only supports WEIGHTS_MODE",
+        ):
+            validate_graph_grpo_weights_mode("weird")
 
     def test_graph_grpo_runtime_defaults_weights_init_to_average(self):
         self.assertEqual(resolve_graph_grpo_weights_init_type(None), "average")
@@ -100,6 +120,7 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertIn("effective_noise_scale = debug_noise_scale if DEBUG else GRPO_CONFIG[\"noise_scale\"]", main_text)
         self.assertIn("resolve_graph_grpo_debug_question_count(os.getenv(\"DEBUG_N_QUESTIONS\"))", main_text)
         self.assertIn("resolve_graph_grpo_debug_noise_scale(", main_text)
+        self.assertIn("resolve_graph_grpo_weights_mode(os.getenv(\"WEIGHTS_MODE\"))", main_text)
         self.assertIn("resolve_graph_grpo_weights_init_type(os.getenv(\"WEIGHTS_INIT_TYPE\"))", main_text)
         self.assertIn("Loss: {accumulated_loss:.6e}", trainer_text)
         self.assertIn("Grad norm: {grad_norm:.6e}", trainer_text)
