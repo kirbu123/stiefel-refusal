@@ -7,7 +7,7 @@
 - `WEIGHTS_MODE=scalar` — один обучаемый скаляр на каждое refusal-направление
 - `WEIGHTS_MODE=dense` — полная матрица коэффициентов `(n_layers+1, hidden_size)` на направление
 - `OPTIMIZER_METHOD=grpo` — текущий gradient-based GRPO-IS trainer
-- `OPTIMIZER_METHOD=optuna` — scalar-only поиск коэффициентов через Optuna
+- `OPTIMIZER_METHOD=optuna` — поиск коэффициентов через Optuna для `scalar` и `dense`
 
 Поведение модели меняется через аблитерацию — итоговые веса определяют, насколько
 сильно «стирать» каждое направление.
@@ -280,19 +280,25 @@ bash scripts/run_graph_grpo.sh \
 | `OPTUNA_SAMPLER` | `tpe` | Sampler для `OPTIMIZER_METHOD=optuna` (`tpe` / `random` / `gp` / `cmaes` / `qmc`) |
 | `OPTUNA_N_TRIALS` | `50` | Число trial-ов для `OPTIMIZER_METHOD=optuna` |
 | `OPTUNA_SAMPLER_SEED` | `42` | Seed для выбранного sampler-а |
-| `OPTUNA_WEIGHT_MIN` | `-2.0` | Нижняя граница поиска scalar-коэффициентов в `optuna` |
-| `OPTUNA_WEIGHT_MAX` | `2.0` | Верхняя граница поиска scalar-коэффициентов в `optuna` |
+| `OPTUNA_WEIGHT_MIN` | `-2.0` | Нижняя граница поиска каждого Optuna-коэффициента в `scalar` и `dense` режимах |
+| `OPTUNA_WEIGHT_MAX` | `2.0` | Верхняя граница поиска каждого Optuna-коэффициента в `scalar` и `dense` режимах |
 | `EVALUATION_BACKEND` | `llamaguard` | Бэкенд оценки (`llamaguard` / `local_llm_judge`) |
 
 `graph_grpo` по умолчанию использует `WEIGHTS_MODE=scalar`, то есть один обучаемый
 скаляр на направление. Режим `dense` сохраняет старую полную параметризацию и
 доступен явным override.
 
-`OPTIMIZER_METHOD=optuna` сейчас поддерживается только вместе с
-`WEIGHTS_MODE=scalar`. В этом режиме objective равен `mean harmfulness` на том же
-батче вопросов, а лучшее значение сохраняется в `answers_*.json` как
-`optimal_harmfulness` с `optimal_harmfulness_source="best_trial_mean_reward"`.
-По умолчанию используется `OPTUNA_SAMPLER=tpe`.
+`OPTIMIZER_METHOD=optuna` поддерживает оба режима параметризации:
+`WEIGHTS_MODE=scalar` и `WEIGHTS_MODE=dense`. В обоих случаях objective равен
+`mean harmfulness` на том же батче вопросов, а лучшее значение сохраняется в
+`answers_*.json` как `optimal_harmfulness` с
+`optimal_harmfulness_source="best_trial_mean_reward"`. По умолчанию используется
+`OPTUNA_SAMPLER=tpe`.
+
+Для `WEIGHTS_MODE=dense` Optuna ищет полный тензор коэффициентов поэлементно,
+то есть search space имеет форму `(n_directions, n_layers+1, hidden_size)` и
+может быть очень большим. Чтобы не раздувать артефакты, в `optimization_history`
+для dense-trials сохраняются summary-статистики весов, а не полный тензор каждого trial-а.
 
 `graph_grpo` должен стартовать с ненулевой инициализации. По умолчанию используется
 `average`; `topic` остаётся доступным явным override, а `zero` намеренно запрещён,

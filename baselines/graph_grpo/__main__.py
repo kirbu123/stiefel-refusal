@@ -56,7 +56,7 @@ from evaluate.mmlu import (
     get_cached_or_evaluate_original_mmlu,
 )
 
-from baselines.graph_grpo.optuna_optimizer import optimize_scalar_weights_with_optuna
+from baselines.graph_grpo.optuna_optimizer import optimize_weights_with_optuna
 from baselines.graph_grpo.trainer import train_grpo_is_step
 from baselines.graph_grpo.runtime_config import (
     resolve_graph_grpo_category_dataset_source,
@@ -586,7 +586,7 @@ def main():
         print("\n" + "=" * 80)
         print("OPTUNA OPTIMIZATION")
         print("=" * 80)
-        optimization_result = optimize_scalar_weights_with_optuna(
+        optimization_result = optimize_weights_with_optuna(
             direction_weights=direction_weights,
             extracted_directions=extracted_directions,
             model=model,
