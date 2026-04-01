@@ -39,10 +39,10 @@ export WEIGHTS_MODE="scalar"
 export WEIGHTS_INIT_TYPE="average"
 
 # ---- Optimizer selection ----
-export OPTIMIZER_METHOD="grpo"
+export OPTIMIZER_METHOD="optuna"
 
 # ---- Optuna scalar search ----
-export OPTUNA_SAMPLER="tpe"
+export OPTUNA_SAMPLER="cmaes"
 export OPTUNA_N_TRIALS=50
 export OPTUNA_SAMPLER_SEED=42
 export OPTUNA_WEIGHT_MIN=-2.0
