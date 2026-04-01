@@ -94,6 +94,30 @@ def _load_classifier_categories() -> List[Dict[str, str]]:
     return classifier_categories
 
 
+def _evaluate_model_harmfulness(
+    model,
+    questions: List[str],
+    classifier_categories: List[Dict[str, str]],
+) -> Dict[str, Any]:
+    """Evaluate the current model state on the selected harmfulness batch."""
+    from baselines.graph_grpo.reward import compute_reward
+
+    responses_raw = model.get_responses_batched(questions)
+    responses = [extract_response_after_think(response) for response in responses_raw]
+    scores = [int(score) for score in compute_reward(
+        questions,
+        responses,
+        classifier_categories,
+        EVALUATION_BACKEND,
+    )]
+    mean_harmfulness = float(np.mean(scores)) if scores else None
+    return {
+        "responses": responses,
+        "scores": scores,
+        "mean_harmfulness": mean_harmfulness,
+    }
+
+
 def _run_grpo_training(
     direction_weights: LearnableDirectionWeights,
     extracted_directions: List[torch.Tensor],
@@ -185,23 +209,16 @@ def _final_evaluate(
                 f"{mmlu_block['original']['accuracy']:.4f} -> {mmlu_block['modified']['accuracy']:.4f}"
             )
 
-    final_responses_raw = model.get_responses_batched(category_questions)
-    final_responses = [extract_response_after_think(r) for r in final_responses_raw]
-
-    from baselines.graph_grpo.reward import compute_reward
-
-    final_scores = [int(s) for s in compute_reward(
-        category_questions,
-        final_responses,
-        classifier_categories,
-        EVALUATION_BACKEND,
-    )]
-    final_mean_harmfulness = float(np.mean(final_scores)) if final_scores else None
+    harmfulness_result = _evaluate_model_harmfulness(
+        model=model,
+        questions=category_questions,
+        classifier_categories=classifier_categories,
+    )
 
     return {
-        "responses": final_responses,
-        "scores": final_scores,
-        "final_mean_harmfulness": final_mean_harmfulness,
+        "responses": harmfulness_result["responses"],
+        "scores": harmfulness_result["scores"],
+        "final_mean_harmfulness": harmfulness_result["mean_harmfulness"],
         "mmlu_block": mmlu_block,
     }
 
@@ -394,6 +411,31 @@ def main():
             },
         )
 
+    print("\n" + "=" * 80)
+    print("CLEAN MODEL EVALUATION")
+    print("=" * 80)
+    print(
+        f"Evaluating clean model on full dataset: {len(all_category_questions)} "
+        f"question(s); training will use batch of {len(category_questions)} question(s)"
+    )
+    model.reload_model()
+    clean_harmfulness_result = _evaluate_model_harmfulness(
+        model=model,
+        questions=all_category_questions,
+        classifier_categories=classifier_categories,
+    )
+    clean_mean_harmfulness = clean_harmfulness_result["mean_harmfulness"]
+    print(f"Clean model harmfulness: {clean_mean_harmfulness:.3f}" if clean_mean_harmfulness is not None else "Clean model harmfulness: n/a")
+
+    if WANDB_AVAILABLE:
+        clean_log_payload = {}
+        if clean_mean_harmfulness is not None:
+            clean_log_payload["clean_model/harmfulness"] = clean_mean_harmfulness
+        if original_mmlu_result is not None:
+            clean_log_payload["clean_model/mmlu_accuracy"] = original_mmlu_result["summary"]["accuracy"]
+        if clean_log_payload:
+            wandb.log(clean_log_payload)
+
     if optimizer_method == "grpo":
         optimization_result = _run_grpo_training(
             direction_weights=direction_weights,
@@ -456,6 +498,22 @@ def main():
     else:
         optimal_harmfulness = optimization_result["best_value"]
         optimal_harmfulness_source = "best_trial_mean_reward"
+
+    best_model_harmfulness_result = _evaluate_model_harmfulness(
+        model=model,
+        questions=all_category_questions,
+        classifier_categories=classifier_categories,
+    )
+    best_model_mean_harmfulness = best_model_harmfulness_result["mean_harmfulness"]
+
+    if WANDB_AVAILABLE:
+        best_model_log_payload = {}
+        if best_model_mean_harmfulness is not None:
+            best_model_log_payload["best_value_model/harmfulness"] = best_model_mean_harmfulness
+        if final_result["mmlu_block"] is not None:
+            best_model_log_payload["best_value_model/mmlu_accuracy"] = final_result["mmlu_block"]["modified"]["accuracy"]
+        if best_model_log_payload:
+            wandb.log(best_model_log_payload)
 
     category_safe_name = category_name.replace("/", "_").replace(" ", "_")
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
