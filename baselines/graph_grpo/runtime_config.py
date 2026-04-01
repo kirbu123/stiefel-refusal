@@ -77,11 +77,7 @@ def validate_graph_grpo_optimizer_method(method: str) -> None:
 
 def validate_graph_grpo_optimizer_compatibility(method: str, weights_mode: str) -> None:
     """Ensure the selected optimizer supports the requested weight parameterization."""
-    if method == "optuna" and weights_mode != "scalar":
-        raise ValueError(
-            "graph_grpo currently supports OPTIMIZER_METHOD='optuna' only with "
-            "WEIGHTS_MODE='scalar'."
-        )
+    return None
 
 
 def resolve_graph_grpo_weights_mode(env_value: str | None) -> str:

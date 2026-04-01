@@ -128,6 +128,7 @@ class TestGraphGrpoConfig(unittest.TestCase):
         validate_graph_grpo_optimizer_method("optuna")
         validate_graph_grpo_optimizer_compatibility("grpo", "dense")
         validate_graph_grpo_optimizer_compatibility("optuna", "scalar")
+        validate_graph_grpo_optimizer_compatibility("optuna", "dense")
         validate_graph_grpo_optuna_sampler("tpe")
         validate_graph_grpo_optuna_sampler("random")
         validate_graph_grpo_optuna_sampler("gp")
@@ -142,9 +143,6 @@ class TestGraphGrpoConfig(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "graph_grpo only supports CATEGORY_FILTER"):
             validate_graph_grpo_category_filter("unknown_category")
-
-        with self.assertRaisesRegex(ValueError, "OPTIMIZER_METHOD='optuna' only with WEIGHTS_MODE='scalar'"):
-            validate_graph_grpo_optimizer_compatibility("optuna", "dense")
 
         with self.assertRaisesRegex(ValueError, "graph_grpo only supports OPTUNA_SAMPLER"):
             validate_graph_grpo_optuna_sampler("nsga2")
@@ -223,6 +221,7 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertIn('category_dataset_source', main_text)
         self.assertIn("resolve_graph_grpo_weights_mode(os.getenv(\"WEIGHTS_MODE\"))", main_text)
         self.assertIn("resolve_graph_grpo_weights_init_type(os.getenv(\"WEIGHTS_INIT_TYPE\"))", main_text)
+        self.assertIn("optimize_weights_with_optuna(", main_text)
         self.assertIn('"optimal_harmfulness"', main_text)
         self.assertIn('"optimal_harmfulness_source"', main_text)
         self.assertIn('"best_train_batch_mean_harmfulness"', main_text)

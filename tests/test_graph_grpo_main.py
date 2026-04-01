@@ -81,6 +81,7 @@ class TestGraphGrpoMain(unittest.TestCase):
         category_filter,
         model_batch_size=2,
         optimizer_method="optuna",
+        weights_mode="scalar",
         grpo_n_epochs=1,
         mmlu_enabled=False,
         train_metrics_sequence=None,
@@ -218,7 +219,7 @@ class TestGraphGrpoMain(unittest.TestCase):
 
         fake_optuna = types.ModuleType("baselines.graph_grpo.optuna_optimizer")
 
-        def fake_optimize_scalar_weights_with_optuna(
+        def fake_optimize_weights_with_optuna(
             direction_weights,
             extracted_directions,
             model,
@@ -234,23 +235,49 @@ class TestGraphGrpoMain(unittest.TestCase):
             weight_max,
             backend,
         ):
-            direction_weights.weights = torch.tensor([0.75, -0.25], dtype=torch.float32)
-            return {
-                "optimization_history": [
+            if direction_weights.mode == "dense":
+                best_weights_tensor = torch.arange(
+                    direction_weights.weights.numel(),
+                    dtype=torch.float32,
+                ).reshape_as(direction_weights.weights)
+                optimization_history = [
                     {
                         "trial_number": 0,
-                        "weights": [0.75, -0.25],
+                        "weights_mode": "dense",
+                        "weights_shape": list(best_weights_tensor.shape),
+                        "weights_mean": float(best_weights_tensor.mean().item()),
+                        "weights_std": float(best_weights_tensor.std(unbiased=False).item()),
+                        "weights_min": float(best_weights_tensor.min().item()),
+                        "weights_max": float(best_weights_tensor.max().item()),
+                        "weights_norm": float(best_weights_tensor.norm().item()),
                         "mean_reward": 1.0,
                         "best_reward": 1.0,
                         "n_questions": len(questions),
                     }
-                ],
+                ]
+            else:
+                best_weights_tensor = torch.tensor([0.75, -0.25], dtype=torch.float32)
+                optimization_history = [
+                    {
+                        "trial_number": 0,
+                        "weights": [0.75, -0.25],
+                        "weights_mode": "scalar",
+                        "mean_reward": 1.0,
+                        "best_reward": 1.0,
+                        "n_questions": len(questions),
+                    }
+                ]
+
+            direction_weights.weights = best_weights_tensor
+            return {
+                "optimization_history": optimization_history,
                 "best_trial_number": 0,
                 "best_value": 1.0,
-                "best_weights": [0.75, -0.25],
+                "best_weights": best_weights_tensor.tolist(),
             }
 
-        fake_optuna.optimize_scalar_weights_with_optuna = fake_optimize_scalar_weights_with_optuna
+        fake_optuna.optimize_weights_with_optuna = fake_optimize_weights_with_optuna
+        fake_optuna.optimize_scalar_weights_with_optuna = fake_optimize_weights_with_optuna
 
         fake_trainer = types.ModuleType("baselines.graph_grpo.trainer")
         trainer_metrics_iter = iter(
@@ -283,7 +310,7 @@ class TestGraphGrpoMain(unittest.TestCase):
             "CATEGORY_DATASET_SOURCE": category_dataset_source,
             "CATEGORY_FILTER": category_filter,
             "OPTIMIZER_METHOD": optimizer_method,
-            "WEIGHTS_MODE": "scalar",
+            "WEIGHTS_MODE": weights_mode,
             "WEIGHTS_INIT_TYPE": "average",
         }
 
@@ -414,6 +441,7 @@ class TestGraphGrpoMain(unittest.TestCase):
             category_filter="Physical harm",
             model_batch_size=2,
             optimizer_method="grpo",
+            weights_mode="scalar",
             grpo_n_epochs=3,
             mmlu_enabled=True,
             train_metrics_sequence=[
@@ -481,6 +509,7 @@ class TestGraphGrpoMain(unittest.TestCase):
             category_filter="Physical harm",
             model_batch_size=2,
             optimizer_method="grpo",
+            weights_mode="scalar",
             grpo_n_epochs=1,
             mmlu_enabled=False,
             train_metrics_sequence=[{"mean_reward": 0.7, "best_reward": 0.9}],
@@ -493,6 +522,32 @@ class TestGraphGrpoMain(unittest.TestCase):
         self.assertFalse(any("clean_model/mmlu_score" in payload for payload in scalar_payloads))
         self.assertFalse(any("best_value_model/mmlu_score" in payload for payload in scalar_payloads))
         self.assertFalse(any("best_batch_model/mmlu_score" in payload for payload in scalar_payloads))
+
+    def test_main_reaches_dense_optuna_path_and_saves_dense_weights(self):
+        dataset = [
+            {"instruction": "physical-question-1", "category": "Physical harm", "source": "combined"},
+            {"instruction": "physical-question-2", "category": "Physical harm", "source": "combined"},
+        ]
+
+        result = self._run_main(
+            dataset=dataset,
+            category_dataset_source="combined",
+            category_filter="Physical harm",
+            model_batch_size=2,
+            optimizer_method="optuna",
+            weights_mode="dense",
+            mmlu_enabled=False,
+        )
+
+        self.assertEqual(result["answers_data"]["experiment_config"]["weights_mode"], "dense")
+        self.assertEqual(len(result["answers_data"]["final_weights"]), 2)
+        self.assertEqual(len(result["answers_data"]["final_weights"][0]), 3)
+        self.assertEqual(len(result["answers_data"]["final_weights"][0][0]), 2)
+        self.assertIn("optimization_history", result["answers_data"])
+        dense_history = result["answers_data"]["optimization_history"][0]
+        self.assertEqual(dense_history["weights_mode"], "dense")
+        self.assertIn("weights_shape", dense_history)
+        self.assertNotIn("weights", dense_history)
 
 
 if __name__ == "__main__":

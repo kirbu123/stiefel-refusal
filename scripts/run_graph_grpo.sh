@@ -110,7 +110,7 @@ export WEIGHTS_INIT_TYPE="average"
 # ---- Optimizer selection ----
 export OPTIMIZER_METHOD="optuna"
 
-# ---- Optuna scalar search ----
+# ---- Optuna weight search ----
 export OPTUNA_SAMPLER="cmaes"
 export OPTUNA_N_TRIALS=50
 export OPTUNA_SAMPLER_SEED=42

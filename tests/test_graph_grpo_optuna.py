@@ -6,7 +6,12 @@ try:
 except ModuleNotFoundError:
     torch = None
 
-if torch is not None:
+try:
+    import optuna
+except ModuleNotFoundError:
+    optuna = None
+
+if torch is not None and optuna is not None:
     from baselines.graph_grpo import optuna_optimizer as optuna_module
     from model_utils import LearnableDirectionWeights
 
@@ -22,7 +27,7 @@ class _DummyModel:
         return [f"<think>hidden</think>answer-{idx}" for idx, _ in enumerate(questions)]
 
 
-@unittest.skipUnless(torch is not None, "torch is required for graph_grpo optuna tests")
+@unittest.skipUnless(torch is not None and optuna is not None, "torch and optuna are required for graph_grpo optuna tests")
 class TestGraphGrpoOptuna(unittest.TestCase):
     def test_create_optuna_sampler_supports_configured_names(self):
         tpe = optuna_module.create_optuna_sampler("tpe", sampler_seed=42)
@@ -39,6 +44,36 @@ class TestGraphGrpoOptuna(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Unsupported Optuna sampler"):
             optuna_module.create_optuna_sampler("nsga2", sampler_seed=42)
+
+    def test_suggest_trial_weights_supports_dense_shape(self):
+        direction_weights = LearnableDirectionWeights(
+            n_directions=2,
+            n_layers=1,
+            hidden_size=2,
+            init_type="average",
+            mode="dense",
+        )
+        study = optuna.create_study(direction="maximize")
+        trial = study.ask()
+
+        dense_weights = optuna_module.suggest_trial_weights(
+            trial=trial,
+            direction_weights=direction_weights,
+            weight_min=-2.0,
+            weight_max=2.0,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+
+        self.assertEqual(tuple(dense_weights.shape), (2, 2, 2))
+        self.assertEqual(len(trial.params), 8)
+        reconstructed = optuna_module.reconstruct_weights_from_params(
+            params=trial.params,
+            direction_weights=direction_weights,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+        self.assertTrue(torch.allclose(dense_weights, reconstructed))
 
     def test_evaluate_scalar_weights_returns_metrics(self):
         direction_weights = LearnableDirectionWeights(
@@ -81,10 +116,64 @@ class TestGraphGrpoOptuna(unittest.TestCase):
         self.assertEqual(model.reload_calls, 1)
         self.assertEqual(len(apply_calls), 1)
         self.assertEqual(result["weights"], [1.5, -0.5])
+        self.assertEqual(result["weights_mode"], "scalar")
         self.assertAlmostEqual(result["mean_reward"], 2.0 / 3.0)
         self.assertEqual(result["best_reward"], 1.0)
         self.assertEqual(result["n_questions"], 3)
         self.assertEqual(result["scores"], [0.0, 1.0, 1.0])
+
+    def test_evaluate_dense_weights_returns_metrics(self):
+        direction_weights = LearnableDirectionWeights(
+            n_directions=2,
+            n_layers=1,
+            hidden_size=2,
+            init_type="average",
+            mode="dense",
+        )
+        model = _DummyModel()
+        extracted_directions = [
+            torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32),
+            torch.tensor([[0.0, 1.0], [1.0, 0.0]], dtype=torch.float32),
+        ]
+        dense_weights = torch.tensor(
+            [
+                [[1.0, 0.5], [0.2, -0.1]],
+                [[-0.5, 0.3], [0.9, 0.7]],
+            ],
+            dtype=torch.float32,
+        )
+        apply_calls = []
+
+        def fake_apply(*args):
+            apply_calls.append(args)
+
+        with patch.object(optuna_module, "apply_abliteration_with_hyperparams", side_effect=fake_apply):
+            with patch.object(optuna_module, "compute_reward", return_value=[1.0, 0.0]):
+                result = optuna_module.evaluate_dense_weights(
+                    direction_weights=direction_weights,
+                    extracted_directions=extracted_directions,
+                    dense_weights=dense_weights,
+                    model=model,
+                    questions=["q1", "q2"],
+                    abliteration_params={
+                        "max_weight": 2.0,
+                        "max_weight_position": 0.5,
+                        "min_weight": 0.25,
+                        "min_weight_distance": 0.4,
+                    },
+                    classifier_categories=[],
+                    n_layers=1,
+                    ref_alpha=1.0,
+                    backend="llamaguard",
+                )
+
+        self.assertEqual(model.reload_calls, 1)
+        self.assertEqual(len(apply_calls), 1)
+        self.assertEqual(result["weights_mode"], "dense")
+        self.assertEqual(tuple(torch.tensor(result["weights"]).shape), (2, 2, 2))
+        self.assertAlmostEqual(result["mean_reward"], 0.5)
+        self.assertEqual(result["best_reward"], 1.0)
+        self.assertEqual(result["n_questions"], 2)
 
     def test_optimize_scalar_weights_updates_module_and_records_history(self):
         direction_weights = LearnableDirectionWeights(
@@ -103,7 +192,7 @@ class TestGraphGrpoOptuna(unittest.TestCase):
         def fake_evaluate(
             direction_weights,
             extracted_directions,
-            scalar_weights,
+            weights,
             model,
             questions,
             abliteration_params,
@@ -112,18 +201,19 @@ class TestGraphGrpoOptuna(unittest.TestCase):
             ref_alpha,
             backend=None,
         ):
-            score = float(scalar_weights.sum().item())
+            score = float(weights.sum().item())
             return {
-                "weights": scalar_weights.detach().cpu().tolist(),
+                "weights": weights.detach().cpu().tolist(),
                 "responses": [],
                 "scores": [score],
                 "mean_reward": score,
                 "best_reward": score,
                 "n_questions": len(questions),
+                "weights_mode": "scalar",
             }
 
-        with patch.object(optuna_module, "evaluate_scalar_weights", side_effect=fake_evaluate):
-            result = optuna_module.optimize_scalar_weights_with_optuna(
+        with patch.object(optuna_module, "evaluate_weights", side_effect=fake_evaluate):
+            result = optuna_module.optimize_weights_with_optuna(
                 direction_weights=direction_weights,
                 extracted_directions=extracted_directions,
                 model=model,
@@ -159,6 +249,87 @@ class TestGraphGrpoOptuna(unittest.TestCase):
             self.assertIn("weights", item)
             self.assertIn("mean_reward", item)
             self.assertIn("best_reward", item)
+            self.assertEqual(item["weights_mode"], "scalar")
+
+    def test_optimize_dense_weights_updates_module_and_records_summary_history(self):
+        direction_weights = LearnableDirectionWeights(
+            n_directions=2,
+            n_layers=1,
+            hidden_size=2,
+            init_type="average",
+            mode="dense",
+        )
+        model = _DummyModel()
+        extracted_directions = [
+            torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32),
+            torch.tensor([[0.0, 1.0], [1.0, 0.0]], dtype=torch.float32),
+        ]
+
+        def fake_evaluate(
+            direction_weights,
+            extracted_directions,
+            weights,
+            model,
+            questions,
+            abliteration_params,
+            classifier_categories,
+            n_layers,
+            ref_alpha,
+            backend=None,
+        ):
+            score = float(weights.sum().item())
+            return {
+                "weights": weights.detach().cpu().tolist(),
+                "responses": [],
+                "scores": [score],
+                "mean_reward": score,
+                "best_reward": score,
+                "n_questions": len(questions),
+                "weights_mode": "dense",
+            }
+
+        with patch.object(optuna_module, "evaluate_weights", side_effect=fake_evaluate):
+            result = optuna_module.optimize_weights_with_optuna(
+                direction_weights=direction_weights,
+                extracted_directions=extracted_directions,
+                model=model,
+                questions=["q1", "q2"],
+                abliteration_params={
+                    "max_weight": 2.0,
+                    "max_weight_position": 0.5,
+                    "min_weight": 0.25,
+                    "min_weight_distance": 0.4,
+                },
+                classifier_categories=[],
+                n_layers=1,
+                ref_alpha=1.0,
+                n_trials=3,
+                sampler_name="random",
+                sampler_seed=42,
+                weight_min=-2.0,
+                weight_max=2.0,
+                backend="llamaguard",
+            )
+
+        self.assertEqual(len(result["optimization_history"]), 3)
+        self.assertIsInstance(result["best_trial_number"], int)
+        best_weights_tensor = torch.tensor(result["best_weights"], dtype=direction_weights.weights.dtype)
+        self.assertEqual(tuple(best_weights_tensor.shape), tuple(direction_weights.weights.shape))
+        best_from_history = max(item["mean_reward"] for item in result["optimization_history"])
+        self.assertAlmostEqual(result["best_value"], best_from_history)
+        self.assertTrue(torch.allclose(
+            direction_weights.weights.detach().cpu(),
+            best_weights_tensor,
+        ))
+        for item in result["optimization_history"]:
+            self.assertEqual(item["weights_mode"], "dense")
+            self.assertNotIn("weights", item)
+            self.assertIn("weights_shape", item)
+            self.assertIn("weights_mean", item)
+            self.assertIn("weights_std", item)
+            self.assertIn("weights_min", item)
+            self.assertIn("weights_max", item)
+            self.assertIn("weights_norm", item)
 
 
 if __name__ == "__main__":
