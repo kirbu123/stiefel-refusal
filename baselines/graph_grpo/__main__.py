@@ -141,28 +141,104 @@ def _load_graph_grpo_category_items(
     ]
 
 
+def _sample_training_questions(
+    all_category_questions: List[str],
+    debug_question_count: int,
+) -> List[str]:
+    """Sample the current training batch from the selected category dataset."""
+    effective_question_count = min(MODEL_BATCH_SIZE, len(all_category_questions))
+    if DEBUG:
+        effective_question_count = min(effective_question_count, debug_question_count)
+
+    if effective_question_count < len(all_category_questions):
+        return random.sample(all_category_questions, k=effective_question_count)
+    return list(all_category_questions)
+
+
+def _define_model_state_eval_metrics() -> None:
+    """Register shared wandb series so clean and best-value land on the same charts."""
+    if not WANDB_AVAILABLE or not hasattr(wandb, "define_metric"):
+        return
+
+    wandb.define_metric("model_state_eval/point_index")
+    wandb.define_metric(
+        "model_state_eval/mmlu_score",
+        step_metric="model_state_eval/point_index",
+    )
+    wandb.define_metric(
+        "model_state_eval/harmfulness_on_full_dataset",
+        step_metric="model_state_eval/point_index",
+    )
+
+
+def _log_model_state_eval(
+    prefixes: List[str],
+    point_index: int,
+    point_name: str,
+    harmfulness_on_full_dataset: Optional[float],
+    mmlu_score: Optional[float],
+) -> None:
+    """Log scalar and shared-series wandb metrics for clean/best model comparisons."""
+    if not WANDB_AVAILABLE:
+        return
+
+    payload: Dict[str, Any] = {
+        "model_state_eval/point_index": point_index,
+        "model_state_eval/point_name": point_name,
+    }
+
+    if harmfulness_on_full_dataset is not None:
+        for prefix in prefixes:
+            payload[f"{prefix}/harmfulness_on_full_dataset"] = harmfulness_on_full_dataset
+            if prefix in {"clean_model", "best_value_model"}:
+                payload[f"{prefix}/harmfulness"] = harmfulness_on_full_dataset
+        payload["model_state_eval/harmfulness_on_full_dataset"] = harmfulness_on_full_dataset
+
+    if mmlu_score is not None:
+        for prefix in prefixes:
+            payload[f"{prefix}/mmlu_score"] = mmlu_score
+            if prefix in {"clean_model", "best_value_model"}:
+                payload[f"{prefix}/mmlu_accuracy"] = mmlu_score
+        payload["model_state_eval/mmlu_score"] = mmlu_score
+
+    wandb.log(payload)
+
+
 def _run_grpo_training(
     direction_weights: LearnableDirectionWeights,
     extracted_directions: List[torch.Tensor],
     model,
-    category_questions: List[str],
+    all_category_questions: List[str],
     effective_noise_scale: float,
     classifier_categories: List[Dict[str, str]],
     n_layers: int,
+    debug_question_count: int,
 ) -> Dict[str, Any]:
     optimizer = torch.optim.Adam(direction_weights.parameters(), lr=GRPO_CONFIG["learning_rate"])
     training_history = []
+    best_epoch = None
+    best_train_batch_questions: List[str] = []
+    best_train_batch_mean_harmfulness = float("-inf")
+    best_weights = direction_weights.weights.detach().cpu().clone()
     print("\n" + "=" * 80)
     print("GRPO-IS TRAINING")
     print("=" * 80)
 
     for epoch in range(GRPO_CONFIG["n_epochs"]):
+        epoch_questions = _sample_training_questions(
+            all_category_questions=all_category_questions,
+            debug_question_count=debug_question_count,
+        )
         print(f"\nEpoch {epoch + 1}/{GRPO_CONFIG['n_epochs']}")
+        print(
+            f"  Training on random batch of {len(epoch_questions)} question(s) "
+            f"sampled from {len(all_category_questions)} available"
+        )
         metrics = train_grpo_is_step(
             direction_weights=direction_weights,
             extracted_directions=extracted_directions,
             model=model,
-            questions=category_questions,
+            questions=epoch_questions,
             n_groups=GRPO_CONFIG["n_groups"],
             noise_scale=effective_noise_scale,
             abliteration_params=ABLITERATION_PARAMS,
@@ -175,15 +251,32 @@ def _run_grpo_training(
             loss_agg_mode=GRPO_CONFIG["loss_agg_mode"],
             backend=EVALUATION_BACKEND,
         )
-        training_history.append({"epoch": epoch + 1, **metrics})
+        training_history.append({
+            "epoch": epoch + 1,
+            "n_questions": len(epoch_questions),
+            **metrics,
+        })
         print(f"  Mean reward: {metrics['mean_reward']:.3f}, Best: {metrics['best_reward']:.3f}")
+        if metrics["mean_reward"] > best_train_batch_mean_harmfulness:
+            best_epoch = epoch + 1
+            best_train_batch_mean_harmfulness = float(metrics["mean_reward"])
+            best_train_batch_questions = list(epoch_questions)
+            best_weights = direction_weights.weights.detach().cpu().clone()
+
         if WANDB_AVAILABLE:
             wandb.log({f"train/{k}": v for k, v in metrics.items() if isinstance(v, (int, float))}, step=epoch + 1)
+
+    if best_epoch is None:
+        raise ValueError("GRPO training finished without producing a best checkpoint.")
 
     return {
         "training_history": training_history,
         "optimization_history": [],
         "optuna_config": None,
+        "best_epoch": best_epoch,
+        "best_weights": best_weights,
+        "best_train_batch_questions": best_train_batch_questions,
+        "best_train_batch_mean_harmfulness": best_train_batch_mean_harmfulness,
     }
 
 
@@ -404,27 +497,23 @@ def main():
             f"No questions found for category '{category_name}' "
             f"in source '{category_dataset_source}'."
         )
-    effective_question_count = min(MODEL_BATCH_SIZE, len(all_category_questions))
+    train_question_count = min(MODEL_BATCH_SIZE, len(all_category_questions))
     if DEBUG:
-        effective_question_count = min(effective_question_count, debug_question_count)
-
-    if effective_question_count < len(all_category_questions):
-        category_questions = random.sample(all_category_questions, k=effective_question_count)
-    else:
-        category_questions = list(all_category_questions)
+        train_question_count = min(train_question_count, debug_question_count)
 
     print(
-        f"Sampled {len(category_questions)} question(s) from {len(all_category_questions)} available "
-        f"in category '{category_name}' using batch_size={MODEL_BATCH_SIZE}"
+        f"Training batch size will be {train_question_count} question(s) sampled from "
+        f"{len(all_category_questions)} available in category '{category_name}' "
+        f"using batch_size={MODEL_BATCH_SIZE}"
     )
 
-    if DEBUG and category_questions:
+    if DEBUG and train_question_count > 0:
         print(
-            f"DEBUG mode enabled: using {len(category_questions)} question(s) from the category "
+            f"DEBUG mode enabled: using {train_question_count} question(s) from the category "
             f"and rollout noise_scale={effective_noise_scale:g} "
             f"(base noise_scale={GRPO_CONFIG['noise_scale']:g})"
         )
-    print(f"Loaded {len(category_questions)} questions for category '{category_name}'")
+    print(f"Loaded {len(all_category_questions)} total question(s) for category '{category_name}'")
 
     classifier_categories = _load_classifier_categories()
 
@@ -448,13 +537,14 @@ def main():
                 "optuna_config": optuna_config if optimizer_method == "optuna" else None,
             },
         )
+        _define_model_state_eval_metrics()
 
     print("\n" + "=" * 80)
     print("CLEAN MODEL EVALUATION")
     print("=" * 80)
     print(
         f"Evaluating clean model on full dataset: {len(all_category_questions)} "
-        f"question(s); training will use batch of {len(category_questions)} question(s)"
+        f"question(s); training will use batch of {train_question_count} question(s)"
     )
     model.reload_model()
     clean_harmfulness_result = _evaluate_model_harmfulness(
@@ -465,14 +555,17 @@ def main():
     clean_mean_harmfulness = clean_harmfulness_result["mean_harmfulness"]
     print(f"Clean model harmfulness: {clean_mean_harmfulness:.3f}" if clean_mean_harmfulness is not None else "Clean model harmfulness: n/a")
 
-    if WANDB_AVAILABLE:
-        clean_log_payload = {}
-        if clean_mean_harmfulness is not None:
-            clean_log_payload["clean_model/harmfulness"] = clean_mean_harmfulness
-        if original_mmlu_result is not None:
-            clean_log_payload["clean_model/mmlu_accuracy"] = original_mmlu_result["summary"]["accuracy"]
-        if clean_log_payload:
-            wandb.log(clean_log_payload)
+    clean_mmlu_score = None
+    if original_mmlu_result is not None:
+        clean_mmlu_score = original_mmlu_result["summary"]["accuracy"]
+
+    _log_model_state_eval(
+        prefixes=["clean_model"],
+        point_index=0,
+        point_name="clean",
+        harmfulness_on_full_dataset=clean_mean_harmfulness,
+        mmlu_score=clean_mmlu_score,
+    )
 
     if optimizer_method == "grpo":
         optimization_result = _run_grpo_training(
@@ -480,11 +573,16 @@ def main():
             extracted_directions=extracted_directions,
             model=model,
             classifier_categories=classifier_categories,
-            category_questions=category_questions,
+            all_category_questions=all_category_questions,
             effective_noise_scale=effective_noise_scale,
             n_layers=n_layers,
+            debug_question_count=debug_question_count,
         )
     else:
+        category_questions = _sample_training_questions(
+            all_category_questions=all_category_questions,
+            debug_question_count=debug_question_count,
+        )
         print("\n" + "=" * 80)
         print("OPTUNA OPTIMIZATION")
         print("=" * 80)
@@ -518,11 +616,21 @@ def main():
                 }
             )
 
+    evaluation_questions = category_questions if optimizer_method == "optuna" else optimization_result["best_train_batch_questions"]
+    if optimizer_method == "grpo":
+        with torch.no_grad():
+            direction_weights.weights.data.copy_(
+                optimization_result["best_weights"].to(
+                    device=direction_weights.weights.device,
+                    dtype=direction_weights.weights.dtype,
+                )
+            )
+
     final_result = _final_evaluate(
         direction_weights=direction_weights,
         extracted_directions=extracted_directions,
         model=model,
-        category_questions=category_questions,
+        category_questions=evaluation_questions,
         classifier_categories=classifier_categories,
         n_layers=n_layers,
         original_mmlu_result=original_mmlu_result,
@@ -531,27 +639,33 @@ def main():
 
     final_mean_harmfulness = final_result["final_mean_harmfulness"]
     if optimizer_method == "grpo":
-        optimal_harmfulness = final_mean_harmfulness
-        optimal_harmfulness_source = "final_evaluation_mean_reward"
+        optimal_harmfulness = optimization_result["best_train_batch_mean_harmfulness"]
+        optimal_harmfulness_source = "best_train_batch_mean_reward"
     else:
         optimal_harmfulness = optimization_result["best_value"]
         optimal_harmfulness_source = "best_trial_mean_reward"
 
-    best_model_harmfulness_result = _evaluate_model_harmfulness(
+    best_batch_model_harmfulness_result = _evaluate_model_harmfulness(
         model=model,
         questions=all_category_questions,
         classifier_categories=classifier_categories,
     )
-    best_model_mean_harmfulness = best_model_harmfulness_result["mean_harmfulness"]
+    best_batch_model_mean_harmfulness = best_batch_model_harmfulness_result["mean_harmfulness"]
+    best_batch_model_mmlu_score = None
+    if final_result["mmlu_block"] is not None:
+        best_batch_model_mmlu_score = final_result["mmlu_block"]["modified"]["accuracy"]
 
-    if WANDB_AVAILABLE:
-        best_model_log_payload = {}
-        if best_model_mean_harmfulness is not None:
-            best_model_log_payload["best_value_model/harmfulness"] = best_model_mean_harmfulness
-        if final_result["mmlu_block"] is not None:
-            best_model_log_payload["best_value_model/mmlu_accuracy"] = final_result["mmlu_block"]["modified"]["accuracy"]
-        if best_model_log_payload:
-            wandb.log(best_model_log_payload)
+    best_model_prefixes = ["best_value_model"]
+    if optimizer_method == "grpo":
+        best_model_prefixes.append("best_batch_model")
+
+    _log_model_state_eval(
+        prefixes=best_model_prefixes,
+        point_index=1,
+        point_name="best_value",
+        harmfulness_on_full_dataset=best_batch_model_mean_harmfulness,
+        mmlu_score=best_batch_model_mmlu_score,
+    )
 
     category_safe_name = category_name.replace("/", "_").replace(" ", "_")
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -561,7 +675,7 @@ def main():
             "model": MODEL_NAME,
             "category": category_name,
             "category_dataset_source": category_dataset_source,
-            "n_questions": len(category_questions), "n_directions": n_directions,
+            "n_questions": len(evaluation_questions), "n_directions": n_directions,
             "optimizer_method": optimizer_method,
             "weights_mode": weights_mode, "weights_init_type": weights_init_type,
             "weights_shape": weights_shape,
@@ -570,7 +684,7 @@ def main():
             "optuna_config": optimization_result["optuna_config"],
         },
         "final_weights": direction_weights.weights.data.cpu().tolist(),
-        "questions": category_questions,
+        "questions": evaluation_questions,
         "responses": final_result["responses"],
         "final_scores": final_result["scores"],
         "final_mean_harmfulness": final_mean_harmfulness,
@@ -583,6 +697,10 @@ def main():
         },
         "timestamp": datetime.now().isoformat(),
     }
+    if optimizer_method == "grpo":
+        answers_data["experiment_config"]["best_grpo_epoch"] = optimization_result["best_epoch"]
+        answers_data["experiment_config"]["best_train_batch_mean_harmfulness"] = optimization_result["best_train_batch_mean_harmfulness"]
+        answers_data["experiment_config"]["best_train_batch_size"] = len(optimization_result["best_train_batch_questions"])
     if optimization_result["optimization_history"]:
         answers_data["optimization_history"] = optimization_result["optimization_history"]
     if final_result["mmlu_block"] is not None:
