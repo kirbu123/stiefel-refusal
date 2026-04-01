@@ -63,6 +63,7 @@ from baselines.graph_grpo.runtime_config import (
     resolve_graph_grpo_debug_question_count,
     resolve_graph_grpo_optimizer_method,
     resolve_graph_grpo_optuna_n_trials,
+    resolve_graph_grpo_optuna_sampler,
     resolve_graph_grpo_optuna_sampler_seed,
     resolve_graph_grpo_optuna_weight_max,
     resolve_graph_grpo_optuna_weight_min,
@@ -70,6 +71,7 @@ from baselines.graph_grpo.runtime_config import (
     resolve_graph_grpo_weights_init_type,
     validate_graph_grpo_optimizer_compatibility,
     validate_graph_grpo_optimizer_method,
+    validate_graph_grpo_optuna_sampler,
     validate_graph_grpo_optuna_weight_range,
     validate_graph_grpo_weights_mode,
     validate_graph_grpo_weights_init_type,
@@ -213,6 +215,7 @@ def main():
         base_noise_scale=GRPO_CONFIG["noise_scale"],
         env_value=os.getenv("DEBUG_NOISE_SCALE"),
     )
+    optuna_sampler = resolve_graph_grpo_optuna_sampler(os.getenv("OPTUNA_SAMPLER"))
     optuna_n_trials = resolve_graph_grpo_optuna_n_trials(os.getenv("OPTUNA_N_TRIALS"))
     optuna_sampler_seed = resolve_graph_grpo_optuna_sampler_seed(os.getenv("OPTUNA_SAMPLER_SEED"))
     optuna_weight_min = resolve_graph_grpo_optuna_weight_min(os.getenv("OPTUNA_WEIGHT_MIN"))
@@ -223,9 +226,11 @@ def main():
     validate_graph_grpo_weights_mode(weights_mode)
     validate_graph_grpo_weights_init_type(weights_init_type)
     validate_graph_grpo_optimizer_compatibility(optimizer_method, weights_mode)
+    validate_graph_grpo_optuna_sampler(optuna_sampler)
     validate_graph_grpo_optuna_weight_range(optuna_weight_min, optuna_weight_max)
 
     optuna_config = {
+        "sampler": optuna_sampler,
         "n_trials": optuna_n_trials,
         "sampler_seed": optuna_sampler_seed,
         "weight_min": optuna_weight_min,
@@ -413,6 +418,7 @@ def main():
             n_layers=n_layers,
             ref_alpha=GRPO_CONFIG["ref_alpha"],
             n_trials=optuna_n_trials,
+            sampler_name=optuna_sampler,
             sampler_seed=optuna_sampler_seed,
             weight_min=optuna_weight_min,
             weight_max=optuna_weight_max,

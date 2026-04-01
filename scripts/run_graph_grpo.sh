@@ -42,6 +42,7 @@ export WEIGHTS_INIT_TYPE="average"
 export OPTIMIZER_METHOD="grpo"
 
 # ---- Optuna scalar search ----
+export OPTUNA_SAMPLER="tpe"
 export OPTUNA_N_TRIALS=50
 export OPTUNA_SAMPLER_SEED=42
 export OPTUNA_WEIGHT_MIN=-2.0

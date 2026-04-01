@@ -257,8 +257,9 @@ python -m baselines.graph_grpo
 | `OPTIMIZER_METHOD` | `grpo` | Метод оптимизации коэффициентов (`grpo` / `optuna`) |
 | `WEIGHTS_MODE` | `scalar` | Параметризация весов (`scalar` / `dense`) |
 | `WEIGHTS_INIT_TYPE` | `average` | Инициализация весов (`average` / `topic`; `zero` не поддерживается в текущем differentiable trainer) |
+| `OPTUNA_SAMPLER` | `tpe` | Sampler для `OPTIMIZER_METHOD=optuna` (`tpe` / `random` / `gp` / `cmaes` / `qmc`) |
 | `OPTUNA_N_TRIALS` | `50` | Число trial-ов для `OPTIMIZER_METHOD=optuna` |
-| `OPTUNA_SAMPLER_SEED` | `42` | Seed для `TPESampler` |
+| `OPTUNA_SAMPLER_SEED` | `42` | Seed для выбранного sampler-а |
 | `OPTUNA_WEIGHT_MIN` | `-2.0` | Нижняя граница поиска scalar-коэффициентов в `optuna` |
 | `OPTUNA_WEIGHT_MAX` | `2.0` | Верхняя граница поиска scalar-коэффициентов в `optuna` |
 | `EVALUATION_BACKEND` | `llamaguard` | Бэкенд оценки (`llamaguard` / `local_llm_judge`) |
@@ -271,6 +272,7 @@ python -m baselines.graph_grpo
 `WEIGHTS_MODE=scalar`. В этом режиме objective равен `mean harmfulness` на том же
 батче вопросов, а лучшее значение сохраняется в `answers_*.json` как
 `optimal_harmfulness` с `optimal_harmfulness_source="best_trial_mean_reward"`.
+По умолчанию используется `OPTUNA_SAMPLER=tpe`.
 
 `graph_grpo` должен стартовать с ненулевой инициализации. По умолчанию используется
 `average`; `topic` остаётся доступным явным override, а `zero` намеренно запрещён,
