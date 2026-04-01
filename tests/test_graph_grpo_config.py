@@ -13,8 +13,16 @@ sys.modules.setdefault("cli.ui", fake_ui)
 from baselines.graph_grpo.runtime_config import (
     resolve_graph_grpo_debug_noise_scale,
     resolve_graph_grpo_debug_question_count,
+    resolve_graph_grpo_optimizer_method,
+    resolve_graph_grpo_optuna_n_trials,
+    resolve_graph_grpo_optuna_sampler_seed,
+    resolve_graph_grpo_optuna_weight_max,
+    resolve_graph_grpo_optuna_weight_min,
     resolve_graph_grpo_weights_mode,
     resolve_graph_grpo_weights_init_type,
+    validate_graph_grpo_optimizer_compatibility,
+    validate_graph_grpo_optimizer_method,
+    validate_graph_grpo_optuna_weight_range,
     validate_graph_grpo_weights_mode,
     validate_graph_grpo_weights_init_type,
 )
@@ -30,11 +38,17 @@ class TestGraphGrpoConfig(unittest.TestCase):
         model = config["model"]
         grpo = config["grpo"]
         weights = config["weights"]
+        optimizer = config["optimizer"]
+        optuna = config["optuna"]
 
         self.assertEqual(model["batch_size"], 32)
         self.assertEqual(grpo["n_groups"], 4)
         self.assertEqual(grpo["noise_scale"], 0.1)
         self.assertNotIn("alphas", grpo)
+        self.assertEqual(optimizer["method"], "grpo")
+        self.assertEqual(optuna["n_trials"], 50)
+        self.assertEqual(optuna["weight_min"], -2.0)
+        self.assertEqual(optuna["weight_max"], 2.0)
         self.assertEqual(weights["mode"], "scalar")
         self.assertEqual(weights["init_type"], "average")
 
@@ -50,6 +64,11 @@ class TestGraphGrpoConfig(unittest.TestCase):
             self.assertEqual(os.environ["GRPO_REF_ALPHA"], "1.0")
             self.assertEqual(os.environ["WEIGHTS_MODE"], "scalar")
             self.assertEqual(os.environ["WEIGHTS_INIT_TYPE"], "average")
+            self.assertEqual(os.environ["OPTIMIZER_METHOD"], "grpo")
+            self.assertEqual(os.environ["OPTUNA_N_TRIALS"], "50")
+            self.assertEqual(os.environ["OPTUNA_SAMPLER_SEED"], "42")
+            self.assertEqual(os.environ["OPTUNA_WEIGHT_MIN"], "-2.0")
+            self.assertEqual(os.environ["OPTUNA_WEIGHT_MAX"], "2.0")
             self.assertNotIn("GRPO_ALPHAS", os.environ)
 
     def test_run_graph_grpo_script_uses_average_init_and_debug_false(self):
@@ -63,7 +82,29 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertIn("DEBUG_NOISE_SCALE=0.02", script_text)
         self.assertIn('WEIGHTS_MODE="scalar"', script_text)
         self.assertIn('WEIGHTS_INIT_TYPE="average"', script_text)
+        self.assertIn('OPTIMIZER_METHOD="grpo"', script_text)
+        self.assertIn("OPTUNA_N_TRIALS=50", script_text)
+        self.assertIn("OPTUNA_SAMPLER_SEED=42", script_text)
+        self.assertIn("OPTUNA_WEIGHT_MIN=-2.0", script_text)
+        self.assertIn("OPTUNA_WEIGHT_MAX=2.0", script_text)
         self.assertNotIn("GRPO_ALPHAS", script_text)
+
+    def test_graph_grpo_runtime_defaults_optimizer_method_to_grpo(self):
+        self.assertEqual(resolve_graph_grpo_optimizer_method(None), "grpo")
+        self.assertEqual(resolve_graph_grpo_optimizer_method(""), "grpo")
+        self.assertEqual(resolve_graph_grpo_optimizer_method("optuna"), "optuna")
+
+    def test_graph_grpo_runtime_validates_optimizer_method_and_compatibility(self):
+        validate_graph_grpo_optimizer_method("grpo")
+        validate_graph_grpo_optimizer_method("optuna")
+        validate_graph_grpo_optimizer_compatibility("grpo", "dense")
+        validate_graph_grpo_optimizer_compatibility("optuna", "scalar")
+
+        with self.assertRaisesRegex(ValueError, "graph_grpo only supports OPTIMIZER_METHOD"):
+            validate_graph_grpo_optimizer_method("random-search")
+
+        with self.assertRaisesRegex(ValueError, "OPTIMIZER_METHOD='optuna' only with WEIGHTS_MODE='scalar'"):
+            validate_graph_grpo_optimizer_compatibility("optuna", "dense")
 
     def test_graph_grpo_runtime_defaults_weights_mode_to_scalar(self):
         self.assertEqual(resolve_graph_grpo_weights_mode(None), "scalar")
@@ -101,12 +142,23 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertEqual(resolve_graph_grpo_debug_noise_scale(0.1, None), 0.02)
         self.assertEqual(resolve_graph_grpo_debug_noise_scale(0.01, None), 0.01)
         self.assertEqual(resolve_graph_grpo_debug_noise_scale(0.1, "0.005"), 0.005)
+        self.assertEqual(resolve_graph_grpo_optuna_n_trials(None), 50)
+        self.assertEqual(resolve_graph_grpo_optuna_sampler_seed(None), 42)
+        self.assertEqual(resolve_graph_grpo_optuna_weight_min(None), -2.0)
+        self.assertEqual(resolve_graph_grpo_optuna_weight_max(None), 2.0)
+        validate_graph_grpo_optuna_weight_range(-2.0, 2.0)
 
         with self.assertRaisesRegex(ValueError, "DEBUG_N_QUESTIONS must be >= 1"):
             resolve_graph_grpo_debug_question_count("0")
 
         with self.assertRaisesRegex(ValueError, "DEBUG_NOISE_SCALE must be >= 0"):
             resolve_graph_grpo_debug_noise_scale(0.1, "-1")
+
+        with self.assertRaisesRegex(ValueError, "OPTUNA_N_TRIALS must be >= 1"):
+            resolve_graph_grpo_optuna_n_trials("0")
+
+        with self.assertRaisesRegex(ValueError, "OPTUNA weight range must satisfy"):
+            validate_graph_grpo_optuna_weight_range(2.0, -2.0)
 
     def test_graph_grpo_debug_mode_uses_configurable_question_subset(self):
         main_text = (PROJECT_ROOT / "baselines" / "graph_grpo" / "__main__.py").read_text(encoding="utf-8")
@@ -120,8 +172,12 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertIn("effective_noise_scale = debug_noise_scale if DEBUG else GRPO_CONFIG[\"noise_scale\"]", main_text)
         self.assertIn("resolve_graph_grpo_debug_question_count(os.getenv(\"DEBUG_N_QUESTIONS\"))", main_text)
         self.assertIn("resolve_graph_grpo_debug_noise_scale(", main_text)
+        self.assertIn("resolve_graph_grpo_optimizer_method(os.getenv(\"OPTIMIZER_METHOD\"))", main_text)
+        self.assertIn("resolve_graph_grpo_optuna_n_trials(os.getenv(\"OPTUNA_N_TRIALS\"))", main_text)
         self.assertIn("resolve_graph_grpo_weights_mode(os.getenv(\"WEIGHTS_MODE\"))", main_text)
         self.assertIn("resolve_graph_grpo_weights_init_type(os.getenv(\"WEIGHTS_INIT_TYPE\"))", main_text)
+        self.assertIn('"optimal_harmfulness"', main_text)
+        self.assertIn('"optimal_harmfulness_source"', main_text)
         self.assertIn("Loss: {accumulated_loss:.6e}", trainer_text)
         self.assertIn("Grad norm: {grad_norm:.6e}", trainer_text)
 

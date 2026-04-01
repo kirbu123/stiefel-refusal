@@ -21,7 +21,7 @@ import json
 import os
 import random
 from datetime import datetime
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -42,7 +42,7 @@ torch.manual_seed(42)
 from config import (
     MODEL_NAME, MODEL_BATCH_SIZE, CATEGORIES, GOOD_PROMPTS_DATASET, RESULTS_DIR,
     GRPO_CONFIG, ABLITERATION_PARAMS, FEW_SHOTS_PATH,
-    HARMLESS_EVAL_DATASET, EVALUATE_LOCALITY, GRAPH_FILE, EVALUATION_BACKEND,
+    GRAPH_FILE, EVALUATION_BACKEND,
     MMLU_CONFIG, DEBUG, get_method_results_dir,
 )
 from data_utils import load_all_datasets_with_categories, extract_response_after_think
@@ -50,25 +50,162 @@ from refusal_directions import (
     compute_refusal_direction, save_refusal_directions, load_refusal_directions,
 )
 from model_utils import LearnableDirectionWeights, apply_abliteration_with_hyperparams
-from evaluate.judges import evaluate_harmfulness
 from evaluate.mmlu import (
     build_mmlu_result,
     evaluate_model_on_mmlu,
     get_cached_or_evaluate_original_mmlu,
 )
 
+from baselines.graph_grpo.optuna_optimizer import optimize_scalar_weights_with_optuna
 from baselines.graph_grpo.trainer import train_grpo_is_step
 from baselines.graph_grpo.runtime_config import (
     resolve_graph_grpo_debug_noise_scale,
     resolve_graph_grpo_debug_question_count,
+    resolve_graph_grpo_optimizer_method,
+    resolve_graph_grpo_optuna_n_trials,
+    resolve_graph_grpo_optuna_sampler_seed,
+    resolve_graph_grpo_optuna_weight_max,
+    resolve_graph_grpo_optuna_weight_min,
     resolve_graph_grpo_weights_mode,
     resolve_graph_grpo_weights_init_type,
+    validate_graph_grpo_optimizer_compatibility,
+    validate_graph_grpo_optimizer_method,
+    validate_graph_grpo_optuna_weight_range,
     validate_graph_grpo_weights_mode,
     validate_graph_grpo_weights_init_type,
 )
 
 
+def _load_classifier_categories() -> List[Dict[str, str]]:
+    classifier_categories: List[Dict[str, str]] = []
+    if EVALUATION_BACKEND == "local_llm_judge" and FEW_SHOTS_PATH.exists():
+        try:
+            with open(FEW_SHOTS_PATH, "r", encoding="utf-8") as f:
+                few_shots_data = json.load(f)
+            classifier_categories = [
+                {"id": c.get("id"), "label": c.get("label", "")}
+                for c in few_shots_data.get("categories", [])
+                if c.get("id")
+            ]
+        except Exception:
+            pass
+    return classifier_categories
+
+
+def _run_grpo_training(
+    direction_weights: LearnableDirectionWeights,
+    extracted_directions: List[torch.Tensor],
+    model,
+    category_questions: List[str],
+    effective_noise_scale: float,
+    classifier_categories: List[Dict[str, str]],
+    n_layers: int,
+) -> Dict[str, Any]:
+    optimizer = torch.optim.Adam(direction_weights.parameters(), lr=GRPO_CONFIG["learning_rate"])
+    training_history = []
+    print("\n" + "=" * 80)
+    print("GRPO-IS TRAINING")
+    print("=" * 80)
+
+    for epoch in range(GRPO_CONFIG["n_epochs"]):
+        print(f"\nEpoch {epoch + 1}/{GRPO_CONFIG['n_epochs']}")
+        metrics = train_grpo_is_step(
+            direction_weights=direction_weights,
+            extracted_directions=extracted_directions,
+            model=model,
+            questions=category_questions,
+            n_groups=GRPO_CONFIG["n_groups"],
+            noise_scale=effective_noise_scale,
+            abliteration_params=ABLITERATION_PARAMS,
+            optimizer=optimizer,
+            classifier_categories=classifier_categories,
+            n_layers=n_layers,
+            ref_alpha=GRPO_CONFIG["ref_alpha"],
+            is_clip_ratio=GRPO_CONFIG["is_clip_ratio"],
+            clip_ratio=GRPO_CONFIG["clip_ratio"],
+            loss_agg_mode=GRPO_CONFIG["loss_agg_mode"],
+            backend=EVALUATION_BACKEND,
+        )
+        training_history.append({"epoch": epoch + 1, **metrics})
+        print(f"  Mean reward: {metrics['mean_reward']:.3f}, Best: {metrics['best_reward']:.3f}")
+        if WANDB_AVAILABLE:
+            wandb.log({f"train/{k}": v for k, v in metrics.items() if isinstance(v, (int, float))}, step=epoch + 1)
+
+    return {
+        "training_history": training_history,
+        "optimization_history": [],
+        "optuna_config": None,
+    }
+
+
+def _final_evaluate(
+    direction_weights: LearnableDirectionWeights,
+    extracted_directions: List[torch.Tensor],
+    model,
+    category_questions: List[str],
+    classifier_categories: List[Dict[str, str]],
+    n_layers: int,
+    original_mmlu_result: Optional[Dict[str, Any]],
+    results_dir: Path,
+) -> Dict[str, Any]:
+    print("\n" + "=" * 80)
+    print("FINAL EVALUATION")
+    print("=" * 80)
+
+    with torch.no_grad():
+        final_direction = direction_weights([d.detach() for d in extracted_directions])
+
+    model.reload_model()
+    apply_abliteration_with_hyperparams(
+        model,
+        final_direction,
+        ABLITERATION_PARAMS["max_weight"] * GRPO_CONFIG["ref_alpha"],
+        ABLITERATION_PARAMS["max_weight_position"],
+        ABLITERATION_PARAMS["min_weight"] * GRPO_CONFIG["ref_alpha"],
+        ABLITERATION_PARAMS["min_weight_distance"],
+        n_layers,
+    )
+
+    mmlu_block = None
+    if MMLU_CONFIG["enabled"] and original_mmlu_result is not None:
+        print("Evaluating modified model on MMLU...")
+        modified_mmlu_result = evaluate_model_on_mmlu(model, MMLU_CONFIG)
+        mmlu_block = build_mmlu_result(
+            config=MMLU_CONFIG,
+            original_result=original_mmlu_result,
+            modified_result=modified_mmlu_result,
+            method_results_dir=results_dir,
+            detail_prefix="mmlu_graph_grpo_final",
+        )
+        if mmlu_block is not None:
+            print(
+                f"MMLU accuracy original -> modified: "
+                f"{mmlu_block['original']['accuracy']:.4f} -> {mmlu_block['modified']['accuracy']:.4f}"
+            )
+
+    final_responses_raw = model.get_responses_batched(category_questions)
+    final_responses = [extract_response_after_think(r) for r in final_responses_raw]
+
+    from baselines.graph_grpo.reward import compute_reward
+
+    final_scores = [int(s) for s in compute_reward(
+        category_questions,
+        final_responses,
+        classifier_categories,
+        EVALUATION_BACKEND,
+    )]
+    final_mean_harmfulness = float(np.mean(final_scores)) if final_scores else None
+
+    return {
+        "responses": final_responses,
+        "scores": final_scores,
+        "final_mean_harmfulness": final_mean_harmfulness,
+        "mmlu_block": mmlu_block,
+    }
+
+
 def main():
+    optimizer_method = resolve_graph_grpo_optimizer_method(os.getenv("OPTIMIZER_METHOD"))
     weights_mode = resolve_graph_grpo_weights_mode(os.getenv("WEIGHTS_MODE"))
     weights_init_type = resolve_graph_grpo_weights_init_type(os.getenv("WEIGHTS_INIT_TYPE"))
     debug_question_count = resolve_graph_grpo_debug_question_count(os.getenv("DEBUG_N_QUESTIONS"))
@@ -76,7 +213,24 @@ def main():
         base_noise_scale=GRPO_CONFIG["noise_scale"],
         env_value=os.getenv("DEBUG_NOISE_SCALE"),
     )
+    optuna_n_trials = resolve_graph_grpo_optuna_n_trials(os.getenv("OPTUNA_N_TRIALS"))
+    optuna_sampler_seed = resolve_graph_grpo_optuna_sampler_seed(os.getenv("OPTUNA_SAMPLER_SEED"))
+    optuna_weight_min = resolve_graph_grpo_optuna_weight_min(os.getenv("OPTUNA_WEIGHT_MIN"))
+    optuna_weight_max = resolve_graph_grpo_optuna_weight_max(os.getenv("OPTUNA_WEIGHT_MAX"))
     effective_noise_scale = debug_noise_scale if DEBUG else GRPO_CONFIG["noise_scale"]
+
+    validate_graph_grpo_optimizer_method(optimizer_method)
+    validate_graph_grpo_weights_mode(weights_mode)
+    validate_graph_grpo_weights_init_type(weights_init_type)
+    validate_graph_grpo_optimizer_compatibility(optimizer_method, weights_mode)
+    validate_graph_grpo_optuna_weight_range(optuna_weight_min, optuna_weight_max)
+
+    optuna_config = {
+        "n_trials": optuna_n_trials,
+        "sampler_seed": optuna_sampler_seed,
+        "weight_min": optuna_weight_min,
+        "weight_max": optuna_weight_max,
+    }
 
     print("=" * 80)
     print("GRPO-IS: GRPO with Importance Sampling")
@@ -84,10 +238,13 @@ def main():
     print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"GRPO Config: {GRPO_CONFIG}")
     print(f"Abliteration Params: {ABLITERATION_PARAMS}")
+    print(f"Optimizer Method: {optimizer_method}")
     print(f"Weights Mode: {weights_mode}")
     print(f"Weights Init Type: {weights_init_type}")
     print(f"Batch Size: {MODEL_BATCH_SIZE}")
     print(f"Evaluation backend: {EVALUATION_BACKEND}")
+    if optimizer_method == "optuna":
+        print(f"Optuna Config: {optuna_config}")
     print()
 
     GRPO_RESULTS_DIR = get_method_results_dir("graph_grpo")
@@ -168,11 +325,9 @@ def main():
             physical_harm_idx = idx
             break
 
-    validate_graph_grpo_weights_mode(weights_mode)
-    validate_graph_grpo_weights_init_type(weights_init_type)
-
     print(f"Using weights mode '{weights_mode}'")
     print(f"Using weights init type '{weights_init_type}'")
+    print(f"Using optimizer method '{optimizer_method}'")
     if weights_init_type == "topic":
         print(
             f"Topic init root index for category 'Physical harm': "
@@ -187,8 +342,6 @@ def main():
     direction_weights = direction_weights.to(device)
     weights_shape = list(direction_weights.weights.shape)
     print(f"Trainable weights shape: {weights_shape}")
-
-    optimizer = torch.optim.Adam(direction_weights.parameters(), lr=GRPO_CONFIG["learning_rate"])
 
     category_name = "Physical harm"
     category_items = data_by_category.get(category_name, [])
@@ -215,102 +368,88 @@ def main():
         )
     print(f"Loaded {len(category_questions)} questions for category '{category_name}'")
 
-    classifier_categories = []
-    if EVALUATION_BACKEND == "local_llm_judge" and FEW_SHOTS_PATH.exists():
-        try:
-            with open(FEW_SHOTS_PATH, "r", encoding="utf-8") as f:
-                few_shots_data = json.load(f)
-            classifier_categories = [
-                {"id": c.get("id"), "label": c.get("label", "")}
-                for c in few_shots_data.get("categories", [])
-                if c.get("id")
-            ]
-        except Exception:
-            pass
+    classifier_categories = _load_classifier_categories()
 
     if WANDB_AVAILABLE:
         wandb.init(
             project="refusal_direction_grpo_is",
-            name=f"grpo_is_{category_name.replace('/', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            name=(
+                f"{optimizer_method}_{category_name.replace('/', '_')}_"
+                f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            ),
             config={
                 "model": MODEL_NAME, "category": category_name,
                 "n_directions": n_directions, "n_layers": n_layers,
+                "optimizer_method": optimizer_method,
                 "weights_mode": weights_mode,
                 "weights_init_type": weights_init_type,
                 "weights_shape": weights_shape,
                 "grpo_config": GRPO_CONFIG, "abliteration_params": ABLITERATION_PARAMS,
+                "optuna_config": optuna_config if optimizer_method == "optuna" else None,
             },
         )
 
-    training_history = []
-    print("\n" + "=" * 80)
-    print("GRPO-IS TRAINING")
-    print("=" * 80)
-
-    for epoch in range(GRPO_CONFIG["n_epochs"]):
-        print(f"\nEpoch {epoch + 1}/{GRPO_CONFIG['n_epochs']}")
-        metrics = train_grpo_is_step(
+    if optimizer_method == "grpo":
+        optimization_result = _run_grpo_training(
+            direction_weights=direction_weights,
+            extracted_directions=extracted_directions,
+            model=model,
+            classifier_categories=classifier_categories,
+            category_questions=category_questions,
+            effective_noise_scale=effective_noise_scale,
+            n_layers=n_layers,
+        )
+    else:
+        print("\n" + "=" * 80)
+        print("OPTUNA OPTIMIZATION")
+        print("=" * 80)
+        optimization_result = optimize_scalar_weights_with_optuna(
             direction_weights=direction_weights,
             extracted_directions=extracted_directions,
             model=model,
             questions=category_questions,
-            n_groups=GRPO_CONFIG["n_groups"],
-            noise_scale=effective_noise_scale,
             abliteration_params=ABLITERATION_PARAMS,
-            optimizer=optimizer,
             classifier_categories=classifier_categories,
             n_layers=n_layers,
             ref_alpha=GRPO_CONFIG["ref_alpha"],
-            is_clip_ratio=GRPO_CONFIG["is_clip_ratio"],
-            clip_ratio=GRPO_CONFIG["clip_ratio"],
-            loss_agg_mode=GRPO_CONFIG["loss_agg_mode"],
+            n_trials=optuna_n_trials,
+            sampler_seed=optuna_sampler_seed,
+            weight_min=optuna_weight_min,
+            weight_max=optuna_weight_max,
             backend=EVALUATION_BACKEND,
         )
-        training_history.append({"epoch": epoch + 1, **metrics})
-        print(f"  Mean reward: {metrics['mean_reward']:.3f}, Best: {metrics['best_reward']:.3f}")
-        if WANDB_AVAILABLE:
-            wandb.log({f"train/{k}": v for k, v in metrics.items() if isinstance(v, (int, float))}, step=epoch + 1)
-
-    # Final evaluation
-    print("\n" + "=" * 80)
-    print("FINAL EVALUATION")
-    print("=" * 80)
-
-    with torch.no_grad():
-        final_direction = direction_weights([d.detach() for d in extracted_directions])
-
-    model.reload_model()
-    apply_abliteration_with_hyperparams(
-        model, final_direction,
-        ABLITERATION_PARAMS["max_weight"] * GRPO_CONFIG["ref_alpha"],
-        ABLITERATION_PARAMS["max_weight_position"],
-        ABLITERATION_PARAMS["min_weight"] * GRPO_CONFIG["ref_alpha"],
-        ABLITERATION_PARAMS["min_weight_distance"],
-        n_layers,
-    )
-
-    mmlu_block = None
-    if MMLU_CONFIG["enabled"] and original_mmlu_result is not None:
-        print("Evaluating modified model on MMLU...")
-        modified_mmlu_result = evaluate_model_on_mmlu(model, MMLU_CONFIG)
-        mmlu_block = build_mmlu_result(
-            config=MMLU_CONFIG,
-            original_result=original_mmlu_result,
-            modified_result=modified_mmlu_result,
-            method_results_dir=GRPO_RESULTS_DIR,
-            detail_prefix="mmlu_graph_grpo_final",
+        optimization_result["training_history"] = []
+        optimization_result["optuna_config"] = optuna_config
+        print(
+            f"Best Optuna trial: #{optimization_result['best_trial_number']} "
+            f"with mean harmfulness={optimization_result['best_value']:.3f}"
         )
-        if mmlu_block is not None:
-            print(
-                f"MMLU accuracy original -> modified: "
-                f"{mmlu_block['original']['accuracy']:.4f} -> {mmlu_block['modified']['accuracy']:.4f}"
+        if WANDB_AVAILABLE:
+            wandb.log(
+                {
+                    "optuna/best_trial_number": optimization_result["best_trial_number"],
+                    "optuna/best_value": optimization_result["best_value"],
+                }
             )
 
-    final_responses_raw = model.get_responses_batched(category_questions)
-    final_responses = [extract_response_after_think(r) for r in final_responses_raw]
+    final_result = _final_evaluate(
+        direction_weights=direction_weights,
+        extracted_directions=extracted_directions,
+        model=model,
+        category_questions=category_questions,
+        classifier_categories=classifier_categories,
+        n_layers=n_layers,
+        original_mmlu_result=original_mmlu_result,
+        results_dir=GRPO_RESULTS_DIR,
+    )
 
-    from baselines.graph_grpo.reward import compute_reward
-    final_scores = [int(s) for s in compute_reward(category_questions, final_responses, classifier_categories, EVALUATION_BACKEND)]
+    final_mean_harmfulness = final_result["final_mean_harmfulness"]
+    if optimizer_method == "grpo":
+        optimal_harmfulness = final_mean_harmfulness
+        optimal_harmfulness_source = "final_evaluation_mean_reward"
+    else:
+        optimal_harmfulness = optimization_result["best_value"]
+        optimal_harmfulness_source = "best_trial_mean_reward"
 
     category_safe_name = category_name.replace("/", "_").replace(" ", "_")
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -319,24 +458,31 @@ def main():
         "experiment_config": {
             "model": MODEL_NAME, "category": category_name,
             "n_questions": len(category_questions), "n_directions": n_directions,
+            "optimizer_method": optimizer_method,
             "weights_mode": weights_mode, "weights_init_type": weights_init_type,
             "weights_shape": weights_shape,
             "grpo_config": GRPO_CONFIG, "abliteration_params": ABLITERATION_PARAMS,
-            "training_history": training_history,
+            "training_history": optimization_result["training_history"],
+            "optuna_config": optimization_result["optuna_config"],
         },
         "final_weights": direction_weights.weights.data.cpu().tolist(),
         "questions": category_questions,
-        "responses": final_responses,
-        "final_scores": final_scores,
+        "responses": final_result["responses"],
+        "final_scores": final_result["scores"],
+        "final_mean_harmfulness": final_mean_harmfulness,
+        "optimal_harmfulness": optimal_harmfulness,
+        "optimal_harmfulness_source": optimal_harmfulness_source,
         "score_statistics": {
-            "mean": float(np.mean(final_scores)) if final_scores else None,
-            "median": float(np.median(final_scores)) if final_scores else None,
-            "count": len(final_scores),
+            "mean": final_mean_harmfulness,
+            "median": float(np.median(final_result["scores"])) if final_result["scores"] else None,
+            "count": len(final_result["scores"]),
         },
         "timestamp": datetime.now().isoformat(),
     }
-    if mmlu_block is not None:
-        answers_data["mmlu"] = mmlu_block
+    if optimization_result["optimization_history"]:
+        answers_data["optimization_history"] = optimization_result["optimization_history"]
+    if final_result["mmlu_block"] is not None:
+        answers_data["mmlu"] = final_result["mmlu_block"]
 
     answers_file = GRPO_ANSWERS_DIR / f"answers_{category_safe_name}_{timestamp_str}.json"
     with open(answers_file, "w", encoding="utf-8") as f:
@@ -350,6 +496,7 @@ def main():
             "model": MODEL_NAME,
             "n_directions": n_directions,
             "n_layers": n_layers,
+            "optimizer_method": optimizer_method,
             "weights_mode": weights_mode,
             "weights_init_type": weights_init_type,
             "weights_shape": weights_shape,

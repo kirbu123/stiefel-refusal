@@ -27,6 +27,15 @@ min_weight_distance = 0.3
 mode = "scalar"
 init_type = "average"
 
+[optimizer]
+method = "grpo"
+
+[optuna]
+n_trials = 50
+sampler_seed = 42
+weight_min = -2.0
+weight_max = 2.0
+
 [evaluation]
 backend = "llamaguard"
 evaluate_locality = true

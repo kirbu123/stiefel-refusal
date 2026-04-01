@@ -38,6 +38,15 @@ export ABLITERATION_MIN_WEIGHT_DISTANCE=0.3
 export WEIGHTS_MODE="scalar"
 export WEIGHTS_INIT_TYPE="average"
 
+# ---- Optimizer selection ----
+export OPTIMIZER_METHOD="grpo"
+
+# ---- Optuna scalar search ----
+export OPTUNA_N_TRIALS=50
+export OPTUNA_SAMPLER_SEED=42
+export OPTUNA_WEIGHT_MIN=-2.0
+export OPTUNA_WEIGHT_MAX=2.0
+
 # ---- Evaluation backend ----
 # Options: local_llm_judge | llamaguard
 export EVALUATION_BACKEND="llamaguard"

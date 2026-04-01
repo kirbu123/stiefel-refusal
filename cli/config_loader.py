@@ -121,6 +121,20 @@ def apply_config_to_env(config: dict[str, Any], model_name: str | None = None):
     if weights.get("mode"):
         os.environ["WEIGHTS_MODE"] = weights["mode"]
 
+    optimizer = config.get("optimizer", {})
+    if optimizer.get("method"):
+        os.environ["OPTIMIZER_METHOD"] = optimizer["method"]
+
+    optuna = config.get("optuna", {})
+    if optuna.get("n_trials") is not None:
+        os.environ["OPTUNA_N_TRIALS"] = str(optuna["n_trials"])
+    if optuna.get("sampler_seed") is not None:
+        os.environ["OPTUNA_SAMPLER_SEED"] = str(optuna["sampler_seed"])
+    if optuna.get("weight_min") is not None:
+        os.environ["OPTUNA_WEIGHT_MIN"] = str(optuna["weight_min"])
+    if optuna.get("weight_max") is not None:
+        os.environ["OPTUNA_WEIGHT_MAX"] = str(optuna["weight_max"])
+
     evl = config.get("evaluation", {})
     if evl.get("backend"):
         os.environ["EVALUATION_BACKEND"] = evl["backend"]
@@ -184,6 +198,18 @@ def print_config_summary(config: dict[str, Any], model_name: str):
     if abl:
         print("  [bold]Abliteration parameters:[/]")
         for k, v in abl.items():
+            print(f"    {k}: {v}")
+
+    optimizer = config.get("optimizer", {})
+    if optimizer:
+        print("  [bold]Optimizer:[/]")
+        for k, v in optimizer.items():
+            print(f"    {k}: {v}")
+
+    optuna = config.get("optuna", {})
+    if optuna:
+        print("  [bold]Optuna:[/]")
+        for k, v in optuna.items():
             print(f"    {k}: {v}")
 
     data = config.get("data", {})
