@@ -11,6 +11,8 @@ fake_ui.print = print
 sys.modules.setdefault("cli.ui", fake_ui)
 
 from baselines.graph_grpo.runtime_config import (
+    resolve_graph_grpo_category_dataset_source,
+    resolve_graph_grpo_category_filter,
     resolve_graph_grpo_debug_noise_scale,
     resolve_graph_grpo_debug_question_count,
     resolve_graph_grpo_optimizer_method,
@@ -21,6 +23,8 @@ from baselines.graph_grpo.runtime_config import (
     resolve_graph_grpo_optuna_weight_min,
     resolve_graph_grpo_weights_mode,
     resolve_graph_grpo_weights_init_type,
+    validate_graph_grpo_category_dataset_source,
+    validate_graph_grpo_category_filter,
     validate_graph_grpo_optimizer_compatibility,
     validate_graph_grpo_optimizer_method,
     validate_graph_grpo_optuna_sampler,
@@ -38,12 +42,15 @@ class TestGraphGrpoConfig(unittest.TestCase):
     def test_graph_grpo_config_uses_w_sampling_knobs(self):
         config = load_config("graph_grpo")
         model = config["model"]
+        data = config["data"]
         grpo = config["grpo"]
         weights = config["weights"]
         optimizer = config["optimizer"]
         optuna = config["optuna"]
 
         self.assertEqual(model["batch_size"], 32)
+        self.assertEqual(data["category_dataset_source"], "combined")
+        self.assertEqual(data["category_filter"], "Physical harm")
         self.assertEqual(grpo["n_groups"], 4)
         self.assertEqual(grpo["noise_scale"], 0.1)
         self.assertNotIn("alphas", grpo)
@@ -62,6 +69,8 @@ class TestGraphGrpoConfig(unittest.TestCase):
             apply_config_to_env(config)
 
             self.assertEqual(os.environ["BATCH_SIZE"], "32")
+            self.assertEqual(os.environ["CATEGORY_DATASET_SOURCE"], "combined")
+            self.assertEqual(os.environ["CATEGORY_FILTER"], "Physical harm")
             self.assertEqual(os.environ["GRPO_N_GROUPS"], "4")
             self.assertEqual(os.environ["GRPO_NOISE_SCALE"], "0.1")
             self.assertEqual(os.environ["GRPO_REF_ALPHA"], "1.0")
@@ -84,6 +93,8 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertIn("DEBUG=false", script_text)
         self.assertIn("DEBUG_N_QUESTIONS=4", script_text)
         self.assertIn("DEBUG_NOISE_SCALE=0.02", script_text)
+        self.assertIn("CATEGORY_DATASET_SOURCE", script_text)
+        self.assertIn("CATEGORY_FILTER", script_text)
         self.assertIn('WEIGHTS_MODE="scalar"', script_text)
         self.assertIn('WEIGHTS_INIT_TYPE="average"', script_text)
         self.assertIn("OPTIMIZER_METHOD=", script_text)
@@ -95,6 +106,12 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertNotIn("GRPO_ALPHAS", script_text)
 
     def test_graph_grpo_runtime_defaults_optimizer_method_to_grpo(self):
+        self.assertEqual(resolve_graph_grpo_category_dataset_source(None), "combined")
+        self.assertEqual(resolve_graph_grpo_category_dataset_source(""), "combined")
+        self.assertEqual(resolve_graph_grpo_category_dataset_source("jailbreakbench"), "jailbreakbench")
+        self.assertEqual(resolve_graph_grpo_category_filter(None), "Physical harm")
+        self.assertEqual(resolve_graph_grpo_category_filter(""), "Physical harm")
+        self.assertEqual(resolve_graph_grpo_category_filter("Privacy"), "Privacy")
         self.assertEqual(resolve_graph_grpo_optimizer_method(None), "grpo")
         self.assertEqual(resolve_graph_grpo_optimizer_method(""), "grpo")
         self.assertEqual(resolve_graph_grpo_optimizer_method("optuna"), "optuna")
@@ -103,6 +120,10 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertEqual(resolve_graph_grpo_optuna_sampler("random"), "random")
 
     def test_graph_grpo_runtime_validates_optimizer_method_and_compatibility(self):
+        validate_graph_grpo_category_dataset_source("combined")
+        validate_graph_grpo_category_dataset_source("jailbreakbench")
+        validate_graph_grpo_category_filter("Physical harm")
+        validate_graph_grpo_category_filter("Privacy")
         validate_graph_grpo_optimizer_method("grpo")
         validate_graph_grpo_optimizer_method("optuna")
         validate_graph_grpo_optimizer_compatibility("grpo", "dense")
@@ -115,6 +136,12 @@ class TestGraphGrpoConfig(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "graph_grpo only supports OPTIMIZER_METHOD"):
             validate_graph_grpo_optimizer_method("random-search")
+
+        with self.assertRaisesRegex(ValueError, "graph_grpo only supports CATEGORY_DATASET_SOURCE"):
+            validate_graph_grpo_category_dataset_source("harmbench_semantic")
+
+        with self.assertRaisesRegex(ValueError, "graph_grpo only supports CATEGORY_FILTER"):
+            validate_graph_grpo_category_filter("unknown_category")
 
         with self.assertRaisesRegex(ValueError, "OPTIMIZER_METHOD='optuna' only with WEIGHTS_MODE='scalar'"):
             validate_graph_grpo_optimizer_compatibility("optuna", "dense")
@@ -188,9 +215,12 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertIn("effective_noise_scale = debug_noise_scale if DEBUG else GRPO_CONFIG[\"noise_scale\"]", main_text)
         self.assertIn("resolve_graph_grpo_debug_question_count(os.getenv(\"DEBUG_N_QUESTIONS\"))", main_text)
         self.assertIn("resolve_graph_grpo_debug_noise_scale(", main_text)
+        self.assertIn("resolve_graph_grpo_category_dataset_source(", main_text)
+        self.assertIn("resolve_graph_grpo_category_filter(", main_text)
         self.assertIn("resolve_graph_grpo_optimizer_method(os.getenv(\"OPTIMIZER_METHOD\"))", main_text)
         self.assertIn("resolve_graph_grpo_optuna_sampler(os.getenv(\"OPTUNA_SAMPLER\"))", main_text)
         self.assertIn("resolve_graph_grpo_optuna_n_trials(os.getenv(\"OPTUNA_N_TRIALS\"))", main_text)
+        self.assertIn('category_dataset_source', main_text)
         self.assertIn("resolve_graph_grpo_weights_mode(os.getenv(\"WEIGHTS_MODE\"))", main_text)
         self.assertIn("resolve_graph_grpo_weights_init_type(os.getenv(\"WEIGHTS_INIT_TYPE\"))", main_text)
         self.assertIn('"optimal_harmfulness"', main_text)

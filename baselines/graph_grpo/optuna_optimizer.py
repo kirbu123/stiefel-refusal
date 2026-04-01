@@ -32,7 +32,14 @@ def create_optuna_sampler(sampler_name: str, sampler_seed: int) -> optuna.sample
     if sampler_name == "gp":
         return GPSampler(seed=sampler_seed)
     if sampler_name == "cmaes":
-        return CmaEsSampler(seed=sampler_seed)
+        try:
+            return CmaEsSampler(seed=sampler_seed)
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "Optuna sampler 'cmaes' requires the optional Python package 'cmaes'. "
+                "Install it with `pip install cmaes` or switch OPTUNA_SAMPLER to "
+                "'tpe', 'random', 'gp', or 'qmc'."
+            ) from exc
     if sampler_name == "qmc":
         return QMCSampler(seed=sampler_seed)
     raise ValueError(

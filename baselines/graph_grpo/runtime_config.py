@@ -2,6 +2,59 @@
 Runtime-only configuration helpers for graph_grpo.
 """
 
+from data_utils import (
+    SUPPORTED_CATEGORY_DATASET_SOURCES,
+    SUPPORTED_JAILBREAKBENCH_CATEGORIES,
+)
+
+
+def resolve_graph_grpo_category_dataset_source(
+    env_value: str | None,
+    default: str = "combined",
+) -> str:
+    """Default graph_grpo to the combined category dataset source."""
+    if env_value is None:
+        return default
+
+    normalized = env_value.strip()
+    if not normalized:
+        return default
+    return normalized
+
+
+def validate_graph_grpo_category_dataset_source(source: str) -> None:
+    """Validate graph_grpo category dataset source."""
+    if source not in SUPPORTED_CATEGORY_DATASET_SOURCES:
+        valid_sources = ", ".join(SUPPORTED_CATEGORY_DATASET_SOURCES)
+        raise ValueError(
+            f"graph_grpo only supports CATEGORY_DATASET_SOURCE in {{{valid_sources}}}, "
+            f"got '{source}'."
+        )
+
+
+def resolve_graph_grpo_category_filter(
+    env_value: str | None,
+    default: str = "Physical harm",
+) -> str:
+    """Default graph_grpo to the historical Physical harm category."""
+    if env_value is None:
+        return default
+
+    normalized = env_value.strip()
+    if not normalized:
+        return default
+    return normalized
+
+
+def validate_graph_grpo_category_filter(category_filter: str) -> None:
+    """Validate graph_grpo category selection."""
+    if category_filter not in SUPPORTED_JAILBREAKBENCH_CATEGORIES:
+        valid_categories = ", ".join(SUPPORTED_JAILBREAKBENCH_CATEGORIES)
+        raise ValueError(
+            f"graph_grpo only supports CATEGORY_FILTER in {{{valid_categories}}}, "
+            f"got '{category_filter}'."
+        )
+
 
 def resolve_graph_grpo_optimizer_method(env_value: str | None) -> str:
     """Default graph_grpo to the existing GRPO trainer unless overridden."""

@@ -45,7 +45,7 @@ from config import (
     GRAPH_FILE, EVALUATION_BACKEND,
     MMLU_CONFIG, DEBUG, get_method_results_dir,
 )
-from data_utils import load_all_datasets_with_categories, extract_response_after_think
+from data_utils import load_datasets_with_categories, extract_response_after_think
 from refusal_directions import (
     compute_refusal_direction, save_refusal_directions, load_refusal_directions,
 )
@@ -59,6 +59,8 @@ from evaluate.mmlu import (
 from baselines.graph_grpo.optuna_optimizer import optimize_scalar_weights_with_optuna
 from baselines.graph_grpo.trainer import train_grpo_is_step
 from baselines.graph_grpo.runtime_config import (
+    resolve_graph_grpo_category_dataset_source,
+    resolve_graph_grpo_category_filter,
     resolve_graph_grpo_debug_noise_scale,
     resolve_graph_grpo_debug_question_count,
     resolve_graph_grpo_optimizer_method,
@@ -69,6 +71,8 @@ from baselines.graph_grpo.runtime_config import (
     resolve_graph_grpo_optuna_weight_min,
     resolve_graph_grpo_weights_mode,
     resolve_graph_grpo_weights_init_type,
+    validate_graph_grpo_category_dataset_source,
+    validate_graph_grpo_category_filter,
     validate_graph_grpo_optimizer_compatibility,
     validate_graph_grpo_optimizer_method,
     validate_graph_grpo_optuna_sampler,
@@ -116,6 +120,25 @@ def _evaluate_model_harmfulness(
         "scores": scores,
         "mean_harmfulness": mean_harmfulness,
     }
+
+
+def _load_graph_grpo_category_items(
+    category_dataset_source: str,
+    category_name: str,
+) -> List[Dict[str, Any]]:
+    """Load the selected graph_grpo category from the configured dataset source."""
+    if category_dataset_source == "jailbreakbench":
+        all_data, _ = load_datasets_with_categories(
+            category_dataset_source,
+            category_name,
+        )
+        return all_data
+
+    all_data, _ = load_datasets_with_categories(category_dataset_source)
+    return [
+        item for item in all_data
+        if item.get("category", "") == category_name
+    ]
 
 
 def _run_grpo_training(
@@ -224,6 +247,10 @@ def _final_evaluate(
 
 
 def main():
+    category_dataset_source = resolve_graph_grpo_category_dataset_source(
+        os.getenv("CATEGORY_DATASET_SOURCE")
+    )
+    category_name = resolve_graph_grpo_category_filter(os.getenv("CATEGORY_FILTER"))
     optimizer_method = resolve_graph_grpo_optimizer_method(os.getenv("OPTIMIZER_METHOD"))
     weights_mode = resolve_graph_grpo_weights_mode(os.getenv("WEIGHTS_MODE"))
     weights_init_type = resolve_graph_grpo_weights_init_type(os.getenv("WEIGHTS_INIT_TYPE"))
@@ -239,6 +266,8 @@ def main():
     optuna_weight_max = resolve_graph_grpo_optuna_weight_max(os.getenv("OPTUNA_WEIGHT_MAX"))
     effective_noise_scale = debug_noise_scale if DEBUG else GRPO_CONFIG["noise_scale"]
 
+    validate_graph_grpo_category_dataset_source(category_dataset_source)
+    validate_graph_grpo_category_filter(category_name)
     validate_graph_grpo_optimizer_method(optimizer_method)
     validate_graph_grpo_weights_mode(weights_mode)
     validate_graph_grpo_weights_init_type(weights_init_type)
@@ -261,6 +290,8 @@ def main():
     print(f"GRPO Config: {GRPO_CONFIG}")
     print(f"Abliteration Params: {ABLITERATION_PARAMS}")
     print(f"Optimizer Method: {optimizer_method}")
+    print(f"Category dataset source: {category_dataset_source}")
+    print(f"Category: {category_name}")
     print(f"Weights Mode: {weights_mode}")
     print(f"Weights Init Type: {weights_init_type}")
     print(f"Batch Size: {MODEL_BATCH_SIZE}")
@@ -274,12 +305,14 @@ def main():
     GRPO_ANSWERS_DIR.mkdir(parents=True, exist_ok=True)
 
     print("Loading data...")
-    all_data = load_all_datasets_with_categories()
-    data_by_category = {cat: [] for cat in CATEGORIES}
-    for item in all_data:
-        cat = item.get("category", "")
-        if cat in data_by_category:
-            data_by_category[cat].append(item)
+    category_items = _load_graph_grpo_category_items(
+        category_dataset_source=category_dataset_source,
+        category_name=category_name,
+    )
+    print(
+        f"Loaded {len(category_items)} item(s) for category '{category_name}' "
+        f"from source '{category_dataset_source}'"
+    )
 
     print("\nLoading model...")
     original_argv = sys.argv.copy()
@@ -352,7 +385,7 @@ def main():
     print(f"Using optimizer method '{optimizer_method}'")
     if weights_init_type == "topic":
         print(
-            f"Topic init root index for category 'Physical harm': "
+            f"Topic init root index for graph tag 'Physical harm': "
             f"{physical_harm_idx} (tag='{bad_tags[physical_harm_idx]}')"
         )
 
@@ -365,9 +398,12 @@ def main():
     weights_shape = list(direction_weights.weights.shape)
     print(f"Trainable weights shape: {weights_shape}")
 
-    category_name = "Physical harm"
-    category_items = data_by_category.get(category_name, [])
     all_category_questions = [item.get("instruction", "") for item in category_items if item.get("instruction")]
+    if not all_category_questions:
+        raise ValueError(
+            f"No questions found for category '{category_name}' "
+            f"in source '{category_dataset_source}'."
+        )
     effective_question_count = min(MODEL_BATCH_SIZE, len(all_category_questions))
     if DEBUG:
         effective_question_count = min(effective_question_count, debug_question_count)
@@ -400,7 +436,9 @@ def main():
                 f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             ),
             config={
-                "model": MODEL_NAME, "category": category_name,
+                "model": MODEL_NAME,
+                "category": category_name,
+                "category_dataset_source": category_dataset_source,
                 "n_directions": n_directions, "n_layers": n_layers,
                 "optimizer_method": optimizer_method,
                 "weights_mode": weights_mode,
@@ -520,7 +558,9 @@ def main():
 
     answers_data = {
         "experiment_config": {
-            "model": MODEL_NAME, "category": category_name,
+            "model": MODEL_NAME,
+            "category": category_name,
+            "category_dataset_source": category_dataset_source,
             "n_questions": len(category_questions), "n_directions": n_directions,
             "optimizer_method": optimizer_method,
             "weights_mode": weights_mode, "weights_init_type": weights_init_type,
@@ -558,6 +598,8 @@ def main():
         "weights": direction_weights.weights.data.cpu(),
         "metadata": {
             "model": MODEL_NAME,
+            "category": category_name,
+            "category_dataset_source": category_dataset_source,
             "n_directions": n_directions,
             "n_layers": n_layers,
             "optimizer_method": optimizer_method,

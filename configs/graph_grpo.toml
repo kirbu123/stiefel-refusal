@@ -6,6 +6,8 @@ system_prompt = "You are a helpful assistant."
 
 [data]
 graph_file = "graphs/physical harm_wordnet_graph_actions_terms.txt"
+category_dataset_source = "combined"
+category_filter = "Physical harm"
 
 [grpo]
 n_groups = 4
