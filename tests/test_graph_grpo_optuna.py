@@ -24,6 +24,22 @@ class _DummyModel:
 
 @unittest.skipUnless(torch is not None, "torch is required for graph_grpo optuna tests")
 class TestGraphGrpoOptuna(unittest.TestCase):
+    def test_create_optuna_sampler_supports_configured_names(self):
+        tpe = optuna_module.create_optuna_sampler("tpe", sampler_seed=42)
+        random = optuna_module.create_optuna_sampler("random", sampler_seed=42)
+        gp = optuna_module.create_optuna_sampler("gp", sampler_seed=42)
+        cmaes = optuna_module.create_optuna_sampler("cmaes", sampler_seed=42)
+        qmc = optuna_module.create_optuna_sampler("qmc", sampler_seed=42)
+
+        self.assertEqual(type(tpe).__name__, "TPESampler")
+        self.assertEqual(type(random).__name__, "RandomSampler")
+        self.assertEqual(type(gp).__name__, "GPSampler")
+        self.assertEqual(type(cmaes).__name__, "CmaEsSampler")
+        self.assertEqual(type(qmc).__name__, "QMCSampler")
+
+        with self.assertRaisesRegex(ValueError, "Unsupported Optuna sampler"):
+            optuna_module.create_optuna_sampler("nsga2", sampler_seed=42)
+
     def test_evaluate_scalar_weights_returns_metrics(self):
         direction_weights = LearnableDirectionWeights(
             n_directions=2,
@@ -122,6 +138,7 @@ class TestGraphGrpoOptuna(unittest.TestCase):
                 n_layers=1,
                 ref_alpha=1.0,
                 n_trials=3,
+                sampler_name="random",
                 sampler_seed=42,
                 weight_min=-2.0,
                 weight_max=2.0,
@@ -131,6 +148,7 @@ class TestGraphGrpoOptuna(unittest.TestCase):
         self.assertEqual(len(result["optimization_history"]), 3)
         self.assertIsInstance(result["best_trial_number"], int)
         self.assertEqual(len(result["best_weights"]), 2)
+        self.assertEqual(result["sampler_name"], "random")
         best_from_history = max(item["mean_reward"] for item in result["optimization_history"])
         self.assertAlmostEqual(result["best_value"], best_from_history)
         self.assertTrue(torch.allclose(

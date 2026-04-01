@@ -9,12 +9,36 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import optuna
 import torch
-from optuna.samplers import TPESampler
+from optuna.samplers import (
+    CmaEsSampler,
+    GPSampler,
+    QMCSampler,
+    RandomSampler,
+    TPESampler,
+)
 
 from data_utils import extract_response_after_think
 from model_utils import LearnableDirectionWeights, apply_abliteration_with_hyperparams
 
 from baselines.graph_grpo.reward import compute_reward
+
+
+def create_optuna_sampler(sampler_name: str, sampler_seed: int) -> optuna.samplers.BaseSampler:
+    """Build a supported Optuna sampler from a short config name."""
+    if sampler_name == "tpe":
+        return TPESampler(seed=sampler_seed)
+    if sampler_name == "random":
+        return RandomSampler(seed=sampler_seed)
+    if sampler_name == "gp":
+        return GPSampler(seed=sampler_seed)
+    if sampler_name == "cmaes":
+        return CmaEsSampler(seed=sampler_seed)
+    if sampler_name == "qmc":
+        return QMCSampler(seed=sampler_seed)
+    raise ValueError(
+        "Unsupported Optuna sampler "
+        f"'{sampler_name}'. Expected one of: tpe, random, gp, cmaes, qmc."
+    )
 
 
 def _suggest_scalar_weights(
@@ -88,6 +112,7 @@ def optimize_scalar_weights_with_optuna(
     n_layers: int,
     ref_alpha: float,
     n_trials: int,
+    sampler_name: str,
     sampler_seed: int,
     weight_min: float,
     weight_max: float,
@@ -126,7 +151,7 @@ def optimize_scalar_weights_with_optuna(
 
     study = optuna.create_study(
         direction="maximize",
-        sampler=TPESampler(seed=sampler_seed),
+        sampler=create_optuna_sampler(sampler_name, sampler_seed),
     )
     study.optimize(objective, n_trials=n_trials)
 
@@ -156,5 +181,6 @@ def optimize_scalar_weights_with_optuna(
         "best_weights": best_trial.user_attrs["weights"],
         "best_value": float(best_trial.value),
         "best_trial_number": best_trial.number,
+        "sampler_name": sampler_name,
         "optimization_history": optimization_history,
     }

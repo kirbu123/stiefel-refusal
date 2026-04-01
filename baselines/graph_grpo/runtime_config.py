@@ -128,6 +128,30 @@ def resolve_graph_grpo_optuna_sampler_seed(
     return int(env_value.strip())
 
 
+def resolve_graph_grpo_optuna_sampler(
+    env_value: str | None,
+    default: str = "tpe",
+) -> str:
+    """Resolve the Optuna sampler name."""
+    if env_value is None:
+        return default
+
+    normalized = env_value.strip()
+    if not normalized:
+        return default
+    return normalized
+
+
+def validate_graph_grpo_optuna_sampler(sampler: str) -> None:
+    """Validate the supported Optuna sampler choices."""
+    if sampler not in {"tpe", "random", "gp", "cmaes", "qmc"}:
+        raise ValueError(
+            "graph_grpo only supports OPTUNA_SAMPLER in "
+            "{'tpe', 'random', 'gp', 'cmaes', 'qmc'}, "
+            f"got '{sampler}'."
+        )
+
+
 def resolve_graph_grpo_optuna_weight_min(
     env_value: str | None,
     default: float = -2.0,

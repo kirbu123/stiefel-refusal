@@ -31,6 +31,7 @@ init_type = "average"
 method = "grpo"
 
 [optuna]
+sampler = "tpe"
 n_trials = 50
 sampler_seed = 42
 weight_min = -2.0

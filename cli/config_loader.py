@@ -126,6 +126,8 @@ def apply_config_to_env(config: dict[str, Any], model_name: str | None = None):
         os.environ["OPTIMIZER_METHOD"] = optimizer["method"]
 
     optuna = config.get("optuna", {})
+    if optuna.get("sampler"):
+        os.environ["OPTUNA_SAMPLER"] = optuna["sampler"]
     if optuna.get("n_trials") is not None:
         os.environ["OPTUNA_N_TRIALS"] = str(optuna["n_trials"])
     if optuna.get("sampler_seed") is not None:

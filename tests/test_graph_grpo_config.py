@@ -15,6 +15,7 @@ from baselines.graph_grpo.runtime_config import (
     resolve_graph_grpo_debug_question_count,
     resolve_graph_grpo_optimizer_method,
     resolve_graph_grpo_optuna_n_trials,
+    resolve_graph_grpo_optuna_sampler,
     resolve_graph_grpo_optuna_sampler_seed,
     resolve_graph_grpo_optuna_weight_max,
     resolve_graph_grpo_optuna_weight_min,
@@ -22,6 +23,7 @@ from baselines.graph_grpo.runtime_config import (
     resolve_graph_grpo_weights_init_type,
     validate_graph_grpo_optimizer_compatibility,
     validate_graph_grpo_optimizer_method,
+    validate_graph_grpo_optuna_sampler,
     validate_graph_grpo_optuna_weight_range,
     validate_graph_grpo_weights_mode,
     validate_graph_grpo_weights_init_type,
@@ -46,6 +48,7 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertEqual(grpo["noise_scale"], 0.1)
         self.assertNotIn("alphas", grpo)
         self.assertEqual(optimizer["method"], "grpo")
+        self.assertEqual(optuna["sampler"], "tpe")
         self.assertEqual(optuna["n_trials"], 50)
         self.assertEqual(optuna["weight_min"], -2.0)
         self.assertEqual(optuna["weight_max"], 2.0)
@@ -65,6 +68,7 @@ class TestGraphGrpoConfig(unittest.TestCase):
             self.assertEqual(os.environ["WEIGHTS_MODE"], "scalar")
             self.assertEqual(os.environ["WEIGHTS_INIT_TYPE"], "average")
             self.assertEqual(os.environ["OPTIMIZER_METHOD"], "grpo")
+            self.assertEqual(os.environ["OPTUNA_SAMPLER"], "tpe")
             self.assertEqual(os.environ["OPTUNA_N_TRIALS"], "50")
             self.assertEqual(os.environ["OPTUNA_SAMPLER_SEED"], "42")
             self.assertEqual(os.environ["OPTUNA_WEIGHT_MIN"], "-2.0")
@@ -83,6 +87,7 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertIn('WEIGHTS_MODE="scalar"', script_text)
         self.assertIn('WEIGHTS_INIT_TYPE="average"', script_text)
         self.assertIn('OPTIMIZER_METHOD="grpo"', script_text)
+        self.assertIn('OPTUNA_SAMPLER="tpe"', script_text)
         self.assertIn("OPTUNA_N_TRIALS=50", script_text)
         self.assertIn("OPTUNA_SAMPLER_SEED=42", script_text)
         self.assertIn("OPTUNA_WEIGHT_MIN=-2.0", script_text)
@@ -93,18 +98,29 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertEqual(resolve_graph_grpo_optimizer_method(None), "grpo")
         self.assertEqual(resolve_graph_grpo_optimizer_method(""), "grpo")
         self.assertEqual(resolve_graph_grpo_optimizer_method("optuna"), "optuna")
+        self.assertEqual(resolve_graph_grpo_optuna_sampler(None), "tpe")
+        self.assertEqual(resolve_graph_grpo_optuna_sampler(""), "tpe")
+        self.assertEqual(resolve_graph_grpo_optuna_sampler("random"), "random")
 
     def test_graph_grpo_runtime_validates_optimizer_method_and_compatibility(self):
         validate_graph_grpo_optimizer_method("grpo")
         validate_graph_grpo_optimizer_method("optuna")
         validate_graph_grpo_optimizer_compatibility("grpo", "dense")
         validate_graph_grpo_optimizer_compatibility("optuna", "scalar")
+        validate_graph_grpo_optuna_sampler("tpe")
+        validate_graph_grpo_optuna_sampler("random")
+        validate_graph_grpo_optuna_sampler("gp")
+        validate_graph_grpo_optuna_sampler("cmaes")
+        validate_graph_grpo_optuna_sampler("qmc")
 
         with self.assertRaisesRegex(ValueError, "graph_grpo only supports OPTIMIZER_METHOD"):
             validate_graph_grpo_optimizer_method("random-search")
 
         with self.assertRaisesRegex(ValueError, "OPTIMIZER_METHOD='optuna' only with WEIGHTS_MODE='scalar'"):
             validate_graph_grpo_optimizer_compatibility("optuna", "dense")
+
+        with self.assertRaisesRegex(ValueError, "graph_grpo only supports OPTUNA_SAMPLER"):
+            validate_graph_grpo_optuna_sampler("nsga2")
 
     def test_graph_grpo_runtime_defaults_weights_mode_to_scalar(self):
         self.assertEqual(resolve_graph_grpo_weights_mode(None), "scalar")
@@ -173,6 +189,7 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertIn("resolve_graph_grpo_debug_question_count(os.getenv(\"DEBUG_N_QUESTIONS\"))", main_text)
         self.assertIn("resolve_graph_grpo_debug_noise_scale(", main_text)
         self.assertIn("resolve_graph_grpo_optimizer_method(os.getenv(\"OPTIMIZER_METHOD\"))", main_text)
+        self.assertIn("resolve_graph_grpo_optuna_sampler(os.getenv(\"OPTUNA_SAMPLER\"))", main_text)
         self.assertIn("resolve_graph_grpo_optuna_n_trials(os.getenv(\"OPTUNA_N_TRIALS\"))", main_text)
         self.assertIn("resolve_graph_grpo_weights_mode(os.getenv(\"WEIGHTS_MODE\"))", main_text)
         self.assertIn("resolve_graph_grpo_weights_init_type(os.getenv(\"WEIGHTS_INIT_TYPE\"))", main_text)
