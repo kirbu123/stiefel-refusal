@@ -232,6 +232,24 @@ conda activate heretic
 python -m baselines.graph_grpo
 ```
 
+`graph_grpo` работает в режиме one-category-per-run. По умолчанию используются:
+
+- `CATEGORY_DATASET_SOURCE=combined`
+- `CATEGORY_FILTER="Physical harm"`
+
+Shell-скрипт принимает те же базовые флаги выбора данных, что и `graph_average`:
+
+```bash
+bash scripts/run_graph_grpo.sh \
+  --category-dataset-source jailbreakbench \
+  --category "Privacy"
+```
+
+Для `jailbreakbench` фильтрация категории делается через `load_datasets_with_categories(...)`.
+Для `combined` `graph_grpo` сначала загружает весь combined dataset, а затем локально
+оставляет только выбранную категорию. Режим "прогнать все категории за один запуск"
+здесь намеренно не поддерживается.
+
 Все гиперпараметры задаются через переменные окружения (см. `scripts/run_graph_grpo.sh`)
 или через `config.py`.
 
@@ -241,6 +259,8 @@ python -m baselines.graph_grpo
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
+| `CATEGORY_DATASET_SOURCE` | `combined` | Источник категориального датасета (`combined` / `jailbreakbench`) |
+| `CATEGORY_FILTER` | `Physical harm` | Категория, на которой запускается текущий run |
 | `BATCH_SIZE` | `32` | Сколько случайно sampled вопросов из категории использовать в одном запуске `graph_grpo` |
 | `DEBUG` | `false` | Быстрый smoke-режим для `graph_grpo` |
 | `DEBUG_N_QUESTIONS` | `4` | Сколько вопросов из категории использовать при `DEBUG=true` |
