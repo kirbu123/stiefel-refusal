@@ -80,6 +80,11 @@ class TestGraphGrpoMain(unittest.TestCase):
         category_dataset_source,
         category_filter,
         model_batch_size=2,
+        optimizer_method="optuna",
+        grpo_n_epochs=1,
+        mmlu_enabled=False,
+        train_metrics_sequence=None,
+        modified_mmlu_scores=None,
     ):
         few_shots_path = self.temp_path / "few-shots.json"
         few_shots_path.write_text(json.dumps({"categories": []}), encoding="utf-8")
@@ -93,10 +98,14 @@ class TestGraphGrpoMain(unittest.TestCase):
         loader_calls = []
         wandb_init_calls = []
         wandb_log_calls = []
+        define_metric_calls = []
+        train_step_questions = []
+        mmlu_eval_calls = []
 
         fake_wandb = types.ModuleType("wandb")
         fake_wandb.init = lambda **kwargs: wandb_init_calls.append(kwargs)
         fake_wandb.log = lambda payload, step=None: wandb_log_calls.append((payload, step))
+        fake_wandb.define_metric = lambda *args, **kwargs: define_metric_calls.append((args, kwargs))
         fake_wandb.finish = lambda: None
 
         fake_heretic_config = types.ModuleType("heretic.config")
@@ -121,7 +130,7 @@ class TestGraphGrpoMain(unittest.TestCase):
         fake_config.RESULTS_DIR = results_root
         fake_config.GRPO_CONFIG = {
             "n_groups": 2,
-            "n_epochs": 1,
+            "n_epochs": grpo_n_epochs,
             "learning_rate": 1e-3,
             "noise_scale": 0.1,
             "ref_alpha": 1.0,
@@ -138,7 +147,7 @@ class TestGraphGrpoMain(unittest.TestCase):
         fake_config.FEW_SHOTS_PATH = few_shots_path
         fake_config.GRAPH_FILE = graph_file
         fake_config.EVALUATION_BACKEND = "llamaguard"
-        fake_config.MMLU_CONFIG = {"enabled": False}
+        fake_config.MMLU_CONFIG = {"enabled": mmlu_enabled}
         fake_config.DEBUG = False
         fake_config.get_method_results_dir = lambda method_name: self.temp_path / method_name
 
@@ -184,9 +193,28 @@ class TestGraphGrpoMain(unittest.TestCase):
         fake_reward.compute_reward = lambda questions, responses, classifier_categories, backend: [1 for _ in questions]
 
         fake_mmlu = types.ModuleType("evaluate.mmlu")
-        fake_mmlu.build_mmlu_result = lambda **kwargs: None
-        fake_mmlu.evaluate_model_on_mmlu = lambda model, config: None
-        fake_mmlu.get_cached_or_evaluate_original_mmlu = lambda model, model_name, config: None
+        modified_scores_iter = iter(modified_mmlu_scores or [0.75])
+
+        def fake_build_mmlu_result(**kwargs):
+            original_result = kwargs["original_result"]
+            modified_result = kwargs["modified_result"]
+            return {
+                "original": {"accuracy": original_result["summary"]["accuracy"]},
+                "modified": {"accuracy": modified_result["summary"]["accuracy"]},
+            }
+
+        def fake_evaluate_model_on_mmlu(model, config):
+            mmlu_eval_calls.append("modified")
+            return {"summary": {"accuracy": next(modified_scores_iter)}}
+
+        def fake_get_cached_or_evaluate_original_mmlu(model, model_name, config):
+            if not mmlu_enabled:
+                return None
+            return {"summary": {"accuracy": 0.25}}
+
+        fake_mmlu.build_mmlu_result = fake_build_mmlu_result
+        fake_mmlu.evaluate_model_on_mmlu = fake_evaluate_model_on_mmlu
+        fake_mmlu.get_cached_or_evaluate_original_mmlu = fake_get_cached_or_evaluate_original_mmlu
 
         fake_optuna = types.ModuleType("baselines.graph_grpo.optuna_optimizer")
 
@@ -225,10 +253,16 @@ class TestGraphGrpoMain(unittest.TestCase):
         fake_optuna.optimize_scalar_weights_with_optuna = fake_optimize_scalar_weights_with_optuna
 
         fake_trainer = types.ModuleType("baselines.graph_grpo.trainer")
-        fake_trainer.train_grpo_is_step = lambda *args, **kwargs: {
-            "mean_reward": 1.0,
-            "best_reward": 1.0,
-        }
+        trainer_metrics_iter = iter(
+            train_metrics_sequence
+            or [{"mean_reward": 1.0, "best_reward": 1.0} for _ in range(grpo_n_epochs)]
+        )
+
+        def fake_train_grpo_is_step(*args, **kwargs):
+            train_step_questions.append(list(kwargs["questions"]))
+            return next(trainer_metrics_iter)
+
+        fake_trainer.train_grpo_is_step = fake_train_grpo_is_step
 
         fake_modules = {
             "wandb": fake_wandb,
@@ -248,7 +282,7 @@ class TestGraphGrpoMain(unittest.TestCase):
         env = {
             "CATEGORY_DATASET_SOURCE": category_dataset_source,
             "CATEGORY_FILTER": category_filter,
-            "OPTIMIZER_METHOD": "optuna",
+            "OPTIMIZER_METHOD": optimizer_method,
             "WEIGHTS_MODE": "scalar",
             "WEIGHTS_INIT_TYPE": "average",
         }
@@ -268,6 +302,9 @@ class TestGraphGrpoMain(unittest.TestCase):
             "loader_calls": loader_calls,
             "wandb_init_calls": wandb_init_calls,
             "wandb_log_calls": wandb_log_calls,
+            "define_metric_calls": define_metric_calls,
+            "train_step_questions": train_step_questions,
+            "mmlu_eval_calls": mmlu_eval_calls,
             "models": FakeModel.instances,
         }
 
@@ -303,6 +340,17 @@ class TestGraphGrpoMain(unittest.TestCase):
         self.assertEqual(
             result["wandb_init_calls"][0]["config"]["category_dataset_source"],
             "jailbreakbench",
+        )
+        scalar_payloads = [payload for payload, _step in result["wandb_log_calls"]]
+        self.assertTrue(any("clean_model/harmfulness_on_full_dataset" in payload for payload in scalar_payloads))
+        self.assertTrue(any("best_value_model/harmfulness_on_full_dataset" in payload for payload in scalar_payloads))
+        series_payloads = [
+            payload for payload in scalar_payloads
+            if "model_state_eval/point_index" in payload
+        ]
+        self.assertEqual(
+            [payload["model_state_eval/point_name"] for payload in series_payloads],
+            ["clean", "best_value"],
         )
 
     def test_main_filters_combined_locally_before_batch_sampling(self):
@@ -351,6 +399,100 @@ class TestGraphGrpoMain(unittest.TestCase):
             result["wandb_init_calls"][0]["config"]["category"],
             "Physical harm",
         )
+
+    def test_grpo_logs_clean_and_best_batch_series_and_restores_best_epoch(self):
+        dataset = [
+            {"instruction": "physical-question-1", "category": "Physical harm", "source": "combined"},
+            {"instruction": "physical-question-2", "category": "Physical harm", "source": "combined"},
+            {"instruction": "physical-question-3", "category": "Physical harm", "source": "combined"},
+            {"instruction": "physical-question-4", "category": "Physical harm", "source": "combined"},
+        ]
+
+        result = self._run_main(
+            dataset=dataset,
+            category_dataset_source="combined",
+            category_filter="Physical harm",
+            model_batch_size=2,
+            optimizer_method="grpo",
+            grpo_n_epochs=3,
+            mmlu_enabled=True,
+            train_metrics_sequence=[
+                {"mean_reward": 0.1, "best_reward": 0.3},
+                {"mean_reward": 0.9, "best_reward": 1.0},
+                {"mean_reward": 0.4, "best_reward": 0.8},
+            ],
+            modified_mmlu_scores=[0.8],
+        )
+
+        self.assertEqual(result["loader_calls"], [("combined", None)])
+        self.assertEqual(len(result["train_step_questions"]), 3)
+        self.assertTrue(all(len(batch) == 2 for batch in result["train_step_questions"]))
+        self.assertNotEqual(result["train_step_questions"][0], result["train_step_questions"][1])
+        self.assertEqual(
+            result["answers_data"]["experiment_config"]["best_grpo_epoch"],
+            2,
+        )
+        self.assertEqual(
+            result["answers_data"]["experiment_config"]["best_train_batch_mean_harmfulness"],
+            0.9,
+        )
+        self.assertEqual(
+            result["answers_data"]["questions"],
+            result["train_step_questions"][1],
+        )
+        self.assertEqual(result["answers_data"]["optimal_harmfulness"], 0.9)
+        self.assertEqual(
+            result["answers_data"]["optimal_harmfulness_source"],
+            "best_train_batch_mean_reward",
+        )
+        self.assertEqual(result["mmlu_eval_calls"], ["modified"])
+        self.assertTrue(result["define_metric_calls"])
+
+        scalar_payloads = [payload for payload, _step in result["wandb_log_calls"]]
+        self.assertTrue(any("clean_model/mmlu_score" in payload for payload in scalar_payloads))
+        self.assertTrue(any("best_value_model/mmlu_score" in payload for payload in scalar_payloads))
+        self.assertTrue(any("best_batch_model/mmlu_score" in payload for payload in scalar_payloads))
+        self.assertTrue(any("clean_model/harmfulness_on_full_dataset" in payload for payload in scalar_payloads))
+        self.assertTrue(any("best_value_model/harmfulness_on_full_dataset" in payload for payload in scalar_payloads))
+        self.assertTrue(any("best_batch_model/harmfulness_on_full_dataset" in payload for payload in scalar_payloads))
+
+        series_payloads = [
+            payload for payload in scalar_payloads
+            if "model_state_eval/point_index" in payload
+        ]
+        self.assertEqual(
+            [payload["model_state_eval/point_index"] for payload in series_payloads],
+            [0, 1],
+        )
+        self.assertEqual(
+            [payload["model_state_eval/point_name"] for payload in series_payloads],
+            ["clean", "best_value"],
+        )
+
+    def test_grpo_skips_mmlu_series_when_mmlu_disabled(self):
+        dataset = [
+            {"instruction": "physical-question-1", "category": "Physical harm", "source": "combined"},
+            {"instruction": "physical-question-2", "category": "Physical harm", "source": "combined"},
+        ]
+
+        result = self._run_main(
+            dataset=dataset,
+            category_dataset_source="combined",
+            category_filter="Physical harm",
+            model_batch_size=2,
+            optimizer_method="grpo",
+            grpo_n_epochs=1,
+            mmlu_enabled=False,
+            train_metrics_sequence=[{"mean_reward": 0.7, "best_reward": 0.9}],
+        )
+
+        scalar_payloads = [payload for payload, _step in result["wandb_log_calls"]]
+        self.assertTrue(any("clean_model/harmfulness_on_full_dataset" in payload for payload in scalar_payloads))
+        self.assertTrue(any("best_value_model/harmfulness_on_full_dataset" in payload for payload in scalar_payloads))
+        self.assertTrue(any("best_batch_model/harmfulness_on_full_dataset" in payload for payload in scalar_payloads))
+        self.assertFalse(any("clean_model/mmlu_score" in payload for payload in scalar_payloads))
+        self.assertFalse(any("best_value_model/mmlu_score" in payload for payload in scalar_payloads))
+        self.assertFalse(any("best_batch_model/mmlu_score" in payload for payload in scalar_payloads))
 
 
 if __name__ == "__main__":
