@@ -1,10 +1,13 @@
 # GRPO-IS: Graph-Based Refusal Direction Learning via GRPO with Importance Sampling
 
 Метод обучает веса `LearnableDirectionWeights` для взвешенного суммирования
-**замороженных** refusal-направлений графа вершин. Поддерживаются два режима:
+**замороженных** refusal-направлений графа вершин. Поддерживаются два режима
+параметризации и два режима оптимизации:
 
 - `WEIGHTS_MODE=scalar` — один обучаемый скаляр на каждое refusal-направление
 - `WEIGHTS_MODE=dense` — полная матрица коэффициентов `(n_layers+1, hidden_size)` на направление
+- `OPTIMIZER_METHOD=grpo` — текущий gradient-based GRPO-IS trainer
+- `OPTIMIZER_METHOD=optuna` — scalar-only поиск коэффициентов через Optuna
 
 Поведение модели меняется через аблитерацию — итоговые веса определяют, насколько
 сильно «стирать» каждое направление.
@@ -251,13 +254,23 @@ python -m baselines.graph_grpo
 | `GRPO_LEARNING_RATE` | `1e-3` | Learning rate (Adam) |
 | `ABLITERATION_MAX_WEIGHT` | `2.0` | Максимальная интенсивность аблитерации |
 | `ABLITERATION_MAX_WEIGHT_POSITION` | `0.7` | Позиция пика (доля от числа слоёв) |
+| `OPTIMIZER_METHOD` | `grpo` | Метод оптимизации коэффициентов (`grpo` / `optuna`) |
 | `WEIGHTS_MODE` | `scalar` | Параметризация весов (`scalar` / `dense`) |
 | `WEIGHTS_INIT_TYPE` | `average` | Инициализация весов (`average` / `topic`; `zero` не поддерживается в текущем differentiable trainer) |
+| `OPTUNA_N_TRIALS` | `50` | Число trial-ов для `OPTIMIZER_METHOD=optuna` |
+| `OPTUNA_SAMPLER_SEED` | `42` | Seed для `TPESampler` |
+| `OPTUNA_WEIGHT_MIN` | `-2.0` | Нижняя граница поиска scalar-коэффициентов в `optuna` |
+| `OPTUNA_WEIGHT_MAX` | `2.0` | Верхняя граница поиска scalar-коэффициентов в `optuna` |
 | `EVALUATION_BACKEND` | `llamaguard` | Бэкенд оценки (`llamaguard` / `local_llm_judge`) |
 
 `graph_grpo` по умолчанию использует `WEIGHTS_MODE=scalar`, то есть один обучаемый
 скаляр на направление. Режим `dense` сохраняет старую полную параметризацию и
 доступен явным override.
+
+`OPTIMIZER_METHOD=optuna` сейчас поддерживается только вместе с
+`WEIGHTS_MODE=scalar`. В этом режиме objective равен `mean harmfulness` на том же
+батче вопросов, а лучшее значение сохраняется в `answers_*.json` как
+`optimal_harmfulness` с `optimal_harmfulness_source="best_trial_mean_reward"`.
 
 `graph_grpo` должен стартовать с ненулевой инициализации. По умолчанию используется
 `average`; `topic` остаётся доступным явным override, а `zero` намеренно запрещён,
@@ -266,3 +279,6 @@ python -m baselines.graph_grpo
 или `1` только у выбранного topic-направления.
 
 Обычный запуск `graph_grpo` больше не идёт по всем вопросам категории: на каждый run берётся случайный subset размера `BATCH_SIZE` (или меньше, если в категории вопросов меньше). При `DEBUG=true` этот subset дополнительно ограничивается сверху через `DEBUG_N_QUESTIONS`, а rollout noise scale заменяется на `DEBUG_NOISE_SCALE`, чтобы smoke-run был быстрее и давал менее вырожденный градиентный сигнал.
+
+В итоговых `answers_*.json` сохраняются `final_scores`, `score_statistics.mean`,
+`final_mean_harmfulness`, `optimal_harmfulness` и `optimal_harmfulness_source`.

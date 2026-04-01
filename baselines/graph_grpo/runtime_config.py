@@ -3,6 +3,34 @@ Runtime-only configuration helpers for graph_grpo.
 """
 
 
+def resolve_graph_grpo_optimizer_method(env_value: str | None) -> str:
+    """Default graph_grpo to the existing GRPO trainer unless overridden."""
+    if env_value is None:
+        return "grpo"
+
+    normalized = env_value.strip()
+    if not normalized:
+        return "grpo"
+    return normalized
+
+
+def validate_graph_grpo_optimizer_method(method: str) -> None:
+    """Validate graph_grpo optimizer selection."""
+    if method not in {"grpo", "optuna"}:
+        raise ValueError(
+            f"graph_grpo only supports OPTIMIZER_METHOD in {{'grpo', 'optuna'}}, got '{method}'."
+        )
+
+
+def validate_graph_grpo_optimizer_compatibility(method: str, weights_mode: str) -> None:
+    """Ensure the selected optimizer supports the requested weight parameterization."""
+    if method == "optuna" and weights_mode != "scalar":
+        raise ValueError(
+            "graph_grpo currently supports OPTIMIZER_METHOD='optuna' only with "
+            "WEIGHTS_MODE='scalar'."
+        )
+
+
 def resolve_graph_grpo_weights_mode(env_value: str | None) -> str:
     """Default graph_grpo to scalar-per-direction weights when env is unset."""
     if env_value is None:
@@ -73,4 +101,57 @@ def validate_graph_grpo_weights_init_type(init_type: str) -> None:
             "graph_grpo does not support WEIGHTS_INIT_TYPE='zero': "
             "the current differentiable intervention path has a dead start at zero, "
             "so training cannot move off that point. Use 'average' (default) or 'topic'."
+        )
+
+
+def resolve_graph_grpo_optuna_n_trials(
+    env_value: str | None,
+    default: int = 50,
+) -> int:
+    """Resolve the Optuna trial budget."""
+    if env_value is None or not env_value.strip():
+        return default
+
+    value = int(env_value.strip())
+    if value < 1:
+        raise ValueError(f"OPTUNA_N_TRIALS must be >= 1, got {value}")
+    return value
+
+
+def resolve_graph_grpo_optuna_sampler_seed(
+    env_value: str | None,
+    default: int = 42,
+) -> int:
+    """Resolve the Optuna sampler seed."""
+    if env_value is None or not env_value.strip():
+        return default
+    return int(env_value.strip())
+
+
+def resolve_graph_grpo_optuna_weight_min(
+    env_value: str | None,
+    default: float = -2.0,
+) -> float:
+    """Resolve the lower search bound for scalar Optuna coefficients."""
+    if env_value is None or not env_value.strip():
+        return default
+    return float(env_value.strip())
+
+
+def resolve_graph_grpo_optuna_weight_max(
+    env_value: str | None,
+    default: float = 2.0,
+) -> float:
+    """Resolve the upper search bound for scalar Optuna coefficients."""
+    if env_value is None or not env_value.strip():
+        return default
+    return float(env_value.strip())
+
+
+def validate_graph_grpo_optuna_weight_range(weight_min: float, weight_max: float) -> None:
+    """Reject inverted scalar Optuna search ranges."""
+    if weight_min > weight_max:
+        raise ValueError(
+            f"OPTUNA weight range must satisfy OPTUNA_WEIGHT_MIN <= OPTUNA_WEIGHT_MAX, "
+            f"got {weight_min} > {weight_max}."
         )
