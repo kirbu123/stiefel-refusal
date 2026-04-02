@@ -71,7 +71,7 @@ export CATEGORY_DATASET_SOURCE
 export CATEGORY_FILTER
 
 # ---- GPU ----
-export CUDA_VISIBLE_DEVICES=3
+export CUDA_VISIBLE_DEVICES=6
 
 # ---- Fast smoke debug ----
 # When true, graph_grpo uses only a small subset of category questions and a smaller rollout noise scale.
@@ -109,7 +109,7 @@ export WEIGHTS_MODE="scalar"
 export WEIGHTS_INIT_TYPE="average"
 
 # ---- Optimizer selection ----
-export OPTIMIZER_METHOD="grpo"
+export OPTIMIZER_METHOD="optuna"
 
 # ---- Optuna weight search ----
 export OPTUNA_SAMPLER="cmaes"

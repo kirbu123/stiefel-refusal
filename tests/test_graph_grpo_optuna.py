@@ -238,6 +238,7 @@ class TestGraphGrpoOptuna(unittest.TestCase):
         self.assertEqual(len(result["optimization_history"]), 3)
         self.assertIsInstance(result["best_trial_number"], int)
         self.assertEqual(len(result["best_weights"]), 2)
+        self.assertEqual(result["best_trial_questions"], ["q1", "q2"])
         self.assertEqual(result["sampler_name"], "random")
         best_from_history = max(item["mean_reward"] for item in result["optimization_history"])
         self.assertAlmostEqual(result["best_value"], best_from_history)
@@ -250,6 +251,91 @@ class TestGraphGrpoOptuna(unittest.TestCase):
             self.assertIn("mean_reward", item)
             self.assertIn("best_reward", item)
             self.assertEqual(item["weights_mode"], "scalar")
+
+    def test_optimize_uses_question_sampler_per_trial_and_returns_best_trial_questions(self):
+        direction_weights = LearnableDirectionWeights(
+            n_directions=2,
+            n_layers=1,
+            hidden_size=2,
+            init_type="average",
+            mode="scalar",
+        )
+        model = _DummyModel()
+        extracted_directions = [
+            torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32),
+            torch.tensor([[0.0, 1.0], [1.0, 0.0]], dtype=torch.float32),
+        ]
+        sampled_batches = [
+            ["trial-0"],
+            ["trial-1a", "trial-1b"],
+            ["trial-2"],
+        ]
+        score_by_batch = {
+            "trial-0": 0.1,
+            "trial-1a": 0.9,
+            "trial-2": 0.4,
+        }
+        sampler_calls = []
+
+        def question_sampler():
+            batch = sampled_batches[len(sampler_calls)]
+            sampler_calls.append(list(batch))
+            return list(batch)
+
+        def fake_evaluate(
+            direction_weights,
+            extracted_directions,
+            weights,
+            model,
+            questions,
+            abliteration_params,
+            classifier_categories,
+            n_layers,
+            ref_alpha,
+            backend=None,
+        ):
+            score = score_by_batch[questions[0]]
+            return {
+                "weights": weights.detach().cpu().tolist(),
+                "responses": [],
+                "scores": [score for _ in questions],
+                "mean_reward": score,
+                "best_reward": score,
+                "n_questions": len(questions),
+                "weights_mode": "scalar",
+            }
+
+        with patch.object(optuna_module, "evaluate_weights", side_effect=fake_evaluate):
+            result = optuna_module.optimize_weights_with_optuna(
+                direction_weights=direction_weights,
+                extracted_directions=extracted_directions,
+                model=model,
+                questions=None,
+                abliteration_params={
+                    "max_weight": 2.0,
+                    "max_weight_position": 0.5,
+                    "min_weight": 0.25,
+                    "min_weight_distance": 0.4,
+                },
+                classifier_categories=[],
+                n_layers=1,
+                ref_alpha=1.0,
+                n_trials=3,
+                sampler_name="random",
+                sampler_seed=42,
+                weight_min=-2.0,
+                weight_max=2.0,
+                question_sampler=question_sampler,
+                backend="llamaguard",
+            )
+
+        self.assertEqual(sampler_calls, sampled_batches)
+        self.assertEqual(result["best_trial_number"], 1)
+        self.assertEqual(result["best_trial_questions"], sampled_batches[1])
+        self.assertEqual(
+            [item["n_questions"] for item in result["optimization_history"]],
+            [1, 2, 1],
+        )
 
     def test_optimize_dense_weights_updates_module_and_records_summary_history(self):
         direction_weights = LearnableDirectionWeights(
@@ -315,6 +401,7 @@ class TestGraphGrpoOptuna(unittest.TestCase):
         self.assertIsInstance(result["best_trial_number"], int)
         best_weights_tensor = torch.tensor(result["best_weights"], dtype=direction_weights.weights.dtype)
         self.assertEqual(tuple(best_weights_tensor.shape), tuple(direction_weights.weights.shape))
+        self.assertEqual(result["best_trial_questions"], ["q1", "q2"])
         best_from_history = max(item["mean_reward"] for item in result["optimization_history"])
         self.assertAlmostEqual(result["best_value"], best_from_history)
         self.assertTrue(torch.allclose(

@@ -20,6 +20,7 @@ if str(_verl_path) not in sys.path:
 import json
 import os
 import random
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -153,6 +154,64 @@ def _sample_training_questions(
     if effective_question_count < len(all_category_questions):
         return random.sample(all_category_questions, k=effective_question_count)
     return list(all_category_questions)
+
+
+def _format_run_name_value(value: Any) -> str:
+    """Format run-name scalars compactly and consistently."""
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def _sanitize_run_name_part(value: Any) -> str:
+    """Normalize free-form values into wandb-friendly run-name fragments."""
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value).strip())
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    return normalized or "unknown"
+
+
+def _build_wandb_run_name(
+    optimizer_method: str,
+    category_name: str,
+    weights_mode: str,
+    weights_init_type: str,
+    grpo_config: Dict[str, Any],
+    optuna_config: Dict[str, Any],
+) -> str:
+    """Build a readable wandb run name with common and optimizer-specific knobs."""
+    parts = [
+        _sanitize_run_name_part(optimizer_method),
+        _sanitize_run_name_part(category_name),
+        f"weights_{_sanitize_run_name_part(weights_mode)}",
+        f"init_{_sanitize_run_name_part(weights_init_type)}",
+    ]
+
+    if optimizer_method == "grpo":
+        parts.extend([
+            f"n_groups{_format_run_name_value(grpo_config['n_groups'])}",
+            f"n_epochs{_format_run_name_value(grpo_config['n_epochs'])}",
+            f"lr{_format_run_name_value(grpo_config['learning_rate'])}",
+            f"noise{_format_run_name_value(grpo_config['noise_scale'])}",
+            f"ref_alpha{_format_run_name_value(grpo_config['ref_alpha'])}",
+            f"is_clip{_format_run_name_value(grpo_config['is_clip_ratio'])}",
+            f"clip{_format_run_name_value(grpo_config['clip_ratio'])}",
+            f"loss_{_sanitize_run_name_part(grpo_config['loss_agg_mode'])}",
+        ])
+    else:
+        parts.extend([
+            f"sampler_{_sanitize_run_name_part(optuna_config['sampler'])}",
+            f"n_trials{_format_run_name_value(optuna_config['n_trials'])}",
+            f"sampler_seed{_format_run_name_value(optuna_config['sampler_seed'])}",
+            f"weight_min{_format_run_name_value(optuna_config['weight_min'])}",
+            f"weight_max{_format_run_name_value(optuna_config['weight_max'])}",
+        ])
+
+    parts.append(datetime.now().strftime("%Y%m%d_%H%M%S"))
+    return "_".join(parts)
 
 
 def _define_model_state_eval_metrics() -> None:
@@ -520,9 +579,13 @@ def main():
     if WANDB_AVAILABLE:
         wandb.init(
             project="refusal_direction_grpo_is",
-            name=(
-                f"{optimizer_method}_{category_name.replace('/', '_')}_"
-                f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            name=_build_wandb_run_name(
+                optimizer_method=optimizer_method,
+                category_name=category_name,
+                weights_mode=weights_mode,
+                weights_init_type=weights_init_type,
+                grpo_config=GRPO_CONFIG,
+                optuna_config=optuna_config,
             ),
             config={
                 "model": MODEL_NAME,
@@ -579,18 +642,18 @@ def main():
             debug_question_count=debug_question_count,
         )
     else:
-        category_questions = _sample_training_questions(
-            all_category_questions=all_category_questions,
-            debug_question_count=debug_question_count,
-        )
         print("\n" + "=" * 80)
         print("OPTUNA OPTIMIZATION")
         print("=" * 80)
+        print(
+            f"  Each Optuna trial will train on a random batch of {train_question_count} "
+            f"question(s) sampled from {len(all_category_questions)} available"
+        )
         optimization_result = optimize_weights_with_optuna(
             direction_weights=direction_weights,
             extracted_directions=extracted_directions,
             model=model,
-            questions=category_questions,
+            questions=all_category_questions,
             abliteration_params=ABLITERATION_PARAMS,
             classifier_categories=classifier_categories,
             n_layers=n_layers,
@@ -600,6 +663,10 @@ def main():
             sampler_seed=optuna_sampler_seed,
             weight_min=optuna_weight_min,
             weight_max=optuna_weight_max,
+            question_sampler=lambda: _sample_training_questions(
+                all_category_questions=all_category_questions,
+                debug_question_count=debug_question_count,
+            ),
             backend=EVALUATION_BACKEND,
         )
         optimization_result["training_history"] = []
@@ -616,7 +683,11 @@ def main():
                 }
             )
 
-    evaluation_questions = category_questions if optimizer_method == "optuna" else optimization_result["best_train_batch_questions"]
+    evaluation_questions = (
+        optimization_result["best_trial_questions"]
+        if optimizer_method == "optuna"
+        else optimization_result["best_train_batch_questions"]
+    )
     if optimizer_method == "grpo":
         with torch.no_grad():
             direction_weights.weights.data.copy_(

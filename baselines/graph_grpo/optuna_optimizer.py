@@ -4,7 +4,7 @@ Optuna-based weight search for graph_grpo.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import optuna
@@ -279,7 +279,7 @@ def optimize_weights_with_optuna(
     direction_weights: LearnableDirectionWeights,
     extracted_directions: List[torch.Tensor],
     model,
-    questions: List[str],
+    questions: Optional[List[str]],
     abliteration_params: Dict[str, float],
     classifier_categories: List[Dict[str, Any]],
     n_layers: int,
@@ -289,14 +289,24 @@ def optimize_weights_with_optuna(
     sampler_seed: int,
     weight_min: float,
     weight_max: float,
+    question_sampler: Optional[Callable[[], List[str]]] = None,
     backend: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Search scalar or dense direction weights with Optuna and update the module in-place."""
     device = direction_weights.weights.device
     dtype = direction_weights.weights.dtype
     weights_mode = direction_weights.mode
+    fallback_questions = list(questions) if questions is not None else None
+
+    if question_sampler is None and fallback_questions is None:
+        raise ValueError("Optuna optimization requires either `questions` or `question_sampler`.")
 
     def objective(trial: optuna.Trial) -> float:
+        trial_questions = (
+            list(question_sampler())
+            if question_sampler is not None
+            else list(fallback_questions)
+        )
         trial_weights = suggest_trial_weights(
             trial=trial,
             direction_weights=direction_weights,
@@ -310,7 +320,7 @@ def optimize_weights_with_optuna(
             extracted_directions=extracted_directions,
             weights=trial_weights,
             model=model,
-            questions=questions,
+            questions=trial_questions,
             abliteration_params=abliteration_params,
             classifier_categories=classifier_categories,
             n_layers=n_layers,
@@ -322,6 +332,7 @@ def optimize_weights_with_optuna(
         trial.set_user_attr("mean_reward", trial_result["mean_reward"])
         trial.set_user_attr("best_reward", trial_result["best_reward"])
         trial.set_user_attr("n_questions", trial_result["n_questions"])
+        trial.set_user_attr("questions", trial_questions)
         for key, value in summarize_weights(trial_weights).items():
             trial.set_user_attr(key, value)
         if weights_mode == "scalar":
@@ -374,6 +385,7 @@ def optimize_weights_with_optuna(
         "best_weights": best_weights.detach().cpu().tolist(),
         "best_value": float(best_trial.value),
         "best_trial_number": best_trial.number,
+        "best_trial_questions": list(best_trial.user_attrs.get("questions", fallback_questions or [])),
         "sampler_name": sampler_name,
         "optimization_history": optimization_history,
     }
@@ -383,7 +395,7 @@ def optimize_scalar_weights_with_optuna(
     direction_weights: LearnableDirectionWeights,
     extracted_directions: List[torch.Tensor],
     model,
-    questions: List[str],
+    questions: Optional[List[str]],
     abliteration_params: Dict[str, float],
     classifier_categories: List[Dict[str, Any]],
     n_layers: int,
@@ -393,6 +405,7 @@ def optimize_scalar_weights_with_optuna(
     sampler_seed: int,
     weight_min: float,
     weight_max: float,
+    question_sampler: Optional[Callable[[], List[str]]] = None,
     backend: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Backward-compatible scalar wrapper around the generic Optuna optimizer."""
@@ -410,5 +423,6 @@ def optimize_scalar_weights_with_optuna(
         sampler_seed=sampler_seed,
         weight_min=weight_min,
         weight_max=weight_max,
+        question_sampler=question_sampler,
         backend=backend,
     )
