@@ -101,6 +101,7 @@ class TestGraphGrpoMain(unittest.TestCase):
         wandb_log_calls = []
         define_metric_calls = []
         train_step_questions = []
+        optuna_trial_batches = []
         mmlu_eval_calls = []
 
         fake_wandb = types.ModuleType("wandb")
@@ -233,16 +234,25 @@ class TestGraphGrpoMain(unittest.TestCase):
             sampler_seed,
             weight_min,
             weight_max,
-            backend,
+            question_sampler=None,
+            backend=None,
         ):
+            if question_sampler is not None:
+                trial_batches = [list(question_sampler()) for _ in range(min(n_trials, 3))]
+            else:
+                trial_batches = [list(questions)]
+            optuna_trial_batches.extend(trial_batches)
+            best_trial_index = 1 if len(trial_batches) > 1 else 0
+
             if direction_weights.mode == "dense":
                 best_weights_tensor = torch.arange(
                     direction_weights.weights.numel(),
                     dtype=torch.float32,
                 ).reshape_as(direction_weights.weights)
-                optimization_history = [
-                    {
-                        "trial_number": 0,
+                optimization_history = []
+                for trial_index, trial_questions in enumerate(trial_batches):
+                    optimization_history.append({
+                        "trial_number": trial_index,
                         "weights_mode": "dense",
                         "weights_shape": list(best_weights_tensor.shape),
                         "weights_mean": float(best_weights_tensor.mean().item()),
@@ -250,30 +260,30 @@ class TestGraphGrpoMain(unittest.TestCase):
                         "weights_min": float(best_weights_tensor.min().item()),
                         "weights_max": float(best_weights_tensor.max().item()),
                         "weights_norm": float(best_weights_tensor.norm().item()),
-                        "mean_reward": 1.0,
-                        "best_reward": 1.0,
-                        "n_questions": len(questions),
-                    }
-                ]
+                        "mean_reward": float(trial_index + 1),
+                        "best_reward": float(trial_index + 1),
+                        "n_questions": len(trial_questions),
+                    })
             else:
                 best_weights_tensor = torch.tensor([0.75, -0.25], dtype=torch.float32)
-                optimization_history = [
-                    {
-                        "trial_number": 0,
+                optimization_history = []
+                for trial_index, trial_questions in enumerate(trial_batches):
+                    optimization_history.append({
+                        "trial_number": trial_index,
                         "weights": [0.75, -0.25],
                         "weights_mode": "scalar",
-                        "mean_reward": 1.0,
-                        "best_reward": 1.0,
-                        "n_questions": len(questions),
-                    }
-                ]
+                        "mean_reward": float(trial_index + 1),
+                        "best_reward": float(trial_index + 1),
+                        "n_questions": len(trial_questions),
+                    })
 
             direction_weights.weights = best_weights_tensor
             return {
                 "optimization_history": optimization_history,
-                "best_trial_number": 0,
-                "best_value": 1.0,
+                "best_trial_number": best_trial_index,
+                "best_value": float(best_trial_index + 1),
                 "best_weights": best_weights_tensor.tolist(),
+                "best_trial_questions": trial_batches[best_trial_index],
             }
 
         fake_optuna.optimize_weights_with_optuna = fake_optimize_weights_with_optuna
@@ -331,6 +341,7 @@ class TestGraphGrpoMain(unittest.TestCase):
             "wandb_log_calls": wandb_log_calls,
             "define_metric_calls": define_metric_calls,
             "train_step_questions": train_step_questions,
+            "optuna_trial_batches": optuna_trial_batches,
             "mmlu_eval_calls": mmlu_eval_calls,
             "models": FakeModel.instances,
         }
@@ -475,6 +486,18 @@ class TestGraphGrpoMain(unittest.TestCase):
         )
         self.assertEqual(result["mmlu_eval_calls"], ["modified"])
         self.assertTrue(result["define_metric_calls"])
+        run_name = result["wandb_init_calls"][0]["name"]
+        self.assertIn("grpo_Physical_harm", run_name)
+        self.assertIn("weights_scalar", run_name)
+        self.assertIn("init_average", run_name)
+        self.assertIn("n_groups2", run_name)
+        self.assertIn("n_epochs3", run_name)
+        self.assertIn("lr0.001", run_name)
+        self.assertIn("noise0.1", run_name)
+        self.assertIn("ref_alpha1", run_name)
+        self.assertIn("is_clip5", run_name)
+        self.assertIn("clip0.2", run_name)
+        self.assertIn("loss_token-mean", run_name)
 
         scalar_payloads = [payload for payload, _step in result["wandb_log_calls"]]
         self.assertTrue(any("clean_model/mmlu_score" in payload for payload in scalar_payloads))
@@ -548,6 +571,45 @@ class TestGraphGrpoMain(unittest.TestCase):
         self.assertEqual(dense_history["weights_mode"], "dense")
         self.assertIn("weights_shape", dense_history)
         self.assertNotIn("weights", dense_history)
+
+    def test_optuna_samples_random_batch_each_trial_and_saves_best_trial_batch(self):
+        dataset = [
+            {"instruction": "physical-question-1", "category": "Physical harm", "source": "combined"},
+            {"instruction": "physical-question-2", "category": "Physical harm", "source": "combined"},
+            {"instruction": "physical-question-3", "category": "Physical harm", "source": "combined"},
+            {"instruction": "physical-question-4", "category": "Physical harm", "source": "combined"},
+        ]
+
+        result = self._run_main(
+            dataset=dataset,
+            category_dataset_source="combined",
+            category_filter="Physical harm",
+            model_batch_size=2,
+            optimizer_method="optuna",
+            weights_mode="scalar",
+            mmlu_enabled=False,
+        )
+
+        run_name = result["wandb_init_calls"][0]["name"]
+        self.assertIn("optuna_Physical_harm", run_name)
+        self.assertIn("weights_scalar", run_name)
+        self.assertIn("init_average", run_name)
+        self.assertIn("sampler_tpe", run_name)
+        self.assertIn("n_trials50", run_name)
+        self.assertIn("sampler_seed42", run_name)
+        self.assertIn("weight_min-2", run_name)
+        self.assertIn("weight_max2", run_name)
+        self.assertEqual(len(result["optuna_trial_batches"]), 3)
+        self.assertTrue(all(len(batch) == 2 for batch in result["optuna_trial_batches"]))
+        self.assertEqual(
+            result["answers_data"]["questions"],
+            result["optuna_trial_batches"][1],
+        )
+        self.assertEqual(result["answers_data"]["optimal_harmfulness"], 2.0)
+        self.assertEqual(
+            result["answers_data"]["optimal_harmfulness_source"],
+            "best_trial_mean_reward",
+        )
 
 
 if __name__ == "__main__":

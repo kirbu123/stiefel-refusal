@@ -290,7 +290,8 @@ bash scripts/run_graph_grpo.sh \
 
 `OPTIMIZER_METHOD=optuna` поддерживает оба режима параметризации:
 `WEIGHTS_MODE=scalar` и `WEIGHTS_MODE=dense`. В обоих случаях objective равен
-`mean harmfulness` на том же батче вопросов, а лучшее значение сохраняется в
+`mean harmfulness` на train batch; для `optuna` в каждом trial семплируется новый
+случайный batch из выбранной категории, а лучшее значение сохраняется в
 `answers_*.json` как `optimal_harmfulness` с
 `optimal_harmfulness_source="best_trial_mean_reward"`. По умолчанию используется
 `OPTUNA_SAMPLER=tpe`.
@@ -306,7 +307,13 @@ bash scripts/run_graph_grpo.sh \
 градиентом. В scalar-режиме это означает `1 / n_directions` для всех направлений
 или `1` только у выбранного topic-направления.
 
-Обычный запуск `graph_grpo` больше не идёт по всем вопросам категории: на каждый run берётся случайный subset размера `BATCH_SIZE` (или меньше, если в категории вопросов меньше). При `DEBUG=true` этот subset дополнительно ограничивается сверху через `DEBUG_N_QUESTIONS`, а rollout noise scale заменяется на `DEBUG_NOISE_SCALE`, чтобы smoke-run был быстрее и давал менее вырожденный градиентный сигнал.
+Обычный запуск `graph_grpo` больше не идёт по всем вопросам категории: обучение
+использует случайные subset-ы размера `BATCH_SIZE` (или меньше, если в категории
+вопросов меньше). Для `grpo` новый batch семплируется на каждую эпоху, для
+`optuna` новый batch семплируется на каждый trial. При `DEBUG=true` эти batch-ы
+дополнительно ограничиваются сверху через `DEBUG_N_QUESTIONS`, а rollout noise
+scale заменяется на `DEBUG_NOISE_SCALE`, чтобы smoke-run был быстрее и давал менее
+вырожденный градиентный сигнал.
 
 В итоговых `answers_*.json` сохраняются `final_scores`, `score_statistics.mean`,
 `final_mean_harmfulness`, `optimal_harmfulness` и `optimal_harmfulness_source`.

@@ -1,4 +1,5 @@
 #!/bin/bash
+export WANDB_ENTITY="andrey"
 
 set -euo pipefail
 
@@ -108,7 +109,7 @@ export WEIGHTS_MODE="scalar"
 export WEIGHTS_INIT_TYPE="average"
 
 # ---- Optimizer selection ----
-export OPTIMIZER_METHOD="optuna"
+export OPTIMIZER_METHOD="grpo"
 
 # ---- Optuna weight search ----
 export OPTUNA_SAMPLER="cmaes"

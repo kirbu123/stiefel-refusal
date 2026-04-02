@@ -98,12 +98,18 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertIn('WEIGHTS_MODE="scalar"', script_text)
         self.assertIn('WEIGHTS_INIT_TYPE="average"', script_text)
         self.assertIn("OPTIMIZER_METHOD=", script_text)
+        self.assertIn('OPTIMIZER_METHOD="grpo"', script_text)
         self.assertIn("OPTUNA_SAMPLER=", script_text)
         self.assertIn("OPTUNA_N_TRIALS=50", script_text)
         self.assertIn("OPTUNA_SAMPLER_SEED=42", script_text)
         self.assertIn("OPTUNA_WEIGHT_MIN=-2.0", script_text)
         self.assertIn("OPTUNA_WEIGHT_MAX=2.0", script_text)
         self.assertNotIn("GRPO_ALPHAS", script_text)
+
+    def test_run_graph_optuna_script_uses_optuna_optimizer(self):
+        script_text = (PROJECT_ROOT / "scripts" / "run_graph_optuna.sh").read_text(encoding="utf-8")
+
+        self.assertIn('OPTIMIZER_METHOD="optuna"', script_text)
 
     def test_graph_grpo_runtime_defaults_optimizer_method_to_grpo(self):
         self.assertEqual(resolve_graph_grpo_category_dataset_source(None), "combined")
