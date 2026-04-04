@@ -70,6 +70,7 @@ from baselines.graph_grpo.runtime_config import (
     resolve_graph_grpo_optuna_sampler_seed,
     resolve_graph_grpo_optuna_weight_max,
     resolve_graph_grpo_optuna_weight_min,
+    resolve_graph_grpo_reward_sign,
     resolve_graph_grpo_weights_mode,
     resolve_graph_grpo_weights_init_type,
     validate_graph_grpo_category_dataset_source,
@@ -78,6 +79,7 @@ from baselines.graph_grpo.runtime_config import (
     validate_graph_grpo_optimizer_method,
     validate_graph_grpo_optuna_sampler,
     validate_graph_grpo_optuna_weight_range,
+    validate_graph_grpo_reward_sign,
     validate_graph_grpo_weights_mode,
     validate_graph_grpo_weights_init_type,
 )
@@ -181,6 +183,8 @@ def _build_wandb_run_name(
     weights_init_type: str,
     grpo_config: Dict[str, Any],
     optuna_config: Dict[str, Any],
+    model_name: str,
+    results_root: Optional[Path] = None,
 ) -> str:
     """Build a readable wandb run name with common and optimizer-specific knobs."""
     parts = [
@@ -189,6 +193,14 @@ def _build_wandb_run_name(
         f"weights_{_sanitize_run_name_part(weights_mode)}",
         f"init_{_sanitize_run_name_part(weights_init_type)}",
     ]
+
+    if results_root is not None:
+        root_parts = {p.lower() for p in results_root.parts}
+        if "blocking" in root_parts:
+            parts = [
+                "blocking",
+                f"model_{_sanitize_run_name_part(model_name)}",
+            ] + parts
 
     if optimizer_method == "grpo":
         parts.extend([
@@ -272,12 +284,14 @@ def _run_grpo_training(
     classifier_categories: List[Dict[str, str]],
     n_layers: int,
     debug_question_count: int,
+    reward_sign: float,
 ) -> Dict[str, Any]:
     optimizer = torch.optim.Adam(direction_weights.parameters(), lr=GRPO_CONFIG["learning_rate"])
     training_history = []
     best_epoch = None
     best_train_batch_questions: List[str] = []
-    best_train_batch_mean_harmfulness = float("-inf")
+    best_train_batch_mean_reward = float("-inf")
+    best_train_batch_mean_harmfulness: Optional[float] = None
     best_weights = direction_weights.weights.detach().cpu().clone()
     print("\n" + "=" * 80)
     print("GRPO-IS TRAINING")
@@ -308,6 +322,7 @@ def _run_grpo_training(
             is_clip_ratio=GRPO_CONFIG["is_clip_ratio"],
             clip_ratio=GRPO_CONFIG["clip_ratio"],
             loss_agg_mode=GRPO_CONFIG["loss_agg_mode"],
+            reward_sign=reward_sign,
             backend=EVALUATION_BACKEND,
         )
         training_history.append({
@@ -315,10 +330,20 @@ def _run_grpo_training(
             "n_questions": len(epoch_questions),
             **metrics,
         })
-        print(f"  Mean reward: {metrics['mean_reward']:.3f}, Best: {metrics['best_reward']:.3f}")
-        if metrics["mean_reward"] > best_train_batch_mean_harmfulness:
+        mean_harmfulness = metrics.get("mean_harmfulness")
+        if mean_harmfulness is not None:
+            print(
+                f"  Mean reward: {metrics['mean_reward']:.3f}, Best: {metrics['best_reward']:.3f} "
+                f"(mean harmfulness={mean_harmfulness:.3f})"
+            )
+        else:
+            print(f"  Mean reward: {metrics['mean_reward']:.3f}, Best: {metrics['best_reward']:.3f}")
+        if metrics["mean_reward"] > best_train_batch_mean_reward:
             best_epoch = epoch + 1
-            best_train_batch_mean_harmfulness = float(metrics["mean_reward"])
+            best_train_batch_mean_reward = float(metrics["mean_reward"])
+            best_train_batch_mean_harmfulness = (
+                float(mean_harmfulness) if mean_harmfulness is not None else None
+            )
             best_train_batch_questions = list(epoch_questions)
             best_weights = direction_weights.weights.detach().cpu().clone()
 
@@ -335,6 +360,7 @@ def _run_grpo_training(
         "best_epoch": best_epoch,
         "best_weights": best_weights,
         "best_train_batch_questions": best_train_batch_questions,
+        "best_train_batch_mean_reward": best_train_batch_mean_reward,
         "best_train_batch_mean_harmfulness": best_train_batch_mean_harmfulness,
     }
 
@@ -416,6 +442,7 @@ def main():
     optuna_sampler_seed = resolve_graph_grpo_optuna_sampler_seed(os.getenv("OPTUNA_SAMPLER_SEED"))
     optuna_weight_min = resolve_graph_grpo_optuna_weight_min(os.getenv("OPTUNA_WEIGHT_MIN"))
     optuna_weight_max = resolve_graph_grpo_optuna_weight_max(os.getenv("OPTUNA_WEIGHT_MAX"))
+    reward_sign = resolve_graph_grpo_reward_sign(os.getenv("REWARD_SIGN"))
     effective_noise_scale = debug_noise_scale if DEBUG else GRPO_CONFIG["noise_scale"]
 
     validate_graph_grpo_category_dataset_source(category_dataset_source)
@@ -426,6 +453,7 @@ def main():
     validate_graph_grpo_optimizer_compatibility(optimizer_method, weights_mode)
     validate_graph_grpo_optuna_sampler(optuna_sampler)
     validate_graph_grpo_optuna_weight_range(optuna_weight_min, optuna_weight_max)
+    validate_graph_grpo_reward_sign(reward_sign)
 
     optuna_config = {
         "sampler": optuna_sampler,
@@ -448,6 +476,7 @@ def main():
     print(f"Weights Init Type: {weights_init_type}")
     print(f"Batch Size: {MODEL_BATCH_SIZE}")
     print(f"Evaluation backend: {EVALUATION_BACKEND}")
+    print(f"Reward sign: {reward_sign:+g}")
     if optimizer_method == "optuna":
         print(f"Optuna Config: {optuna_config}")
     print()
@@ -586,6 +615,8 @@ def main():
                 weights_init_type=weights_init_type,
                 grpo_config=GRPO_CONFIG,
                 optuna_config=optuna_config,
+                model_name=MODEL_NAME,
+                results_root=RESULTS_DIR,
             ),
             config={
                 "model": MODEL_NAME,
@@ -598,6 +629,7 @@ def main():
                 "weights_shape": weights_shape,
                 "grpo_config": GRPO_CONFIG, "abliteration_params": ABLITERATION_PARAMS,
                 "optuna_config": optuna_config if optimizer_method == "optuna" else None,
+                "reward_sign": reward_sign,
             },
         )
         _define_model_state_eval_metrics()
@@ -640,6 +672,7 @@ def main():
             effective_noise_scale=effective_noise_scale,
             n_layers=n_layers,
             debug_question_count=debug_question_count,
+            reward_sign=reward_sign,
         )
     else:
         print("\n" + "=" * 80)
@@ -658,6 +691,7 @@ def main():
             classifier_categories=classifier_categories,
             n_layers=n_layers,
             ref_alpha=GRPO_CONFIG["ref_alpha"],
+            reward_sign=reward_sign,
             n_trials=optuna_n_trials,
             sampler_name=optuna_sampler,
             sampler_seed=optuna_sampler_seed,
@@ -673,13 +707,15 @@ def main():
         optimization_result["optuna_config"] = optuna_config
         print(
             f"Best Optuna trial: #{optimization_result['best_trial_number']} "
-            f"with mean harmfulness={optimization_result['best_value']:.3f}"
+            f"with mean reward={optimization_result['best_value']:.3f} "
+            f"(mean harmfulness={optimization_result.get('best_mean_harmfulness')})"
         )
         if WANDB_AVAILABLE:
             wandb.log(
                 {
                     "optuna/best_trial_number": optimization_result["best_trial_number"],
                     "optuna/best_value": optimization_result["best_value"],
+                    "optuna/best_harmfulness": optimization_result.get("best_mean_harmfulness"),
                 }
             )
 
@@ -713,7 +749,12 @@ def main():
         optimal_harmfulness = optimization_result["best_train_batch_mean_harmfulness"]
         optimal_harmfulness_source = "best_train_batch_mean_reward"
     else:
-        optimal_harmfulness = optimization_result["best_value"]
+        best_mean_harmfulness = optimization_result.get("best_mean_harmfulness")
+        optimal_harmfulness = (
+            best_mean_harmfulness
+            if best_mean_harmfulness is not None
+            else optimization_result["best_value"]
+        )
         optimal_harmfulness_source = "best_trial_mean_reward"
 
     best_batch_model_harmfulness_result = _evaluate_model_harmfulness(
@@ -748,6 +789,7 @@ def main():
             "category_dataset_source": category_dataset_source,
             "n_questions": len(evaluation_questions), "n_directions": n_directions,
             "optimizer_method": optimizer_method,
+            "reward_sign": reward_sign,
             "weights_mode": weights_mode, "weights_init_type": weights_init_type,
             "weights_shape": weights_shape,
             "grpo_config": GRPO_CONFIG, "abliteration_params": ABLITERATION_PARAMS,

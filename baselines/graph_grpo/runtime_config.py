@@ -228,3 +228,19 @@ def validate_graph_grpo_optuna_weight_range(weight_min: float, weight_max: float
             f"OPTUNA weight range must satisfy OPTUNA_WEIGHT_MIN <= OPTUNA_WEIGHT_MAX, "
             f"got {weight_min} > {weight_max}."
         )
+
+
+def resolve_graph_grpo_reward_sign(
+    env_value: str | None,
+    default: float = 1.0,
+) -> float:
+    """Resolve the reward sign used to convert harmfulness into a training objective."""
+    if env_value is None or not env_value.strip():
+        return default
+    return float(env_value.strip())
+
+
+def validate_graph_grpo_reward_sign(reward_sign: float) -> None:
+    """Reject zero reward scaling to avoid a degenerate objective."""
+    if reward_sign == 0:
+        raise ValueError("REWARD_SIGN must be non-zero.")

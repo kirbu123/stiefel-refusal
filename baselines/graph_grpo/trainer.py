@@ -94,6 +94,7 @@ def train_grpo_is_step(
     is_clip_ratio: float,
     clip_ratio: float,
     loss_agg_mode: str,
+    reward_sign: float = 1.0,
     backend: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
@@ -114,6 +115,7 @@ def train_grpo_is_step(
         is_clip_ratio: IS weight truncation threshold
         clip_ratio: PPO clip epsilon
         loss_agg_mode: Loss aggregation mode
+        reward_sign: Scale/sign applied to harmfulness scores for optimization
         backend: Evaluation backend
 
     Returns:
@@ -256,14 +258,21 @@ def train_grpo_is_step(
     # Step 5: Rewards
     t0 = time.time()
     print(f"  [Step 5] Computing rewards for {len(flat_responses)} responses (backend={backend})...")
-    scores = compute_reward(flat_questions, flat_responses, classifier_categories, backend)
-    scores_tensor = torch.tensor(scores, dtype=torch.float32, device=device)
-    print(f"    Rewards: mean={scores_tensor.mean():.3f}, std={scores_tensor.std():.3f}, "
-          f"min={scores_tensor.min():.1f}, max={scores_tensor.max():.1f} ({time.time()-t0:.1f}s)")
+    harmfulness_scores = compute_reward(flat_questions, flat_responses, classifier_categories, backend)
+    harmfulness_tensor = torch.tensor(harmfulness_scores, dtype=torch.float32, device=device)
+    reward_tensor = harmfulness_tensor * float(reward_sign)
+    print(
+        f"    Harmfulness: mean={harmfulness_tensor.mean():.3f}, std={harmfulness_tensor.std():.3f}, "
+        f"min={harmfulness_tensor.min():.1f}, max={harmfulness_tensor.max():.1f}"
+    )
+    print(
+        f"    Reward (sign={reward_sign:+g}): mean={reward_tensor.mean():.3f}, "
+        f"min={reward_tensor.min():.1f}, max={reward_tensor.max():.1f} ({time.time()-t0:.1f}s)"
+    )
     token_level_rewards = torch.zeros(rollout_log_probs.shape, dtype=torch.float32, device=device)
     last_valid = (response_mask > 0).sum(dim=-1).long() - 1
     last_valid = torch.clamp(last_valid, min=0)
-    token_level_rewards.scatter_(1, last_valid.unsqueeze(1), scores_tensor.unsqueeze(1).to(device))
+    token_level_rewards.scatter_(1, last_valid.unsqueeze(1), reward_tensor.unsqueeze(1).to(device))
 
     if backend == "llamaguard":
         try:
@@ -384,8 +393,10 @@ def train_grpo_is_step(
     print(f"  [TOTAL] GPU memory allocated: {mem_gb:.2f} GB")
 
     metrics = {
-        "mean_reward": float(scores_tensor.mean().item()),
-        "best_reward": float(scores_tensor.max().item()),
+        "mean_reward": float(reward_tensor.mean().item()),
+        "best_reward": float(reward_tensor.max().item()),
+        "mean_harmfulness": float(harmfulness_tensor.mean().item()),
+        "best_harmfulness": float(harmfulness_tensor.max().item()),
         "weights_norm": float(direction_weights.weights.data.norm().item()),
         "gradient_norm": grad_norm,
         **loss_metrics,

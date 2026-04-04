@@ -78,9 +78,9 @@ def apply_config_to_env(config: dict[str, Any], model_name: str | None = None):
     if data.get("graph_file"):
         os.environ["GRAPH_FILE"] = data["graph_file"]
     if data.get("category_dataset_source"):
-        os.environ["CATEGORY_DATASET_SOURCE"] = data["category_dataset_source"]
+        os.environ.setdefault("CATEGORY_DATASET_SOURCE", data["category_dataset_source"])
     if data.get("category_filter"):
-        os.environ["CATEGORY_FILTER"] = data["category_filter"]
+        os.environ.setdefault("CATEGORY_FILTER", data["category_filter"])
     if data.get("tag_filtered_questions_file"):
         os.environ["TAG_FILTERED_QUESTIONS_FILE"] = data["tag_filtered_questions_file"]
 
@@ -128,6 +128,10 @@ def apply_config_to_env(config: dict[str, Any], model_name: str | None = None):
     optimizer = config.get("optimizer", {})
     if optimizer.get("method"):
         os.environ["OPTIMIZER_METHOD"] = optimizer["method"]
+
+    reward = config.get("reward", {})
+    if reward.get("sign") is not None:
+        os.environ["REWARD_SIGN"] = str(reward["sign"])
 
     optuna = config.get("optuna", {})
     if optuna.get("sampler"):
@@ -210,6 +214,12 @@ def print_config_summary(config: dict[str, Any], model_name: str):
     if optimizer:
         print("  [bold]Optimizer:[/]")
         for k, v in optimizer.items():
+            print(f"    {k}: {v}")
+
+    reward = config.get("reward", {})
+    if reward:
+        print("  [bold]Reward:[/]")
+        for k, v in reward.items():
             print(f"    {k}: {v}")
 
     optuna = config.get("optuna", {})
