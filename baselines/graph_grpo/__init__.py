@@ -6,9 +6,12 @@ with custom IS-corrected advantage and differentiable abliteration hooks.
 """
 
 __all__ = [
+    "main",
     "compute_grpo_is_advantage",
     "compute_reward",
     "compute_sequence_log_probs",
     "register_abliteration_hooks",
     "remove_hooks",
 ]
+
+from .__main__ import main  # noqa: E402
