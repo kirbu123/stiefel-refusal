@@ -110,6 +110,7 @@ class TestGraphGrpoOptuna(unittest.TestCase):
                     classifier_categories=[],
                     n_layers=1,
                     ref_alpha=1.5,
+                    reward_sign=1.0,
                     backend="llamaguard",
                 )
 
@@ -164,6 +165,7 @@ class TestGraphGrpoOptuna(unittest.TestCase):
                     classifier_categories=[],
                     n_layers=1,
                     ref_alpha=1.0,
+                    reward_sign=1.0,
                     backend="llamaguard",
                 )
 
@@ -199,6 +201,7 @@ class TestGraphGrpoOptuna(unittest.TestCase):
             classifier_categories,
             n_layers,
             ref_alpha,
+            reward_sign,
             backend=None,
         ):
             score = float(weights.sum().item())
@@ -208,6 +211,8 @@ class TestGraphGrpoOptuna(unittest.TestCase):
                 "scores": [score],
                 "mean_reward": score,
                 "best_reward": score,
+                "mean_harmfulness": score,
+                "best_harmfulness": score,
                 "n_questions": len(questions),
                 "weights_mode": "scalar",
             }
@@ -227,6 +232,7 @@ class TestGraphGrpoOptuna(unittest.TestCase):
                 classifier_categories=[],
                 n_layers=1,
                 ref_alpha=1.0,
+                reward_sign=1.0,
                 n_trials=3,
                 sampler_name="random",
                 sampler_seed=42,
@@ -292,6 +298,7 @@ class TestGraphGrpoOptuna(unittest.TestCase):
             classifier_categories,
             n_layers,
             ref_alpha,
+            reward_sign,
             backend=None,
         ):
             score = score_by_batch[questions[0]]
@@ -301,6 +308,8 @@ class TestGraphGrpoOptuna(unittest.TestCase):
                 "scores": [score for _ in questions],
                 "mean_reward": score,
                 "best_reward": score,
+                "mean_harmfulness": score,
+                "best_harmfulness": score,
                 "n_questions": len(questions),
                 "weights_mode": "scalar",
             }
@@ -320,6 +329,7 @@ class TestGraphGrpoOptuna(unittest.TestCase):
                 classifier_categories=[],
                 n_layers=1,
                 ref_alpha=1.0,
+                reward_sign=1.0,
                 n_trials=3,
                 sampler_name="random",
                 sampler_seed=42,
@@ -361,6 +371,7 @@ class TestGraphGrpoOptuna(unittest.TestCase):
             classifier_categories,
             n_layers,
             ref_alpha,
+            reward_sign,
             backend=None,
         ):
             score = float(weights.sum().item())
@@ -370,6 +381,8 @@ class TestGraphGrpoOptuna(unittest.TestCase):
                 "scores": [score],
                 "mean_reward": score,
                 "best_reward": score,
+                "mean_harmfulness": score,
+                "best_harmfulness": score,
                 "n_questions": len(questions),
                 "weights_mode": "dense",
             }
@@ -389,6 +402,7 @@ class TestGraphGrpoOptuna(unittest.TestCase):
                 classifier_categories=[],
                 n_layers=1,
                 ref_alpha=1.0,
+                reward_sign=1.0,
                 n_trials=3,
                 sampler_name="random",
                 sampler_seed=42,

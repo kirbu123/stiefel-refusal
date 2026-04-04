@@ -229,6 +229,7 @@ class TestGraphGrpoMain(unittest.TestCase):
             classifier_categories,
             n_layers,
             ref_alpha,
+            reward_sign,
             n_trials,
             sampler_name,
             sampler_seed,
@@ -262,6 +263,8 @@ class TestGraphGrpoMain(unittest.TestCase):
                         "weights_norm": float(best_weights_tensor.norm().item()),
                         "mean_reward": float(trial_index + 1),
                         "best_reward": float(trial_index + 1),
+                        "mean_harmfulness": float(trial_index + 1),
+                        "best_harmfulness": float(trial_index + 1),
                         "n_questions": len(trial_questions),
                     })
             else:
@@ -274,6 +277,8 @@ class TestGraphGrpoMain(unittest.TestCase):
                         "weights_mode": "scalar",
                         "mean_reward": float(trial_index + 1),
                         "best_reward": float(trial_index + 1),
+                        "mean_harmfulness": float(trial_index + 1),
+                        "best_harmfulness": float(trial_index + 1),
                         "n_questions": len(trial_questions),
                     })
 
@@ -282,6 +287,7 @@ class TestGraphGrpoMain(unittest.TestCase):
                 "optimization_history": optimization_history,
                 "best_trial_number": best_trial_index,
                 "best_value": float(best_trial_index + 1),
+                "best_mean_harmfulness": float(best_trial_index + 1),
                 "best_weights": best_weights_tensor.tolist(),
                 "best_trial_questions": trial_batches[best_trial_index],
             }
@@ -292,7 +298,10 @@ class TestGraphGrpoMain(unittest.TestCase):
         fake_trainer = types.ModuleType("baselines.graph_grpo.trainer")
         trainer_metrics_iter = iter(
             train_metrics_sequence
-            or [{"mean_reward": 1.0, "best_reward": 1.0} for _ in range(grpo_n_epochs)]
+            or [
+                {"mean_reward": 1.0, "best_reward": 1.0, "mean_harmfulness": 1.0}
+                for _ in range(grpo_n_epochs)
+            ]
         )
 
         def fake_train_grpo_is_step(*args, **kwargs):
@@ -456,9 +465,9 @@ class TestGraphGrpoMain(unittest.TestCase):
             grpo_n_epochs=3,
             mmlu_enabled=True,
             train_metrics_sequence=[
-                {"mean_reward": 0.1, "best_reward": 0.3},
-                {"mean_reward": 0.9, "best_reward": 1.0},
-                {"mean_reward": 0.4, "best_reward": 0.8},
+                {"mean_reward": 0.1, "best_reward": 0.3, "mean_harmfulness": 0.1},
+                {"mean_reward": 0.9, "best_reward": 1.0, "mean_harmfulness": 0.9},
+                {"mean_reward": 0.4, "best_reward": 0.8, "mean_harmfulness": 0.4},
             ],
             modified_mmlu_scores=[0.8],
         )
@@ -535,7 +544,7 @@ class TestGraphGrpoMain(unittest.TestCase):
             weights_mode="scalar",
             grpo_n_epochs=1,
             mmlu_enabled=False,
-            train_metrics_sequence=[{"mean_reward": 0.7, "best_reward": 0.9}],
+            train_metrics_sequence=[{"mean_reward": 0.7, "best_reward": 0.9, "mean_harmfulness": 0.7}],
         )
 
         scalar_payloads = [payload for payload, _step in result["wandb_log_calls"]]
