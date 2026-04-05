@@ -175,7 +175,10 @@ def train_grpo_is_step(
             flush=True,
         )
         responses_raw = model.get_responses_batched(questions)
-        responses = [extract_response_after_think(r) for r in responses_raw]
+        responses = []
+        for raw in responses_raw:
+            extracted = extract_response_after_think(raw)
+            responses.append(extracted if extracted else raw.strip())
         all_responses.append(responses)
         avg_resp_len = sum(len(r) for r in responses) / max(len(responses), 1)
         print(f"done ({len(responses)} responses, avg_len={avg_resp_len:.0f} chars)")
@@ -350,6 +353,9 @@ def train_grpo_is_step(
         )
 
         mb_valid_tokens = mb_mask.sum().item()
+        if mb_valid_tokens == 0:
+            print(f"    micro-batch {mb_start//micro_bs + 1}: skipped (no valid tokens)", flush=True)
+            continue
         weight = mb_valid_tokens / total_valid_tokens if total_valid_tokens > 0 else 1.0 / n_total
         (mb_loss * weight).backward()
         accumulated_loss += mb_loss.item() * weight

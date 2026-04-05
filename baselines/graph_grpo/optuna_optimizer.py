@@ -206,7 +206,10 @@ def evaluate_weights(
     )
 
     responses_raw = model.get_responses_batched(questions)
-    responses = [extract_response_after_think(response) for response in responses_raw]
+    responses = []
+    for raw in responses_raw:
+        extracted = extract_response_after_think(raw)
+        responses.append(extracted if extracted else raw.strip())
     harmfulness_scores = compute_reward(questions, responses, classifier_categories, backend)
     rewards = [float(score) * float(reward_sign) for score in harmfulness_scores]
 
