@@ -110,7 +110,10 @@ def _evaluate_model_harmfulness(
     from baselines.graph_grpo.reward import compute_reward
 
     responses_raw = model.get_responses_batched(questions)
-    responses = [extract_response_after_think(response) for response in responses_raw]
+    responses = []
+    for raw in responses_raw:
+        extracted = extract_response_after_think(raw)
+        responses.append(extracted if extracted else raw.strip())
     scores = [int(score) for score in compute_reward(
         questions,
         responses,
