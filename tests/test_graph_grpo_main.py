@@ -86,6 +86,7 @@ class TestGraphGrpoMain(unittest.TestCase):
         mmlu_enabled=False,
         train_metrics_sequence=None,
         modified_mmlu_scores=None,
+        benchmark_results=None,
     ):
         few_shots_path = self.temp_path / "few-shots.json"
         few_shots_path.write_text(json.dumps({"categories": []}), encoding="utf-8")
@@ -103,6 +104,28 @@ class TestGraphGrpoMain(unittest.TestCase):
         train_step_questions = []
         optuna_trial_batches = []
         mmlu_eval_calls = []
+        benchmark_runner = None
+
+        if benchmark_results is not None:
+            class FakeBenchmarkRunner:
+                def __init__(self, results):
+                    self.results = results
+                    self.prepare_calls = 0
+                    self.run_labels = []
+
+                def prepare_original(self, model):
+                    self.prepare_calls += 1
+                    return {
+                        "jailbreakbench": {
+                            "attack_success_rate": self.results["jailbreakbench"]["original"]["attack_success_rate"]
+                        }
+                    }
+
+                def evaluate_modified(self, model, run_label):
+                    self.run_labels.append(run_label)
+                    return self.results
+
+            benchmark_runner = FakeBenchmarkRunner(benchmark_results)
 
         fake_wandb = types.ModuleType("wandb")
         fake_wandb.init = lambda **kwargs: wandb_init_calls.append(kwargs)
@@ -218,6 +241,15 @@ class TestGraphGrpoMain(unittest.TestCase):
         fake_mmlu.build_mmlu_result = fake_build_mmlu_result
         fake_mmlu.evaluate_model_on_mmlu = fake_evaluate_model_on_mmlu
         fake_mmlu.get_cached_or_evaluate_original_mmlu = fake_get_cached_or_evaluate_original_mmlu
+
+        fake_benchmarks_integration = types.ModuleType("benchmarks.integration")
+        fake_benchmarks_integration.build_benchmark_runner = (
+            lambda **kwargs: benchmark_runner
+        )
+        fake_benchmarks_integration.get_benchmark_attack_success_rate = (
+            lambda results, benchmark_name: results.get(benchmark_name, {}).get("modified", {}).get("attack_success_rate")
+            if results else None
+        )
 
         fake_optuna = types.ModuleType("baselines.graph_grpo.optuna_optimizer")
 
@@ -341,6 +373,7 @@ class TestGraphGrpoMain(unittest.TestCase):
             "model_utils": fake_model_utils,
             "baselines.graph_grpo.reward": fake_reward,
             "evaluate.mmlu": fake_mmlu,
+            "benchmarks.integration": fake_benchmarks_integration,
             "baselines.graph_grpo.optuna_optimizer": fake_optuna,
             "baselines.graph_grpo.trainer": fake_trainer,
         }
@@ -373,6 +406,7 @@ class TestGraphGrpoMain(unittest.TestCase):
             "optuna_trial_batches": optuna_trial_batches,
             "mmlu_eval_calls": mmlu_eval_calls,
             "models": FakeModel.instances,
+            "benchmark_runner": benchmark_runner,
         }
 
     def test_main_uses_jailbreakbench_category_filter(self):
@@ -658,6 +692,59 @@ class TestGraphGrpoMain(unittest.TestCase):
         self.assertEqual(
             result["answers_data"]["optimal_objective_source"],
             "best_trial_mean_objective",
+        )
+
+    def test_main_saves_benchmark_block_and_logs_jailbreakbench_series(self):
+        dataset = [
+            {"instruction": "physical-question-1", "category": "Physical harm", "source": "combined"},
+            {"instruction": "physical-question-2", "category": "Physical harm", "source": "combined"},
+        ]
+        benchmark_results = {
+            "jailbreakbench": {
+                "original": {"attack_success_rate": 0.2},
+                "modified": {"attack_success_rate": 0.6},
+                "delta_attack_success_rate": 0.4,
+                "config": {"judge_mode": "project"},
+                "details_file": {"original": "orig.json", "modified": "mod.json"},
+                "by_category": {},
+                "by_source": {},
+            }
+        }
+
+        result = self._run_main(
+            dataset=dataset,
+            category_dataset_source="combined",
+            category_filter="Physical harm",
+            model_batch_size=2,
+            optimizer_method="optuna",
+            weights_mode="scalar",
+            mmlu_enabled=False,
+            benchmark_results=benchmark_results,
+        )
+
+        self.assertIn("benchmarks", result["answers_data"])
+        self.assertAlmostEqual(
+            result["answers_data"]["benchmarks"]["jailbreakbench"]["modified"]["attack_success_rate"],
+            0.6,
+        )
+        self.assertEqual(result["benchmark_runner"].prepare_calls, 1)
+        self.assertEqual(
+            result["benchmark_runner"].run_labels,
+            ["graph_grpo_Physical_harm"],
+        )
+
+        scalar_payloads = [payload for payload, _step in result["wandb_log_calls"]]
+        self.assertTrue(
+            any(
+                "clean_model/jailbreakbench_attack_success_rate" in payload
+                for payload in scalar_payloads
+            )
+        )
+        self.assertTrue(
+            any(
+                "best_value_model/jailbreakbench_attack_success_rate" in payload
+                for payload in scalar_payloads
+            )
         )
 
 

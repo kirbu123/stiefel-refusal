@@ -43,6 +43,7 @@ from evaluate.mmlu import (
     evaluate_model_on_mmlu,
     get_cached_or_evaluate_original_mmlu,
 )
+from benchmarks.integration import build_benchmark_runner
 from visualization.plots import (
     plot_harmfulness_heatmap, plot_locality_heatmap,
     plot_harmfulness_distribution, plot_locality_distribution,
@@ -155,6 +156,12 @@ def main():
         print(f"Warning: could not load classifier categories: {e}")
         classifier_categories = []
 
+    benchmark_runner = build_benchmark_runner(
+        method_results_dir=BASELINE_RESULTS_DIR,
+        model_name=MODEL_NAME,
+        classifier_categories=classifier_categories,
+    )
+
     harmless_eval_prompts = []
     if EVALUATE_LOCALITY:
         print("\nLoading harmless questions for locality...")
@@ -171,6 +178,17 @@ def main():
         )
         if original_mmlu_result is not None:
             print(f"Original MMLU accuracy: {original_mmlu_result['summary']['accuracy']:.4f}")
+
+    if benchmark_runner is not None:
+        print("\nPreparing clean benchmark evaluations...")
+        original_benchmark_summaries = benchmark_runner.prepare_original(model)
+        for benchmark_name, summary in original_benchmark_summaries.items():
+            attack_success_rate = summary.get("attack_success_rate")
+            if attack_success_rate is not None:
+                print(
+                    f"Original {benchmark_name} attack success rate: "
+                    f"{attack_success_rate:.4f}"
+                )
 
     param_names = list(HYPERPARAMS.keys())
     param_values = list(HYPERPARAMS.values())
@@ -264,6 +282,14 @@ def main():
                         f"{mmlu_block['original']['accuracy']:.4f} -> {mmlu_block['modified']['accuracy']:.4f}"
                     )
 
+            benchmark_results = {}
+            if benchmark_runner is not None:
+                print("    Evaluating modified model on benchmarks...")
+                benchmark_results = benchmark_runner.evaluate_modified(
+                    model,
+                    run_label=f"tag_ablation_{tag_safe_name}_{param_key}",
+                )
+
             original_scores, original_score_data_list = evaluate_responses(
                 tag_questions, original_responses, classifier_categories,
                 description=f"original responses (experiment {param_key})",
@@ -322,6 +348,8 @@ def main():
             tag_results[param_key]["timestamp"] = datetime.now().isoformat()
             if mmlu_block is not None:
                 tag_results[param_key]["mmlu"] = mmlu_block
+            if benchmark_results:
+                tag_results[param_key]["benchmarks"] = benchmark_results
 
             answers_file = ANSWERS_DIR / f"answers_tag_{tag_safe_name}_{param_key}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
             answers_data = {
@@ -341,6 +369,8 @@ def main():
             }
             if mmlu_block is not None:
                 answers_data["mmlu"] = mmlu_block
+            if benchmark_results:
+                answers_data["benchmarks"] = benchmark_results
             if EVALUATE_LOCALITY:
                 answers_data["harmless_questions"] = {
                     "questions": harmless_eval_prompts,

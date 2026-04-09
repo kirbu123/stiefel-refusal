@@ -16,6 +16,19 @@ def _resolve_results_dir() -> Path:
         results_root = PROJECT_ROOT / results_root
     return results_root
 
+
+def _parse_csv_env_list(env_var: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
+    raw_value = os.getenv(env_var)
+    if raw_value is None:
+        return default
+
+    values = []
+    for part in raw_value.split(","):
+        normalized = part.strip()
+        if normalized:
+            values.append(normalized)
+    return tuple(values)
+
 MODEL_NAME = os.getenv("MODEL_NAME", "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B")
 MODEL_BATCH_SIZE = int(os.getenv("BATCH_SIZE", 32))
 
@@ -102,6 +115,20 @@ _category_filter = os.getenv("CATEGORY_FILTER", "").strip()
 CATEGORY_FILTER = _category_filter or None
 
 WEIGHTS_INIT_TYPE = os.getenv("WEIGHTS_INIT_TYPE", "zero")
+
+BENCHMARKS_ENABLED = tuple(
+    item.lower() for item in _parse_csv_env_list("BENCHMARKS_ENABLED")
+)
+
+_jailbreakbench_categories = _parse_csv_env_list("JAILBREAKBENCH_CATEGORIES")
+JAILBREAKBENCH_CONFIG = {
+    "judge_mode": os.getenv("JAILBREAKBENCH_JUDGE_MODE", "project").strip().lower() or "project",
+    "max_samples": int(os.getenv("JAILBREAKBENCH_MAX_SAMPLES", "100").strip() or "100"),
+    "categories": list(_jailbreakbench_categories),
+    "harmful_score_threshold": int(
+        os.getenv("JAILBREAKBENCH_HARMFUL_SCORE_THRESHOLD", "3").strip() or "3"
+    ),
+}
 
 _mmlu_sample_size = os.getenv("MMLU_SAMPLE_SIZE", "100").strip()
 

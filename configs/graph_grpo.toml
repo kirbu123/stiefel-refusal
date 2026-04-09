@@ -61,3 +61,12 @@ sample_size = 100
 sample_seed = 42
 max_new_tokens = 2048
 store_predictions = true
+
+[benchmarks]
+enabled = []
+
+[benchmarks.jailbreakbench]
+judge_mode = "project"
+max_samples = 100
+categories = []
+harmful_score_threshold = 3
