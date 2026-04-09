@@ -20,6 +20,8 @@ from optuna.samplers import (
 from data_utils import extract_response_after_think
 from model_utils import LearnableDirectionWeights, apply_abliteration_with_hyperparams
 
+from baselines.graph_grpo.kl import compute_masked_mean_kl
+from baselines.graph_grpo.log_probs import compute_sequence_log_probs
 from baselines.graph_grpo.reward import compute_reward
 
 
@@ -185,6 +187,8 @@ def evaluate_weights(
     n_layers: int,
     ref_alpha: float,
     reward_sign: float = 1.0,
+    kl_loss_coef: float = 0.0,
+    loss_agg_mode: str = "token-mean",
     backend: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Evaluate a scalar vector or dense tensor of coefficients on the current question batch."""
@@ -210,6 +214,24 @@ def evaluate_weights(
     for raw in responses_raw:
         extracted = extract_response_after_think(raw)
         responses.append(extracted if extracted else raw.strip())
+    with torch.no_grad():
+        policy_log_probs, response_mask = compute_sequence_log_probs(model, questions, responses)
+
+    model.reload_model()
+    with torch.no_grad():
+        ref_log_probs, ref_response_mask = compute_sequence_log_probs(model, questions, responses)
+    if tuple(ref_response_mask.shape) != tuple(response_mask.shape):
+        raise ValueError(
+            "Reference-policy response mask shape does not match modified-policy mask shape: "
+            f"{tuple(ref_response_mask.shape)} vs {tuple(response_mask.shape)}."
+        )
+    _, mean_kl_tensor = compute_masked_mean_kl(
+        log_prob=policy_log_probs,
+        ref_log_prob=ref_log_probs,
+        response_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+    )
+
     harmfulness_scores = compute_reward(questions, responses, classifier_categories, backend)
     rewards = [float(score) * float(reward_sign) for score in harmfulness_scores]
 
@@ -217,6 +239,8 @@ def evaluate_weights(
     best_harmfulness = float(np.max(harmfulness_scores)) if harmfulness_scores else 0.0
     mean_reward = float(np.mean(rewards)) if rewards else 0.0
     best_reward = float(np.max(rewards)) if rewards else 0.0
+    mean_kl = float(mean_kl_tensor.item())
+    mean_objective = float(mean_reward - float(kl_loss_coef) * mean_kl)
     return {
         "weights": weights.detach().cpu().tolist(),
         "responses": responses,
@@ -225,6 +249,10 @@ def evaluate_weights(
         "best_reward": best_reward,
         "mean_harmfulness": mean_harmfulness,
         "best_harmfulness": best_harmfulness,
+        "mean_kl": mean_kl,
+        "kl_loss": mean_kl,
+        "mean_objective": mean_objective,
+        "kl_loss_coef": float(kl_loss_coef),
         "n_questions": len(questions),
         "weights_mode": direction_weights.mode,
     }
@@ -241,6 +269,8 @@ def evaluate_scalar_weights(
     n_layers: int,
     ref_alpha: float,
     reward_sign: float = 1.0,
+    kl_loss_coef: float = 0.0,
+    loss_agg_mode: str = "token-mean",
     backend: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Backward-compatible wrapper for scalar Optuna evaluation."""
@@ -255,6 +285,8 @@ def evaluate_scalar_weights(
         n_layers=n_layers,
         ref_alpha=ref_alpha,
         reward_sign=reward_sign,
+        kl_loss_coef=kl_loss_coef,
+        loss_agg_mode=loss_agg_mode,
         backend=backend,
     )
 
@@ -270,6 +302,8 @@ def evaluate_dense_weights(
     n_layers: int,
     ref_alpha: float,
     reward_sign: float = 1.0,
+    kl_loss_coef: float = 0.0,
+    loss_agg_mode: str = "token-mean",
     backend: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Convenience wrapper for dense Optuna evaluation."""
@@ -284,6 +318,8 @@ def evaluate_dense_weights(
         n_layers=n_layers,
         ref_alpha=ref_alpha,
         reward_sign=reward_sign,
+        kl_loss_coef=kl_loss_coef,
+        loss_agg_mode=loss_agg_mode,
         backend=backend,
     )
 
@@ -298,12 +334,14 @@ def optimize_weights_with_optuna(
     n_layers: int,
     ref_alpha: float,
     reward_sign: float,
+    kl_loss_coef: float,
     n_trials: int,
     sampler_name: str,
     sampler_seed: int,
     weight_min: float,
     weight_max: float,
     question_sampler: Optional[Callable[[], List[str]]] = None,
+    loss_agg_mode: str = "token-mean",
     backend: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Search scalar or dense direction weights with Optuna and update the module in-place."""
@@ -340,6 +378,8 @@ def optimize_weights_with_optuna(
             n_layers=n_layers,
             ref_alpha=ref_alpha,
             reward_sign=reward_sign,
+            kl_loss_coef=kl_loss_coef,
+            loss_agg_mode=loss_agg_mode,
             backend=backend,
         )
 
@@ -348,6 +388,8 @@ def optimize_weights_with_optuna(
         trial.set_user_attr("best_reward", trial_result["best_reward"])
         trial.set_user_attr("mean_harmfulness", trial_result["mean_harmfulness"])
         trial.set_user_attr("best_harmfulness", trial_result["best_harmfulness"])
+        trial.set_user_attr("mean_kl", trial_result["mean_kl"])
+        trial.set_user_attr("mean_objective", trial_result["mean_objective"])
         trial.set_user_attr("n_questions", trial_result["n_questions"])
         trial.set_user_attr("questions", trial_questions)
         for key, value in summarize_weights(trial_weights).items():
@@ -355,7 +397,7 @@ def optimize_weights_with_optuna(
         if weights_mode == "scalar":
             trial.set_user_attr("weights", trial_result["weights"])
 
-        return trial_result["mean_reward"]
+        return trial_result["mean_objective"]
 
     study = optuna.create_study(
         direction="maximize",
@@ -365,6 +407,8 @@ def optimize_weights_with_optuna(
 
     best_trial = study.best_trial
     best_mean_harmfulness = best_trial.user_attrs.get("mean_harmfulness")
+    best_mean_kl = best_trial.user_attrs.get("mean_kl")
+    best_mean_objective = best_trial.user_attrs.get("mean_objective")
     best_weights = reconstruct_weights_from_params(
         params=best_trial.params,
         direction_weights=direction_weights,
@@ -383,6 +427,8 @@ def optimize_weights_with_optuna(
             "best_reward": trial.user_attrs.get("best_reward"),
             "mean_harmfulness": trial.user_attrs.get("mean_harmfulness"),
             "best_harmfulness": trial.user_attrs.get("best_harmfulness"),
+            "mean_kl": trial.user_attrs.get("mean_kl"),
+            "mean_objective": trial.user_attrs.get("mean_objective"),
             "n_questions": trial.user_attrs.get("n_questions"),
             "weights_mode": trial.user_attrs.get("weights_mode"),
             "state": trial.state.name,
@@ -407,6 +453,8 @@ def optimize_weights_with_optuna(
         "best_trial_number": best_trial.number,
         "best_trial_questions": list(best_trial.user_attrs.get("questions", fallback_questions or [])),
         "best_mean_harmfulness": best_mean_harmfulness,
+        "best_mean_kl": best_mean_kl,
+        "best_mean_objective": best_mean_objective,
         "sampler_name": sampler_name,
         "optimization_history": optimization_history,
     }
@@ -422,12 +470,14 @@ def optimize_scalar_weights_with_optuna(
     n_layers: int,
     ref_alpha: float,
     reward_sign: float,
+    kl_loss_coef: float,
     n_trials: int,
     sampler_name: str,
     sampler_seed: int,
     weight_min: float,
     weight_max: float,
     question_sampler: Optional[Callable[[], List[str]]] = None,
+    loss_agg_mode: str = "token-mean",
     backend: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Backward-compatible scalar wrapper around the generic Optuna optimizer."""
@@ -441,11 +491,13 @@ def optimize_scalar_weights_with_optuna(
         n_layers=n_layers,
         ref_alpha=ref_alpha,
         reward_sign=reward_sign,
+        kl_loss_coef=kl_loss_coef,
         n_trials=n_trials,
         sampler_name=sampler_name,
         sampler_seed=sampler_seed,
         weight_min=weight_min,
         weight_max=weight_max,
         question_sampler=question_sampler,
+        loss_agg_mode=loss_agg_mode,
         backend=backend,
     )

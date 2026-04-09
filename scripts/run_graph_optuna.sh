@@ -97,6 +97,7 @@ export GRPO_REF_ALPHA=1.0
 export IS_CLIP_RATIO=5.0
 export GRPO_CLIP_RATIO=0.2
 export GRPO_LOSS_AGG_MODE="token-mean"
+export GRPO_KL_LOSS_COEF=0.01
 
 # ---- Abliteration parameters ----
 export ABLITERATION_MAX_WEIGHT=2.0

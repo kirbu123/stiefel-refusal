@@ -22,7 +22,8 @@
 
 Задача: найти веса для направлений графа такие, что взвешенная сумма направлений,
 применённая как аблитерация, максимизирует вредоносность ответов модели
-(то есть успешно обходит отказ). В scalar-режиме это `w ∈ ℝ^{n_vertices}`,
+(то есть успешно обходит отказ), но при этом дополнительно регуляризуется KL-дивергенцией
+относительно clean base model без аблитерации. В scalar-режиме это `w ∈ ℝ^{n_vertices}`,
 в dense-режиме — тензор коэффициентов на весь `(layer, hidden)` профиль каждого направления.
 
 Обучение — через GRPO с importance sampling (off-policy rollout).
@@ -126,7 +127,7 @@ A_m = (S_m - b(x_i)) / std(S)
 
 Зарегистрировано через `@register_adv_est("grpo_is")` из verl.
 
-### Шаг 7: Policy loss (verl, дифференцируемый)
+### Шаг 7: Policy loss + KL regularization (verl, дифференцируемый)
 
 ```python
 # Дифференцируемая аблитерация через forward hooks
@@ -148,14 +149,29 @@ loss, loss_metrics = compute_policy_loss_vanilla(
     rollout_is_weights=is_weights,  # IS-веса учтены в loss
     config=actor_config,            # clip_ratio=ε для PPO-clip
 )
+
+kl_loss = mean_token_kl(
+    log_prob=log_probs,
+    ref_log_prob=old_log_probs,     # clean/base model
+    response_mask=response_mask,
+    kl_penalty="low_var_kl",
+)
+
+total_loss = loss + GRPO_KL_LOSS_COEF * kl_loss
 ```
 
 Лосс — стандартный PPO-clipped с IS:
 
 ```
-L = -E[is_weight * min(ratio * A, clip(ratio, 1-ε, 1+ε) * A)]
+L_policy = -E[is_weight * min(ratio * A, clip(ratio, 1-ε, 1+ε) * A)]
 ratio = exp(log π_θ - log π_old)
+L_total = L_policy + λ * KL(π_θ || π_ref)
 ```
+
+Здесь `π_ref` — clean base model без аблитерации, а estimator KL фиксирован как
+`low_var_kl` из vendored `verl`. Raw reward и advantages остаются завязанными только
+на harmfulness score; KL входит как отдельный regularizer в loss и в критерий выбора
+лучшего checkpoint (`mean_objective = mean_reward - λ * mean_kl`).
 
 Forward-хуки (`hooks.py`) делают аблитерацию дифференцируемой:
 для каждого слоя `l` хук вычитает проекцию `(h · d_l) * d_l` из скрытого состояния.
@@ -270,6 +286,7 @@ bash scripts/run_graph_grpo.sh \
 | `GRPO_REF_ALPHA` | `1.0` | Коэффициент аблитерации для политики при вычислении policy loss |
 | `IS_CLIP_RATIO` | `5.0` | Порог обрезки IS-весов |
 | `GRPO_CLIP_RATIO` | `0.2` | ε для PPO-clip |
+| `GRPO_KL_LOSS_COEF` | `0.01` | Коэффициент KL-регуляризации относительно clean base model; `0.0` полностью отключает штраф |
 | `GRPO_N_EPOCHS` | `10` | Количество шагов обучения |
 | `GRPO_LEARNING_RATE` | `1e-3` | Learning rate (Adam) |
 | `ABLITERATION_MAX_WEIGHT` | `2.0` | Максимальная интенсивность аблитерации |
@@ -290,10 +307,11 @@ bash scripts/run_graph_grpo.sh \
 
 `OPTIMIZER_METHOD=optuna` поддерживает оба режима параметризации:
 `WEIGHTS_MODE=scalar` и `WEIGHTS_MODE=dense`. В обоих случаях objective равен
-`mean harmfulness` на train batch; для `optuna` в каждом trial семплируется новый
+`mean_reward - GRPO_KL_LOSS_COEF * mean_kl` на train batch; для `optuna` в каждом trial семплируется новый
 случайный batch из выбранной категории, а лучшее значение сохраняется в
-`answers_*.json` как `optimal_harmfulness` с
-`optimal_harmfulness_source="best_trial_mean_reward"`. По умолчанию используется
+`answers_*.json` как `optimal_objective`, а соответствующий raw harmfulness этого
+trial-а сохраняется отдельно в `optimal_harmfulness` с
+`optimal_harmfulness_source="best_trial_mean_objective"`. По умолчанию используется
 `OPTUNA_SAMPLER=tpe`.
 
 Для `WEIGHTS_MODE=dense` Optuna ищет полный тензор коэффициентов поэлементно,
@@ -316,4 +334,6 @@ scale заменяется на `DEBUG_NOISE_SCALE`, чтобы smoke-run был
 вырожденный градиентный сигнал.
 
 В итоговых `answers_*.json` сохраняются `final_scores`, `score_statistics.mean`,
-`final_mean_harmfulness`, `optimal_harmfulness` и `optimal_harmfulness_source`.
+`final_mean_harmfulness`, `optimal_objective`, `optimal_harmfulness`,
+`optimal_objective_source`, `optimal_harmfulness_source`, а также
+`best_train_batch_mean_kl` / `best_trial_mean_kl` в `experiment_config`.

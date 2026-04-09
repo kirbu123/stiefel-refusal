@@ -18,6 +18,7 @@ ref_alpha = 1.0
 is_clip_ratio = 5.0
 clip_ratio = 0.2
 loss_agg_mode = "token-mean"
+kl_loss_coef = 0.01
 
 [abliteration]
 max_weight = 2.0

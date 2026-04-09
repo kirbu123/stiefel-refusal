@@ -22,6 +22,7 @@ from model_utils import LearnableDirectionWeights, apply_abliteration_with_hyper
 from data_utils import extract_response_after_think
 
 from baselines.graph_grpo.advantage import compute_grpo_is_advantage
+from baselines.graph_grpo.kl import compute_masked_mean_kl
 from baselines.graph_grpo.reward import compute_reward
 from baselines.graph_grpo.log_probs import compute_sequence_log_probs
 from baselines.graph_grpo.hooks import register_abliteration_hooks, remove_hooks
@@ -95,6 +96,7 @@ def train_grpo_is_step(
     clip_ratio: float,
     loss_agg_mode: str,
     reward_sign: float = 1.0,
+    kl_loss_coef: float = 0.0,
     backend: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
@@ -116,6 +118,7 @@ def train_grpo_is_step(
         clip_ratio: PPO clip epsilon
         loss_agg_mode: Loss aggregation mode
         reward_sign: Scale/sign applied to harmfulness scores for optimization
+        kl_loss_coef: Coefficient for KL regularization against the clean base model
         backend: Evaluation backend
 
     Returns:
@@ -304,7 +307,10 @@ def train_grpo_is_step(
     from verl.trainer.ppo.core_algos import compute_policy_loss_vanilla
 
     t0 = time.time()
-    print(f"  [Step 7+8] Policy loss + backward (ref_alpha={ref_alpha}, clip={clip_ratio})...")
+    print(
+        f"  [Step 7+8] Policy loss + KL backward "
+        f"(ref_alpha={ref_alpha}, clip={clip_ratio}, kl_coef={kl_loss_coef:g})..."
+    )
     _freeze_model_parameters(model)
     actor_config = _make_actor_config(clip_ratio=clip_ratio, loss_agg_mode=loss_agg_mode)
     optimizer.zero_grad()
@@ -313,7 +319,9 @@ def train_grpo_is_step(
     micro_bs = 4
     empty_cache()
     total_valid_tokens = response_mask.sum().item()
-    accumulated_loss = 0.0
+    accumulated_policy_loss = 0.0
+    accumulated_kl_loss = 0.0
+    accumulated_total_loss = 0.0
     loss_metrics = {}
 
     target_len = response_mask.shape[1]
@@ -343,7 +351,7 @@ def train_grpo_is_step(
         elif mb_lp.shape[1] > target_len:
             mb_lp = mb_lp[:, :target_len]
 
-        mb_loss, mb_metrics = compute_policy_loss_vanilla(
+        mb_policy_loss, mb_metrics = compute_policy_loss_vanilla(
             old_log_prob=mb_old_lp,
             log_prob=mb_lp,
             advantages=mb_adv,
@@ -351,17 +359,26 @@ def train_grpo_is_step(
             rollout_is_weights=mb_is,
             config=actor_config,
         )
+        _, mb_kl_loss = compute_masked_mean_kl(
+            log_prob=mb_lp,
+            ref_log_prob=mb_old_lp,
+            response_mask=mb_mask,
+            loss_agg_mode=loss_agg_mode,
+        )
+        mb_total_loss = mb_policy_loss + float(kl_loss_coef) * mb_kl_loss
 
         mb_valid_tokens = mb_mask.sum().item()
         if mb_valid_tokens == 0:
             print(f"    micro-batch {mb_start//micro_bs + 1}: skipped (no valid tokens)", flush=True)
             continue
         weight = mb_valid_tokens / total_valid_tokens if total_valid_tokens > 0 else 1.0 / n_total
-        (mb_loss * weight).backward()
-        accumulated_loss += mb_loss.item() * weight
+        (mb_total_loss * weight).backward()
+        accumulated_policy_loss += mb_policy_loss.item() * weight
+        accumulated_kl_loss += mb_kl_loss.item() * weight
+        accumulated_total_loss += mb_total_loss.item() * weight
         loss_metrics = mb_metrics
 
-        del combined_direction, mb_lp, mb_loss
+        del combined_direction, mb_lp, mb_policy_loss, mb_total_loss
         empty_cache()
 
         if (mb_start // micro_bs) % 50 == 0:
@@ -369,7 +386,16 @@ def train_grpo_is_step(
 
     grad_norm = direction_weights.weights.grad.norm().item() if direction_weights.weights.grad is not None else 0.0
     optimizer.step()
-    print(f"    Loss: {accumulated_loss:.6e} ({time.time()-t0:.1f}s)")
+    mean_kl = float(accumulated_kl_loss)
+    mean_objective = float(reward_tensor.mean().item() - float(kl_loss_coef) * mean_kl)
+    print(f"    Policy loss: {accumulated_policy_loss:.6e}")
+    print(f"    KL loss: {accumulated_kl_loss:.6e}")
+    print(f"    Loss: {accumulated_total_loss:.6e} ({time.time()-t0:.1f}s)")
+    print(f"    Total loss: {accumulated_total_loss:.6e}")
+    print(
+        f"    Objective: mean_reward={reward_tensor.mean().item():.6f}, "
+        f"mean_kl={mean_kl:.6f}, mean_objective={mean_objective:.6f}"
+    )
     for k, v in loss_metrics.items():
         print(f"    {k}: {v}")
     print(f"    Grad norm: {grad_norm:.6e}")
@@ -403,6 +429,12 @@ def train_grpo_is_step(
         "best_reward": float(reward_tensor.max().item()),
         "mean_harmfulness": float(harmfulness_tensor.mean().item()),
         "best_harmfulness": float(harmfulness_tensor.max().item()),
+        "policy_loss": float(accumulated_policy_loss),
+        "kl_loss": mean_kl,
+        "mean_kl": mean_kl,
+        "total_loss": float(accumulated_total_loss),
+        "mean_objective": mean_objective,
+        "kl_loss_coef": float(kl_loss_coef),
         "weights_norm": float(direction_weights.weights.data.norm().item()),
         "gradient_norm": grad_norm,
         **loss_metrics,

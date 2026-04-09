@@ -257,6 +257,7 @@ class TestGraphGrpoTrainer(unittest.TestCase):
                                                     is_clip_ratio=5.0,
                                                     clip_ratio=0.2,
                                                     loss_agg_mode="token-mean",
+                                                    kl_loss_coef=0.1,
                                                     backend="llamaguard",
                                                 )
 
@@ -274,6 +275,12 @@ class TestGraphGrpoTrainer(unittest.TestCase):
         self.assertIsNotNone(direction_weights.weights.grad)
         self.assertGreater(direction_weights.weights.grad.abs().sum().item(), 0.0)
         self.assertIn("mean_reward", metrics)
+        self.assertIn("mean_kl", metrics)
+        self.assertIn("kl_loss", metrics)
+        self.assertIn("mean_objective", metrics)
+        self.assertIn("total_loss", metrics)
+        self.assertGreater(metrics["total_loss"], metrics["policy_loss"])
+        self.assertLess(metrics["mean_objective"], metrics["mean_reward"])
         self.assertIn("weights_norm", metrics)
 
     def test_train_step_supports_scalar_direction_weights(self):
@@ -419,6 +426,7 @@ class TestGraphGrpoTrainer(unittest.TestCase):
                                                     is_clip_ratio=5.0,
                                                     clip_ratio=0.2,
                                                     loss_agg_mode="token-mean",
+                                                    kl_loss_coef=0.1,
                                                     backend="llamaguard",
                                                 )
 
@@ -436,6 +444,12 @@ class TestGraphGrpoTrainer(unittest.TestCase):
         self.assertIsNotNone(direction_weights.weights.grad)
         self.assertGreater(direction_weights.weights.grad.abs().sum().item(), 0.0)
         self.assertIn("mean_reward", metrics)
+        self.assertIn("mean_kl", metrics)
+        self.assertIn("kl_loss", metrics)
+        self.assertIn("mean_objective", metrics)
+        self.assertIn("total_loss", metrics)
+        self.assertGreater(metrics["total_loss"], metrics["policy_loss"])
+        self.assertLess(metrics["mean_objective"], metrics["mean_reward"])
         self.assertIn("weights_norm", metrics)
 
 

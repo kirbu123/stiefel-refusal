@@ -139,6 +139,7 @@ class TestGraphGrpoMain(unittest.TestCase):
             "is_clip_ratio": 5.0,
             "clip_ratio": 0.2,
             "loss_agg_mode": "token-mean",
+            "kl_loss_coef": 0.01,
         }
         fake_config.ABLITERATION_PARAMS = {
             "max_weight": 2.0,
@@ -230,12 +231,14 @@ class TestGraphGrpoMain(unittest.TestCase):
             n_layers,
             ref_alpha,
             reward_sign,
+            kl_loss_coef,
             n_trials,
             sampler_name,
             sampler_seed,
             weight_min,
             weight_max,
             question_sampler=None,
+            loss_agg_mode="token-mean",
             backend=None,
         ):
             if question_sampler is not None:
@@ -252,6 +255,8 @@ class TestGraphGrpoMain(unittest.TestCase):
                 ).reshape_as(direction_weights.weights)
                 optimization_history = []
                 for trial_index, trial_questions in enumerate(trial_batches):
+                    mean_kl = 0.1 * float(trial_index + 1)
+                    mean_objective = float(trial_index + 1) - kl_loss_coef * mean_kl
                     optimization_history.append({
                         "trial_number": trial_index,
                         "weights_mode": "dense",
@@ -265,12 +270,16 @@ class TestGraphGrpoMain(unittest.TestCase):
                         "best_reward": float(trial_index + 1),
                         "mean_harmfulness": float(trial_index + 1),
                         "best_harmfulness": float(trial_index + 1),
+                        "mean_kl": mean_kl,
+                        "mean_objective": mean_objective,
                         "n_questions": len(trial_questions),
                     })
             else:
                 best_weights_tensor = torch.tensor([0.75, -0.25], dtype=torch.float32)
                 optimization_history = []
                 for trial_index, trial_questions in enumerate(trial_batches):
+                    mean_kl = 0.1 * float(trial_index + 1)
+                    mean_objective = float(trial_index + 1) - kl_loss_coef * mean_kl
                     optimization_history.append({
                         "trial_number": trial_index,
                         "weights": [0.75, -0.25],
@@ -279,6 +288,8 @@ class TestGraphGrpoMain(unittest.TestCase):
                         "best_reward": float(trial_index + 1),
                         "mean_harmfulness": float(trial_index + 1),
                         "best_harmfulness": float(trial_index + 1),
+                        "mean_kl": mean_kl,
+                        "mean_objective": mean_objective,
                         "n_questions": len(trial_questions),
                     })
 
@@ -286,8 +297,10 @@ class TestGraphGrpoMain(unittest.TestCase):
             return {
                 "optimization_history": optimization_history,
                 "best_trial_number": best_trial_index,
-                "best_value": float(best_trial_index + 1),
+                "best_value": optimization_history[best_trial_index]["mean_objective"],
+                "best_mean_objective": optimization_history[best_trial_index]["mean_objective"],
                 "best_mean_harmfulness": float(best_trial_index + 1),
+                "best_mean_kl": optimization_history[best_trial_index]["mean_kl"],
                 "best_weights": best_weights_tensor.tolist(),
                 "best_trial_questions": trial_batches[best_trial_index],
             }
@@ -306,7 +319,14 @@ class TestGraphGrpoMain(unittest.TestCase):
 
         def fake_train_grpo_is_step(*args, **kwargs):
             train_step_questions.append(list(kwargs["questions"]))
-            return next(trainer_metrics_iter)
+            metrics = dict(next(trainer_metrics_iter))
+            metrics.setdefault("mean_kl", 0.0)
+            metrics.setdefault("kl_loss", metrics["mean_kl"])
+            metrics.setdefault(
+                "mean_objective",
+                metrics["mean_reward"] - fake_config.GRPO_CONFIG["kl_loss_coef"] * metrics["mean_kl"],
+            )
+            return metrics
 
         fake_trainer.train_grpo_is_step = fake_train_grpo_is_step
 
@@ -481,17 +501,30 @@ class TestGraphGrpoMain(unittest.TestCase):
             2,
         )
         self.assertEqual(
+            result["answers_data"]["experiment_config"]["best_train_batch_mean_objective"],
+            0.9,
+        )
+        self.assertEqual(
             result["answers_data"]["experiment_config"]["best_train_batch_mean_harmfulness"],
             0.9,
+        )
+        self.assertEqual(
+            result["answers_data"]["experiment_config"]["best_train_batch_mean_kl"],
+            0.0,
         )
         self.assertEqual(
             result["answers_data"]["questions"],
             result["train_step_questions"][1],
         )
+        self.assertEqual(result["answers_data"]["optimal_objective"], 0.9)
         self.assertEqual(result["answers_data"]["optimal_harmfulness"], 0.9)
         self.assertEqual(
             result["answers_data"]["optimal_harmfulness_source"],
-            "best_train_batch_mean_reward",
+            "best_train_batch_mean_objective",
+        )
+        self.assertEqual(
+            result["answers_data"]["optimal_objective_source"],
+            "best_train_batch_mean_objective",
         )
         self.assertEqual(result["mmlu_eval_calls"], ["modified"])
         self.assertTrue(result["define_metric_calls"])
@@ -507,6 +540,7 @@ class TestGraphGrpoMain(unittest.TestCase):
         self.assertIn("is_clip5", run_name)
         self.assertIn("clip0.2", run_name)
         self.assertIn("loss_token-mean", run_name)
+        self.assertIn("klcoef0.01", run_name)
 
         scalar_payloads = [payload for payload, _step in result["wandb_log_calls"]]
         self.assertTrue(any("clean_model/mmlu_score" in payload for payload in scalar_payloads))
@@ -608,16 +642,22 @@ class TestGraphGrpoMain(unittest.TestCase):
         self.assertIn("sampler_seed42", run_name)
         self.assertIn("weight_min-2", run_name)
         self.assertIn("weight_max2", run_name)
+        self.assertIn("klcoef0.01", run_name)
         self.assertEqual(len(result["optuna_trial_batches"]), 3)
         self.assertTrue(all(len(batch) == 2 for batch in result["optuna_trial_batches"]))
         self.assertEqual(
             result["answers_data"]["questions"],
             result["optuna_trial_batches"][1],
         )
+        self.assertAlmostEqual(result["answers_data"]["optimal_objective"], 1.998)
         self.assertEqual(result["answers_data"]["optimal_harmfulness"], 2.0)
         self.assertEqual(
             result["answers_data"]["optimal_harmfulness_source"],
-            "best_trial_mean_reward",
+            "best_trial_mean_objective",
+        )
+        self.assertEqual(
+            result["answers_data"]["optimal_objective_source"],
+            "best_trial_mean_objective",
         )
 
 

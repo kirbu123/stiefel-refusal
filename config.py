@@ -74,6 +74,7 @@ GRPO_CONFIG = {
     "is_clip_ratio": float(os.getenv("IS_CLIP_RATIO", 5.0)),
     "clip_ratio": float(os.getenv("GRPO_CLIP_RATIO", 0.2)),
     "loss_agg_mode": os.getenv("GRPO_LOSS_AGG_MODE", "token-mean"),
+    "kl_loss_coef": float(os.getenv("GRPO_KL_LOSS_COEF", 0.01)),
 }
 
 ABLITERATION_PARAMS = {

@@ -215,6 +215,7 @@ def _build_wandb_run_name(
             f"is_clip{_format_run_name_value(grpo_config['is_clip_ratio'])}",
             f"clip{_format_run_name_value(grpo_config['clip_ratio'])}",
             f"loss_{_sanitize_run_name_part(grpo_config['loss_agg_mode'])}",
+            f"klcoef{_format_run_name_value(grpo_config['kl_loss_coef'])}",
         ])
     else:
         parts.extend([
@@ -223,6 +224,7 @@ def _build_wandb_run_name(
             f"sampler_seed{_format_run_name_value(optuna_config['sampler_seed'])}",
             f"weight_min{_format_run_name_value(optuna_config['weight_min'])}",
             f"weight_max{_format_run_name_value(optuna_config['weight_max'])}",
+            f"klcoef{_format_run_name_value(grpo_config['kl_loss_coef'])}",
         ])
 
     parts.append(datetime.now().strftime("%Y%m%d_%H%M%S"))
@@ -293,8 +295,10 @@ def _run_grpo_training(
     training_history = []
     best_epoch = None
     best_train_batch_questions: List[str] = []
-    best_train_batch_mean_reward = float("-inf")
+    best_train_batch_mean_reward: Optional[float] = None
+    best_train_batch_mean_objective = float("-inf")
     best_train_batch_mean_harmfulness: Optional[float] = None
+    best_train_batch_mean_kl: Optional[float] = None
     best_weights = direction_weights.weights.detach().cpu().clone()
     print("\n" + "=" * 80)
     print("GRPO-IS TRAINING")
@@ -326,6 +330,7 @@ def _run_grpo_training(
             clip_ratio=GRPO_CONFIG["clip_ratio"],
             loss_agg_mode=GRPO_CONFIG["loss_agg_mode"],
             reward_sign=reward_sign,
+            kl_loss_coef=GRPO_CONFIG["kl_loss_coef"],
             backend=EVALUATION_BACKEND,
         )
         training_history.append({
@@ -334,19 +339,24 @@ def _run_grpo_training(
             **metrics,
         })
         mean_harmfulness = metrics.get("mean_harmfulness")
-        if mean_harmfulness is not None:
+        mean_kl = metrics.get("mean_kl")
+        mean_objective = metrics.get("mean_objective")
+        if mean_harmfulness is not None and mean_kl is not None and mean_objective is not None:
             print(
-                f"  Mean reward: {metrics['mean_reward']:.3f}, Best: {metrics['best_reward']:.3f} "
-                f"(mean harmfulness={mean_harmfulness:.3f})"
+                f"  Mean objective: {mean_objective:.3f}, Mean reward: {metrics['mean_reward']:.3f}, "
+                f"Best reward: {metrics['best_reward']:.3f} "
+                f"(mean harmfulness={mean_harmfulness:.3f}, mean kl={mean_kl:.3f})"
             )
         else:
             print(f"  Mean reward: {metrics['mean_reward']:.3f}, Best: {metrics['best_reward']:.3f}")
-        if metrics["mean_reward"] > best_train_batch_mean_reward:
+        if metrics["mean_objective"] > best_train_batch_mean_objective:
             best_epoch = epoch + 1
             best_train_batch_mean_reward = float(metrics["mean_reward"])
+            best_train_batch_mean_objective = float(metrics["mean_objective"])
             best_train_batch_mean_harmfulness = (
                 float(mean_harmfulness) if mean_harmfulness is not None else None
             )
+            best_train_batch_mean_kl = float(mean_kl) if mean_kl is not None else None
             best_train_batch_questions = list(epoch_questions)
             best_weights = direction_weights.weights.detach().cpu().clone()
 
@@ -364,7 +374,9 @@ def _run_grpo_training(
         "best_weights": best_weights,
         "best_train_batch_questions": best_train_batch_questions,
         "best_train_batch_mean_reward": best_train_batch_mean_reward,
+        "best_train_batch_mean_objective": best_train_batch_mean_objective,
         "best_train_batch_mean_harmfulness": best_train_batch_mean_harmfulness,
+        "best_train_batch_mean_kl": best_train_batch_mean_kl,
     }
 
 
@@ -695,6 +707,7 @@ def main():
             n_layers=n_layers,
             ref_alpha=GRPO_CONFIG["ref_alpha"],
             reward_sign=reward_sign,
+            kl_loss_coef=GRPO_CONFIG["kl_loss_coef"],
             n_trials=optuna_n_trials,
             sampler_name=optuna_sampler,
             sampler_seed=optuna_sampler_seed,
@@ -704,21 +717,25 @@ def main():
                 all_category_questions=all_category_questions,
                 debug_question_count=debug_question_count,
             ),
+            loss_agg_mode=GRPO_CONFIG["loss_agg_mode"],
             backend=EVALUATION_BACKEND,
         )
         optimization_result["training_history"] = []
         optimization_result["optuna_config"] = optuna_config
         print(
             f"Best Optuna trial: #{optimization_result['best_trial_number']} "
-            f"with mean reward={optimization_result['best_value']:.3f} "
-            f"(mean harmfulness={optimization_result.get('best_mean_harmfulness')})"
+            f"with mean objective={optimization_result['best_value']:.3f} "
+            f"(mean harmfulness={optimization_result.get('best_mean_harmfulness')}, "
+            f"mean kl={optimization_result.get('best_mean_kl')})"
         )
         if WANDB_AVAILABLE:
             wandb.log(
                 {
                     "optuna/best_trial_number": optimization_result["best_trial_number"],
                     "optuna/best_value": optimization_result["best_value"],
+                    "optuna/best_objective": optimization_result.get("best_mean_objective", optimization_result["best_value"]),
                     "optuna/best_harmfulness": optimization_result.get("best_mean_harmfulness"),
+                    "optuna/best_kl": optimization_result.get("best_mean_kl"),
                 }
             )
 
@@ -749,16 +766,25 @@ def main():
 
     final_mean_harmfulness = final_result["final_mean_harmfulness"]
     if optimizer_method == "grpo":
+        optimal_objective = optimization_result["best_train_batch_mean_objective"]
         optimal_harmfulness = optimization_result["best_train_batch_mean_harmfulness"]
-        optimal_harmfulness_source = "best_train_batch_mean_reward"
+        optimal_harmfulness_source = "best_train_batch_mean_objective"
+        optimal_objective_source = "best_train_batch_mean_objective"
     else:
+        best_mean_objective = optimization_result.get("best_mean_objective")
         best_mean_harmfulness = optimization_result.get("best_mean_harmfulness")
+        optimal_objective = (
+            best_mean_objective
+            if best_mean_objective is not None
+            else optimization_result["best_value"]
+        )
         optimal_harmfulness = (
             best_mean_harmfulness
             if best_mean_harmfulness is not None
-            else optimization_result["best_value"]
+            else optimal_objective
         )
-        optimal_harmfulness_source = "best_trial_mean_reward"
+        optimal_harmfulness_source = "best_trial_mean_objective"
+        optimal_objective_source = "best_trial_mean_objective"
 
     best_batch_model_harmfulness_result = _evaluate_model_harmfulness(
         model=model,
@@ -804,6 +830,8 @@ def main():
         "responses": final_result["responses"],
         "final_scores": final_result["scores"],
         "final_mean_harmfulness": final_mean_harmfulness,
+        "optimal_objective": optimal_objective,
+        "optimal_objective_source": optimal_objective_source,
         "optimal_harmfulness": optimal_harmfulness,
         "optimal_harmfulness_source": optimal_harmfulness_source,
         "score_statistics": {
@@ -815,8 +843,15 @@ def main():
     }
     if optimizer_method == "grpo":
         answers_data["experiment_config"]["best_grpo_epoch"] = optimization_result["best_epoch"]
+        answers_data["experiment_config"]["best_train_batch_mean_reward"] = optimization_result["best_train_batch_mean_reward"]
+        answers_data["experiment_config"]["best_train_batch_mean_objective"] = optimization_result["best_train_batch_mean_objective"]
         answers_data["experiment_config"]["best_train_batch_mean_harmfulness"] = optimization_result["best_train_batch_mean_harmfulness"]
+        answers_data["experiment_config"]["best_train_batch_mean_kl"] = optimization_result["best_train_batch_mean_kl"]
         answers_data["experiment_config"]["best_train_batch_size"] = len(optimization_result["best_train_batch_questions"])
+    else:
+        answers_data["experiment_config"]["best_trial_mean_objective"] = optimization_result.get("best_mean_objective")
+        answers_data["experiment_config"]["best_trial_mean_harmfulness"] = optimization_result.get("best_mean_harmfulness")
+        answers_data["experiment_config"]["best_trial_mean_kl"] = optimization_result.get("best_mean_kl")
     if optimization_result["optimization_history"]:
         answers_data["optimization_history"] = optimization_result["optimization_history"]
     if final_result["mmlu_block"] is not None:
