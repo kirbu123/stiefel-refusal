@@ -108,6 +108,8 @@ def apply_config_to_env(config: dict[str, Any], model_name: str | None = None):
         os.environ["GRPO_CLIP_RATIO"] = str(grpo["clip_ratio"])
     if grpo.get("loss_agg_mode") is not None:
         os.environ["GRPO_LOSS_AGG_MODE"] = grpo["loss_agg_mode"]
+    if grpo.get("kl_loss_coef") is not None:
+        os.environ["GRPO_KL_LOSS_COEF"] = str(grpo["kl_loss_coef"])
 
     abl = config.get("abliteration", {})
     if abl.get("max_weight") is not None:

@@ -94,27 +94,48 @@ class TestGraphGrpoOptuna(unittest.TestCase):
             apply_calls.append(args)
 
         with patch.object(optuna_module, "apply_abliteration_with_hyperparams", side_effect=fake_apply):
-            with patch.object(optuna_module, "compute_reward", return_value=[0.0, 1.0, 1.0]):
-                result = optuna_module.evaluate_scalar_weights(
-                    direction_weights=direction_weights,
-                    extracted_directions=extracted_directions,
-                    scalar_weights=torch.tensor([1.5, -0.5], dtype=torch.float32),
-                    model=model,
-                    questions=["q1", "q2", "q3"],
-                    abliteration_params={
-                        "max_weight": 2.0,
-                        "max_weight_position": 0.5,
-                        "min_weight": 0.25,
-                        "min_weight_distance": 0.4,
-                    },
-                    classifier_categories=[],
-                    n_layers=1,
-                    ref_alpha=1.5,
-                    reward_sign=1.0,
-                    backend="llamaguard",
-                )
+            with patch.object(
+                optuna_module,
+                "compute_sequence_log_probs",
+                side_effect=[
+                    (
+                        torch.tensor(
+                            [[0.7, 0.6], [0.7, 0.6], [0.7, 0.6]],
+                            dtype=torch.float32,
+                        ),
+                        torch.ones((3, 2), dtype=torch.float32),
+                    ),
+                    (
+                        torch.tensor(
+                            [[0.4, 0.3], [0.4, 0.3], [0.4, 0.3]],
+                            dtype=torch.float32,
+                        ),
+                        torch.ones((3, 2), dtype=torch.float32),
+                    ),
+                ],
+            ):
+                with patch.object(optuna_module, "compute_reward", return_value=[0.0, 1.0, 1.0]):
+                    result = optuna_module.evaluate_scalar_weights(
+                        direction_weights=direction_weights,
+                        extracted_directions=extracted_directions,
+                        scalar_weights=torch.tensor([1.5, -0.5], dtype=torch.float32),
+                        model=model,
+                        questions=["q1", "q2", "q3"],
+                        abliteration_params={
+                            "max_weight": 2.0,
+                            "max_weight_position": 0.5,
+                            "min_weight": 0.25,
+                            "min_weight_distance": 0.4,
+                        },
+                        classifier_categories=[],
+                        n_layers=1,
+                        ref_alpha=1.5,
+                        reward_sign=1.0,
+                        kl_loss_coef=0.01,
+                        backend="llamaguard",
+                    )
 
-        self.assertEqual(model.reload_calls, 1)
+        self.assertEqual(model.reload_calls, 2)
         self.assertEqual(len(apply_calls), 1)
         self.assertEqual(result["weights"], [1.5, -0.5])
         self.assertEqual(result["weights_mode"], "scalar")
@@ -122,6 +143,12 @@ class TestGraphGrpoOptuna(unittest.TestCase):
         self.assertEqual(result["best_reward"], 1.0)
         self.assertEqual(result["n_questions"], 3)
         self.assertEqual(result["scores"], [0.0, 1.0, 1.0])
+        self.assertIn("mean_kl", result)
+        self.assertIn("mean_objective", result)
+        self.assertAlmostEqual(
+            result["mean_objective"],
+            result["mean_reward"] - 0.01 * result["mean_kl"],
+        )
 
     def test_evaluate_dense_weights_returns_metrics(self):
         direction_weights = LearnableDirectionWeights(
@@ -149,33 +176,60 @@ class TestGraphGrpoOptuna(unittest.TestCase):
             apply_calls.append(args)
 
         with patch.object(optuna_module, "apply_abliteration_with_hyperparams", side_effect=fake_apply):
-            with patch.object(optuna_module, "compute_reward", return_value=[1.0, 0.0]):
-                result = optuna_module.evaluate_dense_weights(
-                    direction_weights=direction_weights,
-                    extracted_directions=extracted_directions,
-                    dense_weights=dense_weights,
-                    model=model,
-                    questions=["q1", "q2"],
-                    abliteration_params={
-                        "max_weight": 2.0,
-                        "max_weight_position": 0.5,
-                        "min_weight": 0.25,
-                        "min_weight_distance": 0.4,
-                    },
-                    classifier_categories=[],
-                    n_layers=1,
-                    ref_alpha=1.0,
-                    reward_sign=1.0,
-                    backend="llamaguard",
-                )
+            with patch.object(
+                optuna_module,
+                "compute_sequence_log_probs",
+                side_effect=[
+                    (
+                        torch.tensor(
+                            [[0.6, 0.5], [0.6, 0.5]],
+                            dtype=torch.float32,
+                        ),
+                        torch.ones((2, 2), dtype=torch.float32),
+                    ),
+                    (
+                        torch.tensor(
+                            [[0.2, 0.1], [0.2, 0.1]],
+                            dtype=torch.float32,
+                        ),
+                        torch.ones((2, 2), dtype=torch.float32),
+                    ),
+                ],
+            ):
+                with patch.object(optuna_module, "compute_reward", return_value=[1.0, 0.0]):
+                    result = optuna_module.evaluate_dense_weights(
+                        direction_weights=direction_weights,
+                        extracted_directions=extracted_directions,
+                        dense_weights=dense_weights,
+                        model=model,
+                        questions=["q1", "q2"],
+                        abliteration_params={
+                            "max_weight": 2.0,
+                            "max_weight_position": 0.5,
+                            "min_weight": 0.25,
+                            "min_weight_distance": 0.4,
+                        },
+                        classifier_categories=[],
+                        n_layers=1,
+                        ref_alpha=1.0,
+                        reward_sign=1.0,
+                        kl_loss_coef=0.01,
+                        backend="llamaguard",
+                    )
 
-        self.assertEqual(model.reload_calls, 1)
+        self.assertEqual(model.reload_calls, 2)
         self.assertEqual(len(apply_calls), 1)
         self.assertEqual(result["weights_mode"], "dense")
         self.assertEqual(tuple(torch.tensor(result["weights"]).shape), (2, 2, 2))
         self.assertAlmostEqual(result["mean_reward"], 0.5)
         self.assertEqual(result["best_reward"], 1.0)
         self.assertEqual(result["n_questions"], 2)
+        self.assertIn("mean_kl", result)
+        self.assertIn("mean_objective", result)
+        self.assertAlmostEqual(
+            result["mean_objective"],
+            result["mean_reward"] - 0.01 * result["mean_kl"],
+        )
 
     def test_optimize_scalar_weights_updates_module_and_records_history(self):
         direction_weights = LearnableDirectionWeights(
@@ -202,9 +256,12 @@ class TestGraphGrpoOptuna(unittest.TestCase):
             n_layers,
             ref_alpha,
             reward_sign,
+            kl_loss_coef,
+            loss_agg_mode="token-mean",
             backend=None,
         ):
             score = float(weights.sum().item())
+            mean_kl = 0.5
             return {
                 "weights": weights.detach().cpu().tolist(),
                 "responses": [],
@@ -213,6 +270,9 @@ class TestGraphGrpoOptuna(unittest.TestCase):
                 "best_reward": score,
                 "mean_harmfulness": score,
                 "best_harmfulness": score,
+                "mean_kl": mean_kl,
+                "kl_loss": mean_kl,
+                "mean_objective": score - kl_loss_coef * mean_kl,
                 "n_questions": len(questions),
                 "weights_mode": "scalar",
             }
@@ -233,11 +293,13 @@ class TestGraphGrpoOptuna(unittest.TestCase):
                 n_layers=1,
                 ref_alpha=1.0,
                 reward_sign=1.0,
+                kl_loss_coef=0.01,
                 n_trials=3,
                 sampler_name="random",
                 sampler_seed=42,
                 weight_min=-2.0,
                 weight_max=2.0,
+                loss_agg_mode="token-mean",
                 backend="llamaguard",
             )
 
@@ -246,7 +308,7 @@ class TestGraphGrpoOptuna(unittest.TestCase):
         self.assertEqual(len(result["best_weights"]), 2)
         self.assertEqual(result["best_trial_questions"], ["q1", "q2"])
         self.assertEqual(result["sampler_name"], "random")
-        best_from_history = max(item["mean_reward"] for item in result["optimization_history"])
+        best_from_history = max(item["mean_objective"] for item in result["optimization_history"])
         self.assertAlmostEqual(result["best_value"], best_from_history)
         self.assertTrue(torch.allclose(
             direction_weights.weights.detach().cpu(),
@@ -256,6 +318,8 @@ class TestGraphGrpoOptuna(unittest.TestCase):
             self.assertIn("weights", item)
             self.assertIn("mean_reward", item)
             self.assertIn("best_reward", item)
+            self.assertIn("mean_kl", item)
+            self.assertIn("mean_objective", item)
             self.assertEqual(item["weights_mode"], "scalar")
 
     def test_optimize_uses_question_sampler_per_trial_and_returns_best_trial_questions(self):
@@ -299,9 +363,12 @@ class TestGraphGrpoOptuna(unittest.TestCase):
             n_layers,
             ref_alpha,
             reward_sign,
+            kl_loss_coef,
+            loss_agg_mode="token-mean",
             backend=None,
         ):
             score = score_by_batch[questions[0]]
+            mean_kl = 0.25
             return {
                 "weights": weights.detach().cpu().tolist(),
                 "responses": [],
@@ -310,6 +377,9 @@ class TestGraphGrpoOptuna(unittest.TestCase):
                 "best_reward": score,
                 "mean_harmfulness": score,
                 "best_harmfulness": score,
+                "mean_kl": mean_kl,
+                "kl_loss": mean_kl,
+                "mean_objective": score - kl_loss_coef * mean_kl,
                 "n_questions": len(questions),
                 "weights_mode": "scalar",
             }
@@ -330,12 +400,14 @@ class TestGraphGrpoOptuna(unittest.TestCase):
                 n_layers=1,
                 ref_alpha=1.0,
                 reward_sign=1.0,
+                kl_loss_coef=0.01,
                 n_trials=3,
                 sampler_name="random",
                 sampler_seed=42,
                 weight_min=-2.0,
                 weight_max=2.0,
                 question_sampler=question_sampler,
+                loss_agg_mode="token-mean",
                 backend="llamaguard",
             )
 
@@ -372,9 +444,12 @@ class TestGraphGrpoOptuna(unittest.TestCase):
             n_layers,
             ref_alpha,
             reward_sign,
+            kl_loss_coef,
+            loss_agg_mode="token-mean",
             backend=None,
         ):
             score = float(weights.sum().item())
+            mean_kl = 0.5
             return {
                 "weights": weights.detach().cpu().tolist(),
                 "responses": [],
@@ -383,6 +458,9 @@ class TestGraphGrpoOptuna(unittest.TestCase):
                 "best_reward": score,
                 "mean_harmfulness": score,
                 "best_harmfulness": score,
+                "mean_kl": mean_kl,
+                "kl_loss": mean_kl,
+                "mean_objective": score - kl_loss_coef * mean_kl,
                 "n_questions": len(questions),
                 "weights_mode": "dense",
             }
@@ -403,11 +481,13 @@ class TestGraphGrpoOptuna(unittest.TestCase):
                 n_layers=1,
                 ref_alpha=1.0,
                 reward_sign=1.0,
+                kl_loss_coef=0.01,
                 n_trials=3,
                 sampler_name="random",
                 sampler_seed=42,
                 weight_min=-2.0,
                 weight_max=2.0,
+                loss_agg_mode="token-mean",
                 backend="llamaguard",
             )
 
@@ -416,7 +496,7 @@ class TestGraphGrpoOptuna(unittest.TestCase):
         best_weights_tensor = torch.tensor(result["best_weights"], dtype=direction_weights.weights.dtype)
         self.assertEqual(tuple(best_weights_tensor.shape), tuple(direction_weights.weights.shape))
         self.assertEqual(result["best_trial_questions"], ["q1", "q2"])
-        best_from_history = max(item["mean_reward"] for item in result["optimization_history"])
+        best_from_history = max(item["mean_objective"] for item in result["optimization_history"])
         self.assertAlmostEqual(result["best_value"], best_from_history)
         self.assertTrue(torch.allclose(
             direction_weights.weights.detach().cpu(),
@@ -431,6 +511,8 @@ class TestGraphGrpoOptuna(unittest.TestCase):
             self.assertIn("weights_min", item)
             self.assertIn("weights_max", item)
             self.assertIn("weights_norm", item)
+            self.assertIn("mean_kl", item)
+            self.assertIn("mean_objective", item)
 
 
 if __name__ == "__main__":

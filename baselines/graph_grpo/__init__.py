@@ -14,4 +14,8 @@ __all__ = [
     "remove_hooks",
 ]
 
-from .__main__ import main  # noqa: E402
+
+def main():
+    from .__main__ import main as _main
+
+    return _main()
