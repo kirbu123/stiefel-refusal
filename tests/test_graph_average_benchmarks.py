@@ -31,9 +31,10 @@ class FakeBenchmarkRunner:
     def prepare_original(self, model):
         self.prepare_calls += 1
         return {
-            "jailbreakbench": {
-                "attack_success_rate": self.benchmark_results["jailbreakbench"]["original"]["attack_success_rate"]
+            benchmark_name: {
+                "attack_success_rate": benchmark_block["original"]["attack_success_rate"]
             }
+            for benchmark_name, benchmark_block in self.benchmark_results.items()
         }
 
     def evaluate_modified(self, model, run_label):
@@ -154,7 +155,18 @@ class TestGraphAverageBenchmarks(unittest.TestCase):
                 "details_file": {"original": "orig.json", "modified": "mod.json"},
                 "by_category": {},
                 "by_source": {},
-            }
+            },
+            "harmbench": {
+                "original": {"attack_success_rate": 0.1},
+                "modified": {"attack_success_rate": 0.4},
+                "delta_attack_success_rate": 0.3,
+                "config": {"judge_mode": "official", "split": "test"},
+                "details_file": {"original": "harm_orig.json", "modified": "harm_mod.json"},
+                "by_split": {},
+                "by_category": {},
+                "by_functional_category": {},
+                "by_semantic_category": {},
+            },
         }
         fake_benchmark_runner = FakeBenchmarkRunner(benchmark_results)
         fake_benchmarks_integration = types.ModuleType("benchmarks.integration")
@@ -191,6 +203,10 @@ class TestGraphAverageBenchmarks(unittest.TestCase):
         self.assertAlmostEqual(
             payload["benchmarks"]["jailbreakbench"]["modified"]["attack_success_rate"],
             0.5,
+        )
+        self.assertAlmostEqual(
+            payload["benchmarks"]["harmbench"]["modified"]["attack_success_rate"],
+            0.4,
         )
         self.assertEqual(fake_benchmark_runner.prepare_calls, 1)
         self.assertEqual(fake_benchmark_runner.run_labels, ["graph_average_Physical_harm_max_weight=1.0_&max_weight_position=0.7_&min_weight=0.0_&min_weight_distance=0.3"])

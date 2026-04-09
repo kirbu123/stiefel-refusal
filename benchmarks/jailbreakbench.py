@@ -16,6 +16,10 @@ from data_utils import (
 from evaluate.judges import evaluate_harmfulness
 
 from .base import BenchmarkDefinition
+from .binary_metrics import (
+    build_binary_result_block,
+    summarize_binary_records,
+)
 from .settings import normalize_jailbreakbench_config
 
 
@@ -226,27 +230,14 @@ class JailbreakBenchBenchmark(BenchmarkDefinition):
         original_details_file: str,
         modified_details_file: str,
     ) -> dict[str, Any]:
-        return {
-            "original": self._summary_without_buckets(original_summary),
-            "modified": self._summary_without_buckets(modified_summary),
-            "delta_attack_success_rate": self._delta_attack_success_rate(
-                original_summary,
-                modified_summary,
-            ),
-            "config": self.normalize_config(config),
-            "details_file": {
-                "original": original_details_file,
-                "modified": modified_details_file,
-            },
-            "by_category": self._build_bucket_comparison(
-                original_summary.get("by_category", {}),
-                modified_summary.get("by_category", {}),
-            ),
-            "by_source": self._build_bucket_comparison(
-                original_summary.get("by_source", {}),
-                modified_summary.get("by_source", {}),
-            ),
-        }
+        return build_binary_result_block(
+            original_summary=original_summary,
+            modified_summary=modified_summary,
+            config=self.normalize_config(config),
+            original_details_file=original_details_file,
+            modified_details_file=modified_details_file,
+            bucket_keys=("by_category", "by_source"),
+        )
 
     def _build_judge(
         self,
@@ -264,81 +255,10 @@ class JailbreakBenchBenchmark(BenchmarkDefinition):
         raise ValueError(f"Unsupported JailbreakBench judge_mode '{judge_mode}'")
 
     def _summarize_records(self, records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-        summary = self._bucket_summary(records)
-
-        by_category: dict[str, list[Mapping[str, Any]]] = {}
-        by_source: dict[str, list[Mapping[str, Any]]] = {}
-
-        for record in records:
-            category = str(record.get("category", "")).strip()
-            source = str(record.get("source", "")).strip()
-            by_category.setdefault(category, []).append(record)
-            by_source.setdefault(source, []).append(record)
-
-        summary["by_category"] = {
-            key: self._bucket_summary(bucket)
-            for key, bucket in sorted(by_category.items())
-        }
-        summary["by_source"] = {
-            key: self._bucket_summary(bucket)
-            for key, bucket in sorted(by_source.items())
-        }
-        return summary
-
-    def _bucket_summary(self, records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-        total = len(records)
-        jailbroken_count = sum(1 for record in records if record.get("jailbroken"))
-        scored_values = [
-            int(record["score"])
-            for record in records
-            if record.get("score") is not None
-        ]
-        attack_success_rate = (jailbroken_count / total) if total else 0.0
-        mean_score = (
-            sum(scored_values) / len(scored_values)
-            if scored_values else None
+        return summarize_binary_records(
+            records,
+            bucket_fields={
+                "by_category": "category",
+                "by_source": "source",
+            },
         )
-        return {
-            "attack_success_rate": attack_success_rate,
-            "n_prompts": total,
-            "jailbroken_count": jailbroken_count,
-            "mean_score": mean_score,
-            "n_scored": len(scored_values),
-        }
-
-    def _summary_without_buckets(self, summary: Mapping[str, Any]) -> dict[str, Any]:
-        return {
-            "attack_success_rate": summary.get("attack_success_rate", 0.0),
-            "n_prompts": summary.get("n_prompts", 0),
-            "jailbroken_count": summary.get("jailbroken_count", 0),
-            "mean_score": summary.get("mean_score"),
-            "n_scored": summary.get("n_scored", 0),
-        }
-
-    def _build_bucket_comparison(
-        self,
-        original_buckets: Mapping[str, Mapping[str, Any]],
-        modified_buckets: Mapping[str, Mapping[str, Any]],
-    ) -> dict[str, Any]:
-        keys = sorted(set(original_buckets) | set(modified_buckets))
-        comparison: dict[str, Any] = {}
-        for key in keys:
-            original = self._summary_without_buckets(original_buckets.get(key, {}))
-            modified = self._summary_without_buckets(modified_buckets.get(key, {}))
-            comparison[key] = {
-                "original": original,
-                "modified": modified,
-                "delta_attack_success_rate": (
-                    modified["attack_success_rate"] - original["attack_success_rate"]
-                ),
-            }
-        return comparison
-
-    def _delta_attack_success_rate(
-        self,
-        original_summary: Mapping[str, Any],
-        modified_summary: Mapping[str, Any],
-    ) -> float:
-        original_rate = float(original_summary.get("attack_success_rate", 0.0))
-        modified_rate = float(modified_summary.get("attack_success_rate", 0.0))
-        return modified_rate - original_rate

@@ -49,6 +49,8 @@ class TestGraphGrpoConfig(unittest.TestCase):
         optuna = config["optuna"]
         benchmarks = config["benchmarks"]
         jailbreakbench = benchmarks["jailbreakbench"]
+        harmbench = benchmarks["harmbench"]
+        official_classifier = harmbench["official_classifier"]
 
         self.assertEqual(model["batch_size"], 32)
         self.assertEqual(data["category_dataset_source"], "combined")
@@ -69,6 +71,17 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertEqual(jailbreakbench["max_samples"], 100)
         self.assertEqual(jailbreakbench["categories"], [])
         self.assertEqual(jailbreakbench["harmful_score_threshold"], 3)
+        self.assertEqual(harmbench["judge_mode"], "official")
+        self.assertEqual(harmbench["split"], "test")
+        self.assertEqual(harmbench["max_samples"], 0)
+        self.assertEqual(harmbench["categories"], [])
+        self.assertEqual(harmbench["functional_categories"], [])
+        self.assertEqual(harmbench["semantic_categories"], [])
+        self.assertEqual(harmbench["harmful_score_threshold"], 3)
+        self.assertEqual(official_classifier["model_name"], "cais/HarmBench-Llama-2-13b-cls")
+        self.assertEqual(official_classifier["batch_size"], 8)
+        self.assertEqual(official_classifier["device"], "cuda")
+        self.assertEqual(official_classifier["dtype"], "bfloat16")
 
     def test_apply_config_to_env_sets_new_grpo_env_vars_without_alphas(self):
         config = load_config("graph_grpo")
@@ -96,6 +109,17 @@ class TestGraphGrpoConfig(unittest.TestCase):
             self.assertEqual(os.environ["JAILBREAKBENCH_MAX_SAMPLES"], "100")
             self.assertEqual(os.environ["JAILBREAKBENCH_CATEGORIES"], "")
             self.assertEqual(os.environ["JAILBREAKBENCH_HARMFUL_SCORE_THRESHOLD"], "3")
+            self.assertEqual(os.environ["HARMBENCH_JUDGE_MODE"], "official")
+            self.assertEqual(os.environ["HARMBENCH_SPLIT"], "test")
+            self.assertEqual(os.environ["HARMBENCH_MAX_SAMPLES"], "0")
+            self.assertEqual(os.environ["HARMBENCH_CATEGORIES"], "")
+            self.assertEqual(os.environ["HARMBENCH_FUNCTIONAL_CATEGORIES"], "")
+            self.assertEqual(os.environ["HARMBENCH_SEMANTIC_CATEGORIES"], "")
+            self.assertEqual(os.environ["HARMBENCH_HARMFUL_SCORE_THRESHOLD"], "3")
+            self.assertEqual(os.environ["HARMBENCH_OFFICIAL_CLASSIFIER_MODEL_NAME"], "cais/HarmBench-Llama-2-13b-cls")
+            self.assertEqual(os.environ["HARMBENCH_OFFICIAL_CLASSIFIER_BATCH_SIZE"], "8")
+            self.assertEqual(os.environ["HARMBENCH_OFFICIAL_CLASSIFIER_DEVICE"], "cuda")
+            self.assertEqual(os.environ["HARMBENCH_OFFICIAL_CLASSIFIER_DTYPE"], "bfloat16")
             self.assertNotIn("GRPO_ALPHAS", os.environ)
 
     def test_run_graph_grpo_script_uses_average_init_and_debug_false(self):

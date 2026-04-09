@@ -201,6 +201,43 @@ def apply_config_to_env(config: dict[str, Any], model_name: str | None = None):
         jbb.get("harmful_score_threshold", 3)
     )
 
+    harmbench = benchmarks.get("harmbench", {})
+    os.environ["HARMBENCH_JUDGE_MODE"] = str(
+        harmbench.get("judge_mode", "official")
+    )
+    os.environ["HARMBENCH_SPLIT"] = str(harmbench.get("split", "test"))
+    os.environ["HARMBENCH_MAX_SAMPLES"] = str(harmbench.get("max_samples", 0))
+    os.environ["HARMBENCH_CATEGORIES"] = ",".join(
+        str(item).strip() for item in harmbench.get("categories", []) if str(item).strip()
+    )
+    os.environ["HARMBENCH_FUNCTIONAL_CATEGORIES"] = ",".join(
+        str(item).strip()
+        for item in harmbench.get("functional_categories", [])
+        if str(item).strip()
+    )
+    os.environ["HARMBENCH_SEMANTIC_CATEGORIES"] = ",".join(
+        str(item).strip()
+        for item in harmbench.get("semantic_categories", [])
+        if str(item).strip()
+    )
+    os.environ["HARMBENCH_HARMFUL_SCORE_THRESHOLD"] = str(
+        harmbench.get("harmful_score_threshold", 3)
+    )
+
+    official_classifier = harmbench.get("official_classifier", {})
+    os.environ["HARMBENCH_OFFICIAL_CLASSIFIER_MODEL_NAME"] = str(
+        official_classifier.get("model_name", "cais/HarmBench-Llama-2-13b-cls")
+    )
+    os.environ["HARMBENCH_OFFICIAL_CLASSIFIER_BATCH_SIZE"] = str(
+        official_classifier.get("batch_size", 8)
+    )
+    os.environ["HARMBENCH_OFFICIAL_CLASSIFIER_DEVICE"] = str(
+        official_classifier.get("device", "cuda")
+    )
+    os.environ["HARMBENCH_OFFICIAL_CLASSIFIER_DTYPE"] = str(
+        official_classifier.get("dtype", "bfloat16")
+    )
+
 
 def print_config_summary(config: dict[str, Any], model_name: str):
     """Display a summary of the loaded configuration."""

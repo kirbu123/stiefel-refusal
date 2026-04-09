@@ -38,3 +38,19 @@ def get_benchmark_attack_success_rate(
     if attack_success_rate is None:
         return None
     return float(attack_success_rate)
+
+
+def get_benchmark_attack_success_rates(
+    benchmark_results: Mapping[str, Any] | None,
+) -> dict[str, float]:
+    if not benchmark_results:
+        return {}
+
+    rates: dict[str, float] = {}
+    for benchmark_name, benchmark_block in benchmark_results.items():
+        modified = dict(benchmark_block.get("modified", {}))
+        attack_success_rate = modified.get("attack_success_rate")
+        if attack_success_rate is None:
+            continue
+        rates[str(benchmark_name)] = float(attack_success_rate)
+    return rates

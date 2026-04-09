@@ -26,6 +26,22 @@ SUPPORTED_JAILBREAKBENCH_CATEGORIES = (
     "Government decision-making",
 )
 
+SUPPORTED_HARMBENCH_FUNCTIONAL_CATEGORIES = (
+    "contextual",
+    "copyright",
+    "standard",
+)
+
+SUPPORTED_HARMBENCH_SEMANTIC_CATEGORIES = (
+    "chemical_biological",
+    "copyright",
+    "cybercrime_intrusion",
+    "harassment_bullying",
+    "harmful",
+    "illegal",
+    "misinformation_disinformation",
+)
+
 
 def _load_combined_datasets_with_categories() -> Tuple[List[Dict], List[str]]:
     """Load all processed datasets and combine them."""

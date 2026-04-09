@@ -14,6 +14,22 @@ DEFAULT_JAILBREAKBENCH_CONFIG = {
     "harmful_score_threshold": 3,
 }
 
+DEFAULT_HARMBENCH_CONFIG = {
+    "judge_mode": "official",
+    "split": "test",
+    "max_samples": 0,
+    "categories": [],
+    "functional_categories": [],
+    "semantic_categories": [],
+    "harmful_score_threshold": 3,
+    "official_classifier": {
+        "model_name": "cais/HarmBench-Llama-2-13b-cls",
+        "batch_size": 8,
+        "device": "cuda",
+        "dtype": "bfloat16",
+    },
+}
+
 
 def normalize_enabled_benchmarks(raw_value: Any) -> tuple[str, ...]:
     """Normalize BENCHMARKS_ENABLED from env/config into a stable tuple."""
@@ -66,6 +82,57 @@ def normalize_jailbreakbench_config(
     }
 
 
+def _normalize_string_list(raw_values: Any) -> list[str]:
+    if isinstance(raw_values, str):
+        return [part.strip() for part in raw_values.split(",") if part.strip()]
+    return [str(part).strip() for part in raw_values or [] if str(part).strip()]
+
+
+def normalize_harmbench_config(
+    raw_config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    config = dict(DEFAULT_HARMBENCH_CONFIG)
+    config["official_classifier"] = dict(DEFAULT_HARMBENCH_CONFIG["official_classifier"])
+    if raw_config:
+        raw_copy = dict(raw_config)
+        raw_classifier = raw_copy.pop("official_classifier", None)
+        config.update(raw_copy)
+        if raw_classifier:
+            config["official_classifier"].update(dict(raw_classifier))
+
+    judge_mode = str(config.get("judge_mode", "official")).strip().lower() or "official"
+    split = str(config.get("split", "test")).strip().lower() or "test"
+    raw_max_samples = config.get("max_samples", 0)
+    max_samples = int(raw_max_samples) if raw_max_samples is not None else 0
+    harmful_score_threshold = int(config.get("harmful_score_threshold", 3))
+
+    official_classifier = dict(DEFAULT_HARMBENCH_CONFIG["official_classifier"])
+    official_classifier.update(dict(config.get("official_classifier", {})))
+    official_classifier = {
+        "model_name": str(
+            official_classifier.get("model_name", "cais/HarmBench-Llama-2-13b-cls")
+        ).strip() or "cais/HarmBench-Llama-2-13b-cls",
+        "batch_size": int(official_classifier.get("batch_size", 8)),
+        "device": str(official_classifier.get("device", "cuda")).strip() or "cuda",
+        "dtype": str(official_classifier.get("dtype", "bfloat16")).strip().lower() or "bfloat16",
+    }
+
+    return {
+        "judge_mode": judge_mode,
+        "split": split,
+        "max_samples": max_samples,
+        "categories": _normalize_string_list(config.get("categories", [])),
+        "functional_categories": _normalize_string_list(
+            config.get("functional_categories", [])
+        ),
+        "semantic_categories": _normalize_string_list(
+            config.get("semantic_categories", [])
+        ),
+        "harmful_score_threshold": harmful_score_threshold,
+        "official_classifier": official_classifier,
+    }
+
+
 def get_enabled_benchmark_configs() -> dict[str, dict[str, Any]]:
     """
     Resolve enabled benchmark configs from the project's config module.
@@ -81,13 +148,26 @@ def get_enabled_benchmark_configs() -> dict[str, dict[str, Any]]:
     if not enabled:
         return {}
 
+    config_specs = {
+        "jailbreakbench": (
+            "JAILBREAKBENCH_CONFIG",
+            normalize_jailbreakbench_config,
+        ),
+        "harmbench": (
+            "HARMBENCH_CONFIG",
+            normalize_harmbench_config,
+        ),
+    }
+
     configs: dict[str, dict[str, Any]] = {}
-
-    if "jailbreakbench" in enabled:
-        raw_jbb_config = getattr(project_config, "JAILBREAKBENCH_CONFIG", {})
-        configs["jailbreakbench"] = normalize_jailbreakbench_config(raw_jbb_config)
-
     for benchmark_name in enabled:
-        configs.setdefault(benchmark_name, {})
+        spec = config_specs.get(benchmark_name)
+        if spec is None:
+            configs.setdefault(benchmark_name, {})
+            continue
+
+        attr_name, normalizer = spec
+        raw_config = getattr(project_config, attr_name, {})
+        configs[benchmark_name] = normalizer(raw_config)
 
     return configs
