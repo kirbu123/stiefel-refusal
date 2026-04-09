@@ -37,8 +37,10 @@ class BenchmarkRegistry:
 
 @lru_cache(maxsize=1)
 def get_default_registry() -> BenchmarkRegistry:
+    from .harmbench import HarmBenchBenchmark
     from .jailbreakbench import JailbreakBenchBenchmark
 
     registry = BenchmarkRegistry()
+    registry.register(HarmBenchBenchmark())
     registry.register(JailbreakBenchBenchmark())
     return registry

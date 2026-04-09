@@ -113,12 +113,16 @@ class TestGraphGrpoMain(unittest.TestCase):
                     self.prepare_calls = 0
                     self.run_labels = []
 
+                def enabled_benchmark_names(self):
+                    return tuple(sorted(self.results))
+
                 def prepare_original(self, model):
                     self.prepare_calls += 1
                     return {
-                        "jailbreakbench": {
-                            "attack_success_rate": self.results["jailbreakbench"]["original"]["attack_success_rate"]
+                        benchmark_name: {
+                            "attack_success_rate": benchmark_block["original"]["attack_success_rate"]
                         }
+                        for benchmark_name, benchmark_block in self.results.items()
                     }
 
                 def evaluate_modified(self, model, run_label):
@@ -249,6 +253,13 @@ class TestGraphGrpoMain(unittest.TestCase):
         fake_benchmarks_integration.get_benchmark_attack_success_rate = (
             lambda results, benchmark_name: results.get(benchmark_name, {}).get("modified", {}).get("attack_success_rate")
             if results else None
+        )
+        fake_benchmarks_integration.get_benchmark_attack_success_rates = (
+            lambda results: {
+                benchmark_name: float(benchmark_block["modified"]["attack_success_rate"])
+                for benchmark_name, benchmark_block in (results or {}).items()
+                if benchmark_block.get("modified", {}).get("attack_success_rate") is not None
+            }
         )
 
         fake_optuna = types.ModuleType("baselines.graph_grpo.optuna_optimizer")
@@ -694,7 +705,7 @@ class TestGraphGrpoMain(unittest.TestCase):
             "best_trial_mean_objective",
         )
 
-    def test_main_saves_benchmark_block_and_logs_jailbreakbench_series(self):
+    def test_main_saves_benchmark_blocks_and_logs_generic_series(self):
         dataset = [
             {"instruction": "physical-question-1", "category": "Physical harm", "source": "combined"},
             {"instruction": "physical-question-2", "category": "Physical harm", "source": "combined"},
@@ -708,6 +719,17 @@ class TestGraphGrpoMain(unittest.TestCase):
                 "details_file": {"original": "orig.json", "modified": "mod.json"},
                 "by_category": {},
                 "by_source": {},
+            },
+            "harmbench": {
+                "original": {"attack_success_rate": 0.1},
+                "modified": {"attack_success_rate": 0.4},
+                "delta_attack_success_rate": 0.3,
+                "config": {"judge_mode": "official", "split": "test"},
+                "details_file": {"original": "harm_orig.json", "modified": "harm_mod.json"},
+                "by_split": {},
+                "by_category": {},
+                "by_functional_category": {},
+                "by_semantic_category": {},
             }
         }
 
@@ -727,6 +749,10 @@ class TestGraphGrpoMain(unittest.TestCase):
             result["answers_data"]["benchmarks"]["jailbreakbench"]["modified"]["attack_success_rate"],
             0.6,
         )
+        self.assertAlmostEqual(
+            result["answers_data"]["benchmarks"]["harmbench"]["modified"]["attack_success_rate"],
+            0.4,
+        )
         self.assertEqual(result["benchmark_runner"].prepare_calls, 1)
         self.assertEqual(
             result["benchmark_runner"].run_labels,
@@ -743,6 +769,18 @@ class TestGraphGrpoMain(unittest.TestCase):
         self.assertTrue(
             any(
                 "best_value_model/jailbreakbench_attack_success_rate" in payload
+                for payload in scalar_payloads
+            )
+        )
+        self.assertTrue(
+            any(
+                "clean_model/harmbench_attack_success_rate" in payload
+                for payload in scalar_payloads
+            )
+        )
+        self.assertTrue(
+            any(
+                "best_value_model/harmbench_attack_success_rate" in payload
                 for payload in scalar_payloads
             )
         )

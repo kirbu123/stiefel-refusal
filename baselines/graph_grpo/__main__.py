@@ -58,7 +58,7 @@ from evaluate.mmlu import (
 )
 from benchmarks.integration import (
     build_benchmark_runner,
-    get_benchmark_attack_success_rate,
+    get_benchmark_attack_success_rates,
 )
 
 from baselines.graph_grpo.optuna_optimizer import optimize_weights_with_optuna
@@ -235,7 +235,9 @@ def _build_wandb_run_name(
     return "_".join(parts)
 
 
-def _define_model_state_eval_metrics() -> None:
+def _define_model_state_eval_metrics(
+    benchmark_names: List[str] | None = None,
+) -> None:
     """Register shared wandb series so clean and best-value land on the same charts."""
     if not WANDB_AVAILABLE or not hasattr(wandb, "define_metric"):
         return
@@ -249,10 +251,11 @@ def _define_model_state_eval_metrics() -> None:
         "model_state_eval/harmfulness_on_full_dataset",
         step_metric="model_state_eval/point_index",
     )
-    wandb.define_metric(
-        "model_state_eval/jailbreakbench_attack_success_rate",
-        step_metric="model_state_eval/point_index",
-    )
+    for benchmark_name in benchmark_names or []:
+        wandb.define_metric(
+            f"model_state_eval/{benchmark_name}_attack_success_rate",
+            step_metric="model_state_eval/point_index",
+        )
 
 
 def _log_model_state_eval(
@@ -261,7 +264,7 @@ def _log_model_state_eval(
     point_name: str,
     harmfulness_on_full_dataset: Optional[float],
     mmlu_score: Optional[float],
-    jailbreakbench_attack_success_rate: Optional[float],
+    benchmark_attack_success_rates: Optional[Dict[str, float]] = None,
 ) -> None:
     """Log scalar and shared-series wandb metrics for clean/best model comparisons."""
     if not WANDB_AVAILABLE:
@@ -286,14 +289,14 @@ def _log_model_state_eval(
                 payload[f"{prefix}/mmlu_accuracy"] = mmlu_score
         payload["model_state_eval/mmlu_score"] = mmlu_score
 
-    if jailbreakbench_attack_success_rate is not None:
+    for benchmark_name, attack_success_rate in (benchmark_attack_success_rates or {}).items():
         for prefix in prefixes:
             payload[
-                f"{prefix}/jailbreakbench_attack_success_rate"
-            ] = jailbreakbench_attack_success_rate
+                f"{prefix}/{benchmark_name}_attack_success_rate"
+            ] = attack_success_rate
         payload[
-            "model_state_eval/jailbreakbench_attack_success_rate"
-        ] = jailbreakbench_attack_success_rate
+            f"model_state_eval/{benchmark_name}_attack_success_rate"
+        ] = attack_success_rate
 
     wandb.log(payload)
 
@@ -681,7 +684,9 @@ def main():
                 "reward_sign": reward_sign,
             },
         )
-        _define_model_state_eval_metrics()
+        _define_model_state_eval_metrics(
+            list(benchmark_runner.enabled_benchmark_names()) if benchmark_runner is not None else []
+        )
 
     print("\n" + "=" * 80)
     print("CLEAN MODEL EVALUATION")
@@ -707,11 +712,11 @@ def main():
     if benchmark_runner is not None:
         print("Evaluating clean model on benchmarks...")
         clean_benchmark_summaries = benchmark_runner.prepare_original(model)
-    clean_jailbreakbench_asr = None
-    if "jailbreakbench" in clean_benchmark_summaries:
-        clean_jailbreakbench_asr = clean_benchmark_summaries["jailbreakbench"].get(
-            "attack_success_rate"
-        )
+    clean_benchmark_attack_success_rates = {
+        benchmark_name: float(summary["attack_success_rate"])
+        for benchmark_name, summary in clean_benchmark_summaries.items()
+        if summary.get("attack_success_rate") is not None
+    }
 
     _log_model_state_eval(
         prefixes=["clean_model"],
@@ -719,7 +724,7 @@ def main():
         point_name="clean",
         harmfulness_on_full_dataset=clean_mean_harmfulness,
         mmlu_score=clean_mmlu_score,
-        jailbreakbench_attack_success_rate=clean_jailbreakbench_asr,
+        benchmark_attack_success_rates=clean_benchmark_attack_success_rates,
     )
 
     if optimizer_method == "grpo":
@@ -843,9 +848,8 @@ def main():
     best_batch_model_mmlu_score = None
     if final_result["mmlu_block"] is not None:
         best_batch_model_mmlu_score = final_result["mmlu_block"]["modified"]["accuracy"]
-    best_batch_model_jailbreakbench_asr = get_benchmark_attack_success_rate(
+    best_batch_model_benchmark_attack_success_rates = get_benchmark_attack_success_rates(
         final_result["benchmarks"],
-        "jailbreakbench",
     )
 
     best_model_prefixes = ["best_value_model"]
@@ -858,7 +862,7 @@ def main():
         point_name="best_value",
         harmfulness_on_full_dataset=best_batch_model_mean_harmfulness,
         mmlu_score=best_batch_model_mmlu_score,
-        jailbreakbench_attack_success_rate=best_batch_model_jailbreakbench_asr,
+        benchmark_attack_success_rates=best_batch_model_benchmark_attack_success_rates,
     )
 
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
