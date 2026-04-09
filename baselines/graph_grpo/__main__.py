@@ -56,6 +56,10 @@ from evaluate.mmlu import (
     evaluate_model_on_mmlu,
     get_cached_or_evaluate_original_mmlu,
 )
+from benchmarks.integration import (
+    build_benchmark_runner,
+    get_benchmark_attack_success_rate,
+)
 
 from baselines.graph_grpo.optuna_optimizer import optimize_weights_with_optuna
 from baselines.graph_grpo.trainer import train_grpo_is_step
@@ -245,6 +249,10 @@ def _define_model_state_eval_metrics() -> None:
         "model_state_eval/harmfulness_on_full_dataset",
         step_metric="model_state_eval/point_index",
     )
+    wandb.define_metric(
+        "model_state_eval/jailbreakbench_attack_success_rate",
+        step_metric="model_state_eval/point_index",
+    )
 
 
 def _log_model_state_eval(
@@ -253,6 +261,7 @@ def _log_model_state_eval(
     point_name: str,
     harmfulness_on_full_dataset: Optional[float],
     mmlu_score: Optional[float],
+    jailbreakbench_attack_success_rate: Optional[float],
 ) -> None:
     """Log scalar and shared-series wandb metrics for clean/best model comparisons."""
     if not WANDB_AVAILABLE:
@@ -276,6 +285,15 @@ def _log_model_state_eval(
             if prefix in {"clean_model", "best_value_model"}:
                 payload[f"{prefix}/mmlu_accuracy"] = mmlu_score
         payload["model_state_eval/mmlu_score"] = mmlu_score
+
+    if jailbreakbench_attack_success_rate is not None:
+        for prefix in prefixes:
+            payload[
+                f"{prefix}/jailbreakbench_attack_success_rate"
+            ] = jailbreakbench_attack_success_rate
+        payload[
+            "model_state_eval/jailbreakbench_attack_success_rate"
+        ] = jailbreakbench_attack_success_rate
 
     wandb.log(payload)
 
@@ -389,6 +407,8 @@ def _final_evaluate(
     n_layers: int,
     original_mmlu_result: Optional[Dict[str, Any]],
     results_dir: Path,
+    benchmark_runner=None,
+    benchmark_run_label: str = "graph_grpo_final",
 ) -> Dict[str, Any]:
     print("\n" + "=" * 80)
     print("FINAL EVALUATION")
@@ -425,6 +445,14 @@ def _final_evaluate(
                 f"{mmlu_block['original']['accuracy']:.4f} -> {mmlu_block['modified']['accuracy']:.4f}"
             )
 
+    benchmark_results = {}
+    if benchmark_runner is not None:
+        print("Evaluating modified model on benchmarks...")
+        benchmark_results = benchmark_runner.evaluate_modified(
+            model,
+            run_label=benchmark_run_label,
+        )
+
     harmfulness_result = _evaluate_model_harmfulness(
         model=model,
         questions=category_questions,
@@ -436,6 +464,7 @@ def _final_evaluate(
         "scores": harmfulness_result["scores"],
         "final_mean_harmfulness": harmfulness_result["mean_harmfulness"],
         "mmlu_block": mmlu_block,
+        "benchmarks": benchmark_results,
     }
 
 
@@ -619,6 +648,11 @@ def main():
     print(f"Loaded {len(all_category_questions)} total question(s) for category '{category_name}'")
 
     classifier_categories = _load_classifier_categories()
+    benchmark_runner = build_benchmark_runner(
+        method_results_dir=GRPO_RESULTS_DIR,
+        model_name=MODEL_NAME,
+        classifier_categories=classifier_categories,
+    )
 
     if WANDB_AVAILABLE:
         wandb.init(
@@ -669,12 +703,23 @@ def main():
     if original_mmlu_result is not None:
         clean_mmlu_score = original_mmlu_result["summary"]["accuracy"]
 
+    clean_benchmark_summaries = {}
+    if benchmark_runner is not None:
+        print("Evaluating clean model on benchmarks...")
+        clean_benchmark_summaries = benchmark_runner.prepare_original(model)
+    clean_jailbreakbench_asr = None
+    if "jailbreakbench" in clean_benchmark_summaries:
+        clean_jailbreakbench_asr = clean_benchmark_summaries["jailbreakbench"].get(
+            "attack_success_rate"
+        )
+
     _log_model_state_eval(
         prefixes=["clean_model"],
         point_index=0,
         point_name="clean",
         harmfulness_on_full_dataset=clean_mean_harmfulness,
         mmlu_score=clean_mmlu_score,
+        jailbreakbench_attack_success_rate=clean_jailbreakbench_asr,
     )
 
     if optimizer_method == "grpo":
@@ -753,6 +798,7 @@ def main():
                 )
             )
 
+    category_safe_name = category_name.replace("/", "_").replace(" ", "_")
     final_result = _final_evaluate(
         direction_weights=direction_weights,
         extracted_directions=extracted_directions,
@@ -762,6 +808,8 @@ def main():
         n_layers=n_layers,
         original_mmlu_result=original_mmlu_result,
         results_dir=GRPO_RESULTS_DIR,
+        benchmark_runner=benchmark_runner,
+        benchmark_run_label=f"graph_grpo_{category_safe_name}",
     )
 
     final_mean_harmfulness = final_result["final_mean_harmfulness"]
@@ -795,6 +843,10 @@ def main():
     best_batch_model_mmlu_score = None
     if final_result["mmlu_block"] is not None:
         best_batch_model_mmlu_score = final_result["mmlu_block"]["modified"]["accuracy"]
+    best_batch_model_jailbreakbench_asr = get_benchmark_attack_success_rate(
+        final_result["benchmarks"],
+        "jailbreakbench",
+    )
 
     best_model_prefixes = ["best_value_model"]
     if optimizer_method == "grpo":
@@ -806,9 +858,9 @@ def main():
         point_name="best_value",
         harmfulness_on_full_dataset=best_batch_model_mean_harmfulness,
         mmlu_score=best_batch_model_mmlu_score,
+        jailbreakbench_attack_success_rate=best_batch_model_jailbreakbench_asr,
     )
 
-    category_safe_name = category_name.replace("/", "_").replace(" ", "_")
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     answers_data = {
@@ -856,6 +908,8 @@ def main():
         answers_data["optimization_history"] = optimization_result["optimization_history"]
     if final_result["mmlu_block"] is not None:
         answers_data["mmlu"] = final_result["mmlu_block"]
+    if final_result["benchmarks"]:
+        answers_data["benchmarks"] = final_result["benchmarks"]
 
     answers_file = GRPO_ANSWERS_DIR / f"answers_{category_safe_name}_{timestamp_str}.json"
     with open(answers_file, "w", encoding="utf-8") as f:

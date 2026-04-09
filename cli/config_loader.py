@@ -187,6 +187,20 @@ def apply_config_to_env(config: dict[str, Any], model_name: str | None = None):
     if mmlu.get("store_predictions") is not None:
         os.environ["MMLU_STORE_PREDICTIONS"] = str(mmlu["store_predictions"]).lower()
 
+    benchmarks = config.get("benchmarks", {})
+    enabled_benchmarks = benchmarks.get("enabled", [])
+    os.environ["BENCHMARKS_ENABLED"] = ",".join(str(item).strip() for item in enabled_benchmarks if str(item).strip())
+
+    jbb = benchmarks.get("jailbreakbench", {})
+    os.environ["JAILBREAKBENCH_JUDGE_MODE"] = str(jbb.get("judge_mode", "project"))
+    os.environ["JAILBREAKBENCH_MAX_SAMPLES"] = str(jbb.get("max_samples", 100))
+    os.environ["JAILBREAKBENCH_CATEGORIES"] = ",".join(
+        str(item).strip() for item in jbb.get("categories", []) if str(item).strip()
+    )
+    os.environ["JAILBREAKBENCH_HARMFUL_SCORE_THRESHOLD"] = str(
+        jbb.get("harmful_score_threshold", 3)
+    )
+
 
 def print_config_summary(config: dict[str, Any], model_name: str):
     """Display a summary of the loaded configuration."""
@@ -252,4 +266,10 @@ def print_config_summary(config: dict[str, Any], model_name: str):
     if mmlu:
         print("  [bold]MMLU:[/]")
         for k, v in mmlu.items():
+            print(f"    {k}: {v}")
+
+    benchmarks = config.get("benchmarks", {})
+    if benchmarks:
+        print("  [bold]Benchmarks:[/]")
+        for k, v in benchmarks.items():
             print(f"    {k}: {v}")

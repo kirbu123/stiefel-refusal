@@ -4,6 +4,8 @@ set -euo pipefail
 
 CATEGORY_DATASET_SOURCE="${CATEGORY_DATASET_SOURCE:-jailbreakbench}"
 CATEGORY_FILTER="${CATEGORY_FILTER:-Physical harm}"
+CLI_CATEGORY_DATASET_SOURCE_SET=0
+CLI_CATEGORY_SET=0
 
 usage() {
   echo "Usage: $0 [--category-dataset-source combined|jailbreakbench] [--category <name>]" >&2
@@ -40,6 +42,7 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       CATEGORY_DATASET_SOURCE="$2"
+      CLI_CATEGORY_DATASET_SOURCE_SET=1
       shift 2
       ;;
     --category)
@@ -49,6 +52,7 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       CATEGORY_FILTER="$2"
+      CLI_CATEGORY_SET=1
       shift 2
       ;;
     -h|--help)
@@ -67,6 +71,10 @@ validate_category_dataset_source "$CATEGORY_DATASET_SOURCE"
 
 if [[ -n "$CATEGORY_FILTER" ]]; then
   validate_category "$CATEGORY_FILTER"
+  if [[ "$CLI_CATEGORY_SET" -eq 1 && "$CLI_CATEGORY_DATASET_SOURCE_SET" -eq 0 ]]; then
+    echo "Error: --category requires --category-dataset-source jailbreakbench." >&2
+    exit 1
+  fi
   if [[ "$CATEGORY_DATASET_SOURCE" != "jailbreakbench" ]]; then
     echo "Error: --category requires --category-dataset-source jailbreakbench." >&2
     exit 1

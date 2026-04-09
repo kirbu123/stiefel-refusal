@@ -47,6 +47,8 @@ class TestGraphGrpoConfig(unittest.TestCase):
         weights = config["weights"]
         optimizer = config["optimizer"]
         optuna = config["optuna"]
+        benchmarks = config["benchmarks"]
+        jailbreakbench = benchmarks["jailbreakbench"]
 
         self.assertEqual(model["batch_size"], 32)
         self.assertEqual(data["category_dataset_source"], "combined")
@@ -62,6 +64,11 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertEqual(optuna["weight_max"], 2.0)
         self.assertEqual(weights["mode"], "scalar")
         self.assertEqual(weights["init_type"], "average")
+        self.assertEqual(benchmarks["enabled"], [])
+        self.assertEqual(jailbreakbench["judge_mode"], "project")
+        self.assertEqual(jailbreakbench["max_samples"], 100)
+        self.assertEqual(jailbreakbench["categories"], [])
+        self.assertEqual(jailbreakbench["harmful_score_threshold"], 3)
 
     def test_apply_config_to_env_sets_new_grpo_env_vars_without_alphas(self):
         config = load_config("graph_grpo")
@@ -84,6 +91,11 @@ class TestGraphGrpoConfig(unittest.TestCase):
             self.assertEqual(os.environ["OPTUNA_SAMPLER_SEED"], "42")
             self.assertEqual(os.environ["OPTUNA_WEIGHT_MIN"], "-2.0")
             self.assertEqual(os.environ["OPTUNA_WEIGHT_MAX"], "2.0")
+            self.assertEqual(os.environ["BENCHMARKS_ENABLED"], "")
+            self.assertEqual(os.environ["JAILBREAKBENCH_JUDGE_MODE"], "project")
+            self.assertEqual(os.environ["JAILBREAKBENCH_MAX_SAMPLES"], "100")
+            self.assertEqual(os.environ["JAILBREAKBENCH_CATEGORIES"], "")
+            self.assertEqual(os.environ["JAILBREAKBENCH_HARMFUL_SCORE_THRESHOLD"], "3")
             self.assertNotIn("GRPO_ALPHAS", os.environ)
 
     def test_run_graph_grpo_script_uses_average_init_and_debug_false(self):
