@@ -260,6 +260,36 @@ def apply_config_to_env(config: dict[str, Any], model_name: str | None = None):
         official_classifier.get("dtype", "bfloat16")
     )
 
+    malicious_instruct = benchmarks.get("malicious_instruct", {})
+    os.environ["MALICIOUS_INSTRUCT_JUDGE_MODE"] = str(
+        malicious_instruct.get("judge_mode", "official")
+    )
+    os.environ["MALICIOUS_INSTRUCT_MAX_SAMPLES"] = str(
+        malicious_instruct.get("max_samples", 0)
+    )
+    os.environ["MALICIOUS_INSTRUCT_CATEGORIES"] = ",".join(
+        str(item).strip()
+        for item in malicious_instruct.get("categories", [])
+        if str(item).strip()
+    )
+    os.environ["MALICIOUS_INSTRUCT_HARMFUL_SCORE_THRESHOLD"] = str(
+        malicious_instruct.get("harmful_score_threshold", 3)
+    )
+
+    official_evaluator = malicious_instruct.get("official_evaluator", {})
+    os.environ["MALICIOUS_INSTRUCT_OFFICIAL_EVALUATOR_MODEL_NAME"] = str(
+        official_evaluator.get(
+            "model_name",
+            "LibrAI/maliciousinstruct-evaluator",
+        )
+    )
+    os.environ["MALICIOUS_INSTRUCT_OFFICIAL_EVALUATOR_BATCH_SIZE"] = str(
+        official_evaluator.get("batch_size", 32)
+    )
+    os.environ["MALICIOUS_INSTRUCT_OFFICIAL_EVALUATOR_DEVICE"] = str(
+        official_evaluator.get("device", "cuda")
+    )
+
 
 def print_config_summary(config: dict[str, Any], model_name: str):
     """Display a summary of the loaded configuration."""
