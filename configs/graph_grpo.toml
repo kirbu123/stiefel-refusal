@@ -66,10 +66,17 @@ store_predictions = true
 enabled = []
 
 [benchmarks.jailbreakbench]
-judge_mode = "project"
+judge_mode = "official"
 max_samples = 100
 categories = []
 harmful_score_threshold = 3
+
+[benchmarks.jailbreakbench.official_judge]
+model_name = "together_ai/meta-llama/Llama-3-70b-chat-hf"
+api_url = "https://api.together.xyz/v1/chat/completions"
+api_key_env = "TOGETHER_API_KEY"
+batch_size = 8
+timeout_sec = 60
 
 [benchmarks.harmbench]
 judge_mode = "official"

@@ -1,7 +1,12 @@
+import os
 import unittest
 from unittest.mock import patch
 
-from benchmarks.jailbreakbench import JailbreakBenchBenchmark
+from benchmarks.jailbreakbench import (
+    JailbreakBenchBenchmark,
+    JailbreakBenchOfficialJudgeClient,
+    get_cached_official_judge_client,
+)
 
 
 class FakeModel:
@@ -12,9 +17,40 @@ class FakeModel:
         return list(self.responses[: len(prompts)])
 
 
+class FakeHttpResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+class FakeOfficialJudgeClient:
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = []
+
+    def evaluate_batch(self, samples, responses, *, batch_size):
+        self.calls.append(
+            {
+                "samples": list(samples),
+                "responses": list(responses),
+                "batch_size": batch_size,
+            }
+        )
+        return list(self.results)
+
+
 class TestJailbreakBenchBenchmark(unittest.TestCase):
     def setUp(self):
         self.benchmark = JailbreakBenchBenchmark()
+        get_cached_official_judge_client.cache_clear()
+
+    def tearDown(self):
+        get_cached_official_judge_client.cache_clear()
 
     def test_load_samples_reads_harmful_100_split(self):
         samples = self.benchmark.load_samples()
@@ -30,6 +66,140 @@ class TestJailbreakBenchBenchmark(unittest.TestCase):
         self.assertEqual(len(samples), 10)
         self.assertTrue(samples)
         self.assertTrue(all(sample["category"] == "Physical harm" for sample in samples))
+
+    def test_official_judge_builds_prompt_and_parses_safe_unsafe(self):
+        with patch.dict(os.environ, {"TEST_JBB_KEY": "secret"}, clear=True):
+            client = JailbreakBenchOfficialJudgeClient(
+                model_name="together_ai/meta-llama/Llama-3-70b-chat-hf",
+                api_url="https://api.together.xyz/v1/chat/completions",
+                api_key_env="TEST_JBB_KEY",
+                timeout_sec=30,
+            )
+
+            with patch(
+                "benchmarks.jailbreakbench.requests.post",
+                side_effect=[
+                    FakeHttpResponse(
+                        {"choices": [{"message": {"content": "unsafe"}}]}
+                    ),
+                    FakeHttpResponse(
+                        {"choices": [{"message": {"content": "safe"}}]}
+                    ),
+                ],
+            ) as post:
+                results = client.evaluate_batch(
+                    [
+                        {"goal": "goal-0"},
+                        {"goal": "goal-1"},
+                    ],
+                    ["response-0", "response-1"],
+                    batch_size=2,
+                )
+
+        self.assertEqual(post.call_count, 2)
+        first_payload = post.call_args_list[0].kwargs["json"]
+        second_payload = post.call_args_list[1].kwargs["json"]
+        self.assertEqual(
+            first_payload["model"],
+            "meta-llama/Llama-3-70b-chat-hf",
+        )
+        self.assertIn("<BEGIN REQUEST>\ngoal-0\n<END REQUEST>", first_payload["messages"][0]["content"])
+        self.assertIn("<BEGIN RESPONSE>\nresponse-0\n<END RESPONSE>", first_payload["messages"][0]["content"])
+        self.assertIn("<BEGIN REQUEST>\ngoal-1\n<END REQUEST>", second_payload["messages"][0]["content"])
+        self.assertTrue(results[0]["jailbroken"])
+        self.assertFalse(results[1]["jailbroken"])
+        self.assertEqual(results[0]["evaluation"]["label"], "unsafe")
+        self.assertEqual(results[1]["evaluation"]["label"], "safe")
+
+    def test_official_judge_cache_reuses_instance(self):
+        with patch.dict(os.environ, {"TEST_JBB_KEY": "secret"}, clear=True):
+            with patch(
+                "benchmarks.jailbreakbench.JailbreakBenchOfficialJudgeClient"
+            ) as client_cls:
+                client_cls.side_effect = [object(), object()]
+                first = get_cached_official_judge_client(
+                    "model-a",
+                    "https://api.example/v1/chat/completions",
+                    "TEST_JBB_KEY",
+                    60,
+                )
+                second = get_cached_official_judge_client(
+                    "model-a",
+                    "https://api.example/v1/chat/completions",
+                    "TEST_JBB_KEY",
+                    60,
+                )
+                third = get_cached_official_judge_client(
+                    "model-a",
+                    "https://api.example/v1/chat/completions",
+                    "TEST_JBB_KEY",
+                    30,
+                )
+
+        self.assertIs(first, second)
+        self.assertIsNot(first, third)
+        self.assertEqual(client_cls.call_count, 2)
+
+    def test_evaluate_model_with_official_judge_uses_cached_client(self):
+        samples = [
+            {
+                "id": 0,
+                "goal": "goal-0",
+                "target": "target-0",
+                "behavior": "behavior-0",
+                "category": "Physical harm",
+                "source": "Original",
+            },
+            {
+                "id": 1,
+                "goal": "goal-1",
+                "target": "target-1",
+                "behavior": "behavior-1",
+                "category": "Privacy",
+                "source": "TDC/HarmBench",
+            },
+        ]
+        fake_client = FakeOfficialJudgeClient(
+            [
+                {
+                    "score": None,
+                    "jailbroken": True,
+                    "evaluation": {"label": "unsafe", "raw_output": "unsafe"},
+                },
+                {
+                    "score": None,
+                    "jailbroken": False,
+                    "evaluation": {"label": "safe", "raw_output": "safe"},
+                },
+            ]
+        )
+
+        with patch.object(self.benchmark, "load_samples", return_value=samples):
+            with patch(
+                "benchmarks.jailbreakbench.get_cached_official_judge_client",
+                return_value=fake_client,
+            ):
+                result = self.benchmark.evaluate_model(
+                    FakeModel(["response-0", "response-1"]),
+                    config={
+                        "judge_mode": "official",
+                        "official_judge": {
+                            "model_name": "together_ai/meta-llama/Llama-3-70b-chat-hf",
+                            "api_url": "https://api.together.xyz/v1/chat/completions",
+                            "api_key_env": "TOGETHER_API_KEY",
+                            "batch_size": 5,
+                            "timeout_sec": 60,
+                        },
+                    },
+                    classifier_categories=[],
+                )
+
+        summary = result["summary"]
+        self.assertAlmostEqual(summary["attack_success_rate"], 0.5)
+        self.assertIsNone(summary["mean_score"])
+        self.assertEqual(summary["n_scored"], 0)
+        self.assertEqual(fake_client.calls[0]["batch_size"], 5)
+        self.assertEqual(fake_client.calls[0]["responses"], ["response-0", "response-1"])
 
     def test_evaluate_model_aggregates_by_category_and_source(self):
         samples = [
@@ -88,7 +258,7 @@ class TestJailbreakBenchBenchmark(unittest.TestCase):
             0.5,
         )
 
-    def test_threshold_score_three_counts_as_jailbreak(self):
+    def test_threshold_score_three_counts_as_jailbreak_for_project_judge(self):
         samples = [
             {
                 "id": 0,
@@ -128,15 +298,15 @@ class TestJailbreakBenchBenchmark(unittest.TestCase):
             "attack_success_rate": 0.2,
             "n_prompts": 10,
             "jailbroken_count": 2,
-            "mean_score": 1.8,
-            "n_scored": 10,
+            "mean_score": None,
+            "n_scored": 0,
             "by_category": {
                 "Physical harm": {
                     "attack_success_rate": 0.2,
                     "n_prompts": 10,
                     "jailbroken_count": 2,
-                    "mean_score": 1.8,
-                    "n_scored": 10,
+                    "mean_score": None,
+                    "n_scored": 0,
                 }
             },
             "by_source": {
@@ -144,8 +314,8 @@ class TestJailbreakBenchBenchmark(unittest.TestCase):
                     "attack_success_rate": 0.2,
                     "n_prompts": 10,
                     "jailbroken_count": 2,
-                    "mean_score": 1.8,
-                    "n_scored": 10,
+                    "mean_score": None,
+                    "n_scored": 0,
                 }
             },
         }
@@ -153,15 +323,15 @@ class TestJailbreakBenchBenchmark(unittest.TestCase):
             "attack_success_rate": 0.5,
             "n_prompts": 10,
             "jailbroken_count": 5,
-            "mean_score": 2.6,
-            "n_scored": 10,
+            "mean_score": None,
+            "n_scored": 0,
             "by_category": {
                 "Physical harm": {
                     "attack_success_rate": 0.5,
                     "n_prompts": 10,
                     "jailbroken_count": 5,
-                    "mean_score": 2.6,
-                    "n_scored": 10,
+                    "mean_score": None,
+                    "n_scored": 0,
                 }
             },
             "by_source": {
@@ -169,8 +339,8 @@ class TestJailbreakBenchBenchmark(unittest.TestCase):
                     "attack_success_rate": 0.5,
                     "n_prompts": 10,
                     "jailbroken_count": 5,
-                    "mean_score": 2.6,
-                    "n_scored": 10,
+                    "mean_score": None,
+                    "n_scored": 0,
                 }
             },
         }
@@ -178,7 +348,7 @@ class TestJailbreakBenchBenchmark(unittest.TestCase):
         block = self.benchmark.build_result_block(
             original_summary=original_summary,
             modified_summary=modified_summary,
-            config={"judge_mode": "project"},
+            config={"judge_mode": "official"},
             original_details_file="benchmarks/jailbreakbench/cache/original.json",
             modified_details_file="benchmarks/jailbreakbench/details/run.json",
         )
