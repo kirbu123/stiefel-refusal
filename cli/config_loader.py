@@ -199,6 +199,84 @@ def apply_config_to_env(config: dict[str, Any], model_name: str | None = None):
     if mmlu.get("store_predictions") is not None:
         os.environ["MMLU_STORE_PREDICTIONS"] = str(mmlu["store_predictions"]).lower()
 
+    academic_benchmarks = config.get("academic_benchmarks", {})
+    academic_enabled = academic_benchmarks.get("enabled", [])
+    os.environ["ACADEMIC_BENCHMARKS_ENABLED"] = ",".join(
+        str(item).strip() for item in academic_enabled if str(item).strip()
+    )
+    if academic_benchmarks.get("sample_seed") is not None:
+        os.environ["ACADEMIC_BENCHMARKS_SAMPLE_SEED"] = str(
+            academic_benchmarks["sample_seed"]
+        )
+    if academic_benchmarks.get("store_predictions") is not None:
+        os.environ["ACADEMIC_BENCHMARKS_STORE_PREDICTIONS"] = str(
+            academic_benchmarks["store_predictions"]
+        ).lower()
+
+    tinyhellaswag = academic_benchmarks.get("tinyhellaswag", {})
+    if tinyhellaswag.get("dataset"):
+        os.environ["TINYHELLASWAG_DATASET"] = tinyhellaswag["dataset"]
+    if tinyhellaswag.get("split"):
+        os.environ["TINYHELLASWAG_SPLIT"] = tinyhellaswag["split"]
+    if "sample_size" in tinyhellaswag:
+        os.environ["TINYHELLASWAG_SAMPLE_SIZE"] = (
+            "none"
+            if tinyhellaswag["sample_size"] is None
+            else str(tinyhellaswag["sample_size"])
+        )
+
+    arc = academic_benchmarks.get("arc", {})
+    if arc.get("dataset"):
+        os.environ["ARC_DATASET"] = arc["dataset"]
+    if arc.get("split"):
+        os.environ["ARC_SPLIT"] = arc["split"]
+    if "sample_size" in arc:
+        os.environ["ARC_SAMPLE_SIZE"] = (
+            "none" if arc["sample_size"] is None else str(arc["sample_size"])
+        )
+
+    winogrande = academic_benchmarks.get("winogrande", {})
+    if winogrande.get("dataset"):
+        os.environ["WINOGRANDE_DATASET"] = winogrande["dataset"]
+    if winogrande.get("subset"):
+        os.environ["WINOGRANDE_SUBSET"] = winogrande["subset"]
+    if winogrande.get("split"):
+        os.environ["WINOGRANDE_SPLIT"] = winogrande["split"]
+    if "sample_size" in winogrande:
+        os.environ["WINOGRANDE_SAMPLE_SIZE"] = (
+            "none"
+            if winogrande["sample_size"] is None
+            else str(winogrande["sample_size"])
+        )
+
+    gsm8k = academic_benchmarks.get("gsm8k", {})
+    if gsm8k.get("dataset"):
+        os.environ["GSM8K_DATASET"] = gsm8k["dataset"]
+    if gsm8k.get("subset"):
+        os.environ["GSM8K_SUBSET"] = gsm8k["subset"]
+    if gsm8k.get("split"):
+        os.environ["GSM8K_SPLIT"] = gsm8k["split"]
+    if "sample_size" in gsm8k:
+        os.environ["GSM8K_SAMPLE_SIZE"] = (
+            "none" if gsm8k["sample_size"] is None else str(gsm8k["sample_size"])
+        )
+    if gsm8k.get("max_new_tokens") is not None:
+        os.environ["GSM8K_MAX_NEW_TOKENS"] = str(gsm8k["max_new_tokens"])
+
+    truthfulqa = academic_benchmarks.get("truthfulqa", {})
+    if truthfulqa.get("dataset"):
+        os.environ["TRUTHFULQA_DATASET"] = truthfulqa["dataset"]
+    if truthfulqa.get("subset"):
+        os.environ["TRUTHFULQA_SUBSET"] = truthfulqa["subset"]
+    if truthfulqa.get("split"):
+        os.environ["TRUTHFULQA_SPLIT"] = truthfulqa["split"]
+    if "sample_size" in truthfulqa:
+        os.environ["TRUTHFULQA_SAMPLE_SIZE"] = (
+            "none"
+            if truthfulqa["sample_size"] is None
+            else str(truthfulqa["sample_size"])
+        )
+
     benchmarks = config.get("benchmarks", {})
     enabled_benchmarks = benchmarks.get("enabled", [])
     os.environ["BENCHMARKS_ENABLED"] = ",".join(str(item).strip() for item in enabled_benchmarks if str(item).strip())
@@ -367,6 +445,12 @@ def print_config_summary(config: dict[str, Any], model_name: str):
     if mmlu:
         print("  [bold]MMLU:[/]")
         for k, v in mmlu.items():
+            print(f"    {k}: {v}")
+
+    academic_benchmarks = config.get("academic_benchmarks", {})
+    if academic_benchmarks:
+        print("  [bold]Academic benchmarks:[/]")
+        for k, v in academic_benchmarks.items():
             print(f"    {k}: {v}")
 
     benchmarks = config.get("benchmarks", {})

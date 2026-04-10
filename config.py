@@ -29,6 +29,17 @@ def _parse_csv_env_list(env_var: str, default: tuple[str, ...] = ()) -> tuple[st
             values.append(normalized)
     return tuple(values)
 
+
+def _parse_optional_int_env(env_var: str, default: int | None) -> int | None:
+    raw_value = os.getenv(env_var)
+    if raw_value is None:
+        return default
+
+    normalized = raw_value.strip().lower()
+    if normalized in ("", "none", "null", "all"):
+        return None
+    return int(raw_value)
+
 MODEL_NAME = os.getenv("MODEL_NAME", "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B")
 MODEL_BATCH_SIZE = int(os.getenv("BATCH_SIZE", 32))
 
@@ -227,4 +238,54 @@ MMLU_CONFIG = {
     "sample_seed": int(os.getenv("MMLU_SAMPLE_SEED", 42)),
     "max_new_tokens": int(os.getenv("MMLU_MAX_NEW_TOKENS", 2048)),
     "store_predictions": os.getenv("MMLU_STORE_PREDICTIONS", "true").lower() in ("true", "1", "yes"),
+}
+
+ACADEMIC_BENCHMARKS_CONFIG = {
+    "enabled": list(
+        item.lower()
+        for item in _parse_csv_env_list(
+            "ACADEMIC_BENCHMARKS_ENABLED",
+            (
+                "tinyhellaswag",
+                "arc",
+                "winogrande",
+                "gsm8k",
+                "truthfulqa",
+            ),
+        )
+    ),
+    "sample_seed": int(os.getenv("ACADEMIC_BENCHMARKS_SAMPLE_SEED", "42")),
+    "store_predictions": os.getenv(
+        "ACADEMIC_BENCHMARKS_STORE_PREDICTIONS",
+        "true",
+    ).lower() in ("true", "1", "yes"),
+    "tinyhellaswag": {
+        "dataset": os.getenv("TINYHELLASWAG_DATASET", "tinyBenchmarks/tinyHellaswag"),
+        "split": os.getenv("TINYHELLASWAG_SPLIT", "validation"),
+        "sample_size": _parse_optional_int_env("TINYHELLASWAG_SAMPLE_SIZE", 100),
+    },
+    "arc": {
+        "dataset": os.getenv("ARC_DATASET", "allenai/ai2_arc"),
+        "split": os.getenv("ARC_SPLIT", "validation"),
+        "sample_size": _parse_optional_int_env("ARC_SAMPLE_SIZE", 100),
+    },
+    "winogrande": {
+        "dataset": os.getenv("WINOGRANDE_DATASET", "allenai/winogrande"),
+        "subset": os.getenv("WINOGRANDE_SUBSET", "winogrande_xl"),
+        "split": os.getenv("WINOGRANDE_SPLIT", "validation"),
+        "sample_size": _parse_optional_int_env("WINOGRANDE_SAMPLE_SIZE", 100),
+    },
+    "gsm8k": {
+        "dataset": os.getenv("GSM8K_DATASET", "openai/gsm8k"),
+        "subset": os.getenv("GSM8K_SUBSET", "main"),
+        "split": os.getenv("GSM8K_SPLIT", "test"),
+        "sample_size": _parse_optional_int_env("GSM8K_SAMPLE_SIZE", 100),
+        "max_new_tokens": int(os.getenv("GSM8K_MAX_NEW_TOKENS", "512")),
+    },
+    "truthfulqa": {
+        "dataset": os.getenv("TRUTHFULQA_DATASET", "truthfulqa/truthful_qa"),
+        "subset": os.getenv("TRUTHFULQA_SUBSET", "multiple_choice"),
+        "split": os.getenv("TRUTHFULQA_SPLIT", "validation"),
+        "sample_size": _parse_optional_int_env("TRUTHFULQA_SAMPLE_SIZE", 100),
+    },
 }
