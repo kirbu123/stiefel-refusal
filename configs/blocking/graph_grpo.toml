@@ -9,8 +9,11 @@ results_root = "results/blocking"
 
 [data]
 graph_file = "graphs/physical harm_wordnet_graph_actions_terms.txt"
+category_mode = "single"
 category_dataset_source = "combined"
 category_filter = "Physical harm"
+all_categories_harmful_prompt_count = 128
+all_categories_harmful_prompt_seed = 42
 
 [grpo]
 n_groups = 4

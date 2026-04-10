@@ -46,6 +46,7 @@ from config import (
     GRAPH_FILE, EVALUATION_BACKEND,
     MMLU_CONFIG, DEBUG, get_method_results_dir,
 )
+from dataset.load_dataset import load_dataset_split
 from data_utils import load_datasets_with_categories, extract_response_after_think
 from refusal_directions import (
     compute_refusal_direction, save_refusal_directions, load_refusal_directions,
@@ -64,6 +65,9 @@ from benchmarks.integration import (
 from baselines.graph_grpo.optuna_optimizer import optimize_weights_with_optuna
 from baselines.graph_grpo.trainer import train_grpo_is_step
 from baselines.graph_grpo.runtime_config import (
+    resolve_graph_grpo_all_categories_harmful_prompt_count,
+    resolve_graph_grpo_all_categories_harmful_prompt_seed,
+    resolve_graph_grpo_category_mode,
     resolve_graph_grpo_category_dataset_source,
     resolve_graph_grpo_category_filter,
     resolve_graph_grpo_debug_noise_scale,
@@ -77,6 +81,7 @@ from baselines.graph_grpo.runtime_config import (
     resolve_graph_grpo_reward_sign,
     resolve_graph_grpo_weights_mode,
     resolve_graph_grpo_weights_init_type,
+    validate_graph_grpo_category_mode,
     validate_graph_grpo_category_dataset_source,
     validate_graph_grpo_category_filter,
     validate_graph_grpo_optimizer_compatibility,
@@ -151,6 +156,29 @@ def _load_graph_grpo_category_items(
     ]
 
 
+def _load_harmful_split_questions(split: str) -> List[str]:
+    """Load non-empty harmful instructions from the shared train/val/test split files."""
+    questions = load_dataset_split(
+        harmtype="harmful",
+        split=split,
+        instructions_only=True,
+    )
+    return [question.strip() for question in questions if isinstance(question, str) and question.strip()]
+
+
+def _sample_fixed_questions(
+    questions: List[str],
+    sample_count: int,
+    sample_seed: int,
+) -> List[str]:
+    """Deterministically sample a fixed prompt subset without disturbing global RNG state."""
+    if sample_count >= len(questions):
+        return list(questions)
+
+    rng = random.Random(sample_seed)
+    return rng.sample(questions, k=sample_count)
+
+
 def _sample_training_questions(
     all_category_questions: List[str],
     debug_question_count: int,
@@ -163,6 +191,48 @@ def _sample_training_questions(
     if effective_question_count < len(all_category_questions):
         return random.sample(all_category_questions, k=effective_question_count)
     return list(all_category_questions)
+
+
+def _build_directions_cache_path(
+    results_dir: Path,
+    model_name: str,
+    category_mode: str,
+    direction_count: int | None = None,
+    prompt_seed: int | None = None,
+) -> Path:
+    """Keep single-category and all-category refusal-direction caches isolated."""
+    model_safe = model_name.replace("/", "_")
+    if category_mode == "single":
+        return results_dir / f"refusal_directions_{model_safe}.pt"
+
+    return results_dir / (
+        f"refusal_directions_{model_safe}_all_categories_harmful_train_"
+        f"n{direction_count}_seed{prompt_seed}.pt"
+    )
+
+
+def _load_or_compute_refusal_directions(
+    model,
+    direction_identifiers: List[str],
+    good_prompts: List[str],
+    directions_file: Path,
+) -> List[torch.Tensor]:
+    """Reuse cached refusal directions when identifiers match exactly, otherwise rebuild them."""
+    if directions_file.exists():
+        extracted_directions, loaded_tags = load_refusal_directions(
+            directions_file,
+            expected_tags=direction_identifiers,
+        )
+        if loaded_tags == direction_identifiers:
+            device = next(model.get_layers()[0].parameters()).device
+            return [direction.to(device) for direction in extracted_directions]
+
+    extracted_directions = []
+    for direction_identifier in direction_identifiers:
+        refusal_dir = compute_refusal_direction(model, [direction_identifier], good_prompts)
+        extracted_directions.append(refusal_dir)
+    save_refusal_directions(extracted_directions, direction_identifiers, MODEL_NAME, directions_file)
+    return extracted_directions
 
 
 def _format_run_name_value(value: Any) -> str:
@@ -185,6 +255,7 @@ def _sanitize_run_name_part(value: Any) -> str:
 
 def _build_wandb_run_name(
     optimizer_method: str,
+    category_mode: str,
     category_name: str,
     weights_mode: str,
     weights_init_type: str,
@@ -196,6 +267,7 @@ def _build_wandb_run_name(
     """Build a readable wandb run name with common and optimizer-specific knobs."""
     parts = [
         _sanitize_run_name_part(optimizer_method),
+        f"category_mode_{_sanitize_run_name_part(category_mode)}",
         _sanitize_run_name_part(category_name),
         f"weights_{_sanitize_run_name_part(weights_mode)}",
         f"init_{_sanitize_run_name_part(weights_init_type)}",
@@ -472,10 +544,17 @@ def _final_evaluate(
 
 
 def main():
+    category_mode = resolve_graph_grpo_category_mode(os.getenv("CATEGORY_MODE"))
     category_dataset_source = resolve_graph_grpo_category_dataset_source(
         os.getenv("CATEGORY_DATASET_SOURCE")
     )
     category_name = resolve_graph_grpo_category_filter(os.getenv("CATEGORY_FILTER"))
+    all_categories_harmful_prompt_count = resolve_graph_grpo_all_categories_harmful_prompt_count(
+        os.getenv("ALL_CATEGORIES_HARMFUL_PROMPT_COUNT")
+    )
+    all_categories_harmful_prompt_seed = resolve_graph_grpo_all_categories_harmful_prompt_seed(
+        os.getenv("ALL_CATEGORIES_HARMFUL_PROMPT_SEED")
+    )
     optimizer_method = resolve_graph_grpo_optimizer_method(os.getenv("OPTIMIZER_METHOD"))
     weights_mode = resolve_graph_grpo_weights_mode(os.getenv("WEIGHTS_MODE"))
     weights_init_type = resolve_graph_grpo_weights_init_type(os.getenv("WEIGHTS_INIT_TYPE"))
@@ -492,15 +571,21 @@ def main():
     reward_sign = resolve_graph_grpo_reward_sign(os.getenv("REWARD_SIGN"))
     effective_noise_scale = debug_noise_scale if DEBUG else GRPO_CONFIG["noise_scale"]
 
+    validate_graph_grpo_category_mode(category_mode)
     validate_graph_grpo_category_dataset_source(category_dataset_source)
-    validate_graph_grpo_category_filter(category_name)
+    validate_graph_grpo_category_filter(category_name, category_mode=category_mode)
     validate_graph_grpo_optimizer_method(optimizer_method)
     validate_graph_grpo_weights_mode(weights_mode)
-    validate_graph_grpo_weights_init_type(weights_init_type)
+    validate_graph_grpo_weights_init_type(weights_init_type, category_mode=category_mode)
     validate_graph_grpo_optimizer_compatibility(optimizer_method, weights_mode)
     validate_graph_grpo_optuna_sampler(optuna_sampler)
     validate_graph_grpo_optuna_weight_range(optuna_weight_min, optuna_weight_max)
     validate_graph_grpo_reward_sign(reward_sign)
+
+    run_category_name = category_name if category_mode == "single" else "all_categories"
+    category_display_name = (
+        category_name if category_mode == "single" else "all categories"
+    )
 
     optuna_config = {
         "sampler": optuna_sampler,
@@ -517,13 +602,20 @@ def main():
     print(f"GRPO Config: {GRPO_CONFIG}")
     print(f"Abliteration Params: {ABLITERATION_PARAMS}")
     print(f"Optimizer Method: {optimizer_method}")
+    print(f"Category mode: {category_mode}")
     print(f"Category dataset source: {category_dataset_source}")
-    print(f"Category: {category_name}")
+    print(f"Category: {run_category_name}")
     print(f"Weights Mode: {weights_mode}")
     print(f"Weights Init Type: {weights_init_type}")
     print(f"Batch Size: {MODEL_BATCH_SIZE}")
     print(f"Evaluation backend: {EVALUATION_BACKEND}")
     print(f"Reward sign: {reward_sign:+g}")
+    if category_mode == "all":
+        print(
+            "All-category prompt sampling: "
+            f"count={all_categories_harmful_prompt_count}, "
+            f"seed={all_categories_harmful_prompt_seed}"
+        )
     if optimizer_method == "optuna":
         print(f"Optuna Config: {optuna_config}")
     print()
@@ -533,14 +625,44 @@ def main():
     GRPO_ANSWERS_DIR.mkdir(parents=True, exist_ok=True)
 
     print("Loading data...")
-    category_items = _load_graph_grpo_category_items(
-        category_dataset_source=category_dataset_source,
-        category_name=category_name,
-    )
-    print(
-        f"Loaded {len(category_items)} item(s) for category '{category_name}' "
-        f"from source '{category_dataset_source}'"
-    )
+    if category_mode == "single":
+        category_items = _load_graph_grpo_category_items(
+            category_dataset_source=category_dataset_source,
+            category_name=category_name,
+        )
+        print(
+            f"Loaded {len(category_items)} item(s) for category '{category_name}' "
+            f"from source '{category_dataset_source}'"
+        )
+        all_category_questions = [
+            item.get("instruction", "")
+            for item in category_items
+            if item.get("instruction")
+        ]
+        full_evaluation_questions = list(all_category_questions)
+        direction_source = str(GRAPH_FILE)
+        optimization_source = f"{category_dataset_source}:{category_name}"
+        final_evaluation_source = optimization_source
+        direction_prompt_count: int | None = None
+        direction_prompt_seed: int | None = None
+    else:
+        all_category_questions = _load_harmful_split_questions("val")
+        full_evaluation_questions = _load_harmful_split_questions("test")
+        if not full_evaluation_questions:
+            raise ValueError(
+                "No full-evaluation questions found in harmful test split for CATEGORY_MODE='all'."
+            )
+        print(
+            f"Loaded {len(all_category_questions)} harmful val question(s) for optimization"
+        )
+        print(
+            f"Loaded {len(full_evaluation_questions)} harmful test question(s) for full evaluation"
+        )
+        direction_source = "dataset/splits/harmful_train.json"
+        optimization_source = "dataset/splits/harmful_val.json"
+        final_evaluation_source = "dataset/splits/harmful_test.json"
+        direction_prompt_count = None
+        direction_prompt_seed = all_categories_harmful_prompt_seed
 
     print("\nLoading model...")
     original_argv = sys.argv.copy()
@@ -572,46 +694,65 @@ def main():
     print("Loading good prompts...")
     good_prompts = load_prompts(GOOD_PROMPTS_DATASET)
 
-    if not GRAPH_FILE.exists():
-        print(f"ERROR: Graph file not found: {GRAPH_FILE}")
-        return
+    if category_mode == "single":
+        if not GRAPH_FILE.exists():
+            print(f"ERROR: Graph file not found: {GRAPH_FILE}")
+            return
 
-    with open(GRAPH_FILE, "r", encoding="utf-8") as f:
-        bad_tags = [line.strip() for line in f if line.strip()]
-    print(f"Loaded {len(bad_tags)} tags from {GRAPH_FILE}")
-
-    directions_file = RESULTS_DIR / f"refusal_directions_{MODEL_NAME.replace('/', '_')}.pt"
-    if directions_file.exists():
-        extracted_directions, loaded_tags = load_refusal_directions(directions_file, expected_tags=bad_tags)
-        if loaded_tags != bad_tags:
-            extracted_directions = []
-            for tag_name in bad_tags:
-                refusal_dir = compute_refusal_direction(model, [tag_name], good_prompts)
-                extracted_directions.append(refusal_dir)
-            save_refusal_directions(extracted_directions, bad_tags, MODEL_NAME, directions_file)
-        else:
-            device = next(model.get_layers()[0].parameters()).device
-            extracted_directions = [d.to(device) for d in extracted_directions]
+        with open(GRAPH_FILE, "r", encoding="utf-8") as f:
+            bad_tags = [line.strip() for line in f if line.strip()]
+        print(f"Loaded {len(bad_tags)} tags from {GRAPH_FILE}")
+        directions_file = _build_directions_cache_path(
+            results_dir=RESULTS_DIR,
+            model_name=MODEL_NAME,
+            category_mode=category_mode,
+        )
     else:
-        extracted_directions = []
-        for tag_name in bad_tags:
-            refusal_dir = compute_refusal_direction(model, [tag_name], good_prompts)
-            extracted_directions.append(refusal_dir)
-        save_refusal_directions(extracted_directions, bad_tags, MODEL_NAME, directions_file)
+        harmful_train_questions = _load_harmful_split_questions("train")
+        if not harmful_train_questions:
+            raise ValueError(
+                "No harmful train prompts found for CATEGORY_MODE='all'."
+            )
+        sampled_harmful_train_questions = _sample_fixed_questions(
+            harmful_train_questions,
+            min(all_categories_harmful_prompt_count, len(harmful_train_questions)),
+            all_categories_harmful_prompt_seed,
+        )
+        direction_prompt_count = len(sampled_harmful_train_questions)
+        bad_tags = sampled_harmful_train_questions
+        print(
+            f"Loaded {len(harmful_train_questions)} harmful train prompt(s); "
+            f"sampled {len(sampled_harmful_train_questions)} for refusal directions"
+        )
+        directions_file = _build_directions_cache_path(
+            results_dir=RESULTS_DIR,
+            model_name=MODEL_NAME,
+            category_mode=category_mode,
+            direction_count=direction_prompt_count,
+            prompt_seed=all_categories_harmful_prompt_seed,
+        )
+
+    extracted_directions = _load_or_compute_refusal_directions(
+        model=model,
+        direction_identifiers=bad_tags,
+        good_prompts=good_prompts,
+        directions_file=directions_file,
+    )
 
     n_directions = len(extracted_directions)
     hidden_size = extracted_directions[0].shape[1]
 
     physical_harm_idx = 0
-    for idx, tag in enumerate(bad_tags):
-        if "physical harm" in tag.lower():
-            physical_harm_idx = idx
-            break
+    if category_mode == "single":
+        for idx, tag in enumerate(bad_tags):
+            if "physical harm" in tag.lower():
+                physical_harm_idx = idx
+                break
 
     print(f"Using weights mode '{weights_mode}'")
     print(f"Using weights init type '{weights_init_type}'")
     print(f"Using optimizer method '{optimizer_method}'")
-    if weights_init_type == "topic":
+    if weights_init_type == "topic" and category_mode == "single":
         print(
             f"Topic init root index for graph tag 'Physical harm': "
             f"{physical_harm_idx} (tag='{bad_tags[physical_harm_idx]}')"
@@ -626,29 +767,37 @@ def main():
     weights_shape = list(direction_weights.weights.shape)
     print(f"Trainable weights shape: {weights_shape}")
 
-    all_category_questions = [item.get("instruction", "") for item in category_items if item.get("instruction")]
     if not all_category_questions:
         raise ValueError(
-            f"No questions found for category '{category_name}' "
-            f"in source '{category_dataset_source}'."
+            f"No optimization questions found for category mode '{category_mode}'."
         )
     train_question_count = min(MODEL_BATCH_SIZE, len(all_category_questions))
     if DEBUG:
         train_question_count = min(train_question_count, debug_question_count)
 
-    print(
-        f"Training batch size will be {train_question_count} question(s) sampled from "
-        f"{len(all_category_questions)} available in category '{category_name}' "
-        f"using batch_size={MODEL_BATCH_SIZE}"
-    )
+    if category_mode == "single":
+        print(
+            f"Training batch size will be {train_question_count} question(s) sampled from "
+            f"{len(all_category_questions)} available in category '{category_name}' "
+            f"using batch_size={MODEL_BATCH_SIZE}"
+        )
+    else:
+        print(
+            f"Training batch size will be {train_question_count} question(s) sampled from "
+            f"{len(all_category_questions)} available harmful val question(s) "
+            f"using batch_size={MODEL_BATCH_SIZE}"
+        )
 
     if DEBUG and train_question_count > 0:
         print(
-            f"DEBUG mode enabled: using {train_question_count} question(s) from the category "
+            f"DEBUG mode enabled: using {train_question_count} question(s) from the optimization pool "
             f"and rollout noise_scale={effective_noise_scale:g} "
             f"(base noise_scale={GRPO_CONFIG['noise_scale']:g})"
         )
-    print(f"Loaded {len(all_category_questions)} total question(s) for category '{category_name}'")
+    print(
+        f"Loaded {len(all_category_questions)} total optimization question(s) "
+        f"and {len(full_evaluation_questions)} full-evaluation question(s)"
+    )
 
     classifier_categories = _load_classifier_categories()
     benchmark_runner = build_benchmark_runner(
@@ -659,10 +808,11 @@ def main():
 
     if WANDB_AVAILABLE:
         wandb.init(
-            project="refusal_direction_grpo_is",
+            project="weighted_refusal_direction",
             name=_build_wandb_run_name(
                 optimizer_method=optimizer_method,
-                category_name=category_name,
+                category_mode=category_mode,
+                category_name=run_category_name,
                 weights_mode=weights_mode,
                 weights_init_type=weights_init_type,
                 grpo_config=GRPO_CONFIG,
@@ -672,13 +822,20 @@ def main():
             ),
             config={
                 "model": MODEL_NAME,
-                "category": category_name,
+                "category": run_category_name,
+                "category_mode": category_mode,
+                "category_filter": category_name if category_mode == "single" else None,
                 "category_dataset_source": category_dataset_source,
                 "n_directions": n_directions, "n_layers": n_layers,
                 "optimizer_method": optimizer_method,
                 "weights_mode": weights_mode,
                 "weights_init_type": weights_init_type,
                 "weights_shape": weights_shape,
+                "direction_source": direction_source,
+                "optimization_source": optimization_source,
+                "final_evaluation_source": final_evaluation_source,
+                "direction_prompt_count": direction_prompt_count,
+                "direction_prompt_seed": direction_prompt_seed,
                 "grpo_config": GRPO_CONFIG, "abliteration_params": ABLITERATION_PARAMS,
                 "optuna_config": optuna_config if optimizer_method == "optuna" else None,
                 "reward_sign": reward_sign,
@@ -691,14 +848,21 @@ def main():
     print("\n" + "=" * 80)
     print("CLEAN MODEL EVALUATION")
     print("=" * 80)
-    print(
-        f"Evaluating clean model on full dataset: {len(all_category_questions)} "
-        f"question(s); training will use batch of {train_question_count} question(s)"
-    )
+    if category_mode == "single":
+        print(
+            f"Evaluating clean model on full dataset: {len(full_evaluation_questions)} "
+            f"question(s); training will use batch of {train_question_count} question(s)"
+        )
+    else:
+        print(
+            f"Evaluating clean model on full harmful test split: "
+            f"{len(full_evaluation_questions)} question(s); training will use val batches "
+            f"of {train_question_count} question(s)"
+        )
     model.reload_model()
     clean_harmfulness_result = _evaluate_model_harmfulness(
         model=model,
-        questions=all_category_questions,
+        questions=full_evaluation_questions,
         classifier_categories=classifier_categories,
     )
     clean_mean_harmfulness = clean_harmfulness_result["mean_harmfulness"]
@@ -789,11 +953,14 @@ def main():
                 }
             )
 
-    evaluation_questions = (
-        optimization_result["best_trial_questions"]
-        if optimizer_method == "optuna"
-        else optimization_result["best_train_batch_questions"]
-    )
+    if category_mode == "all":
+        evaluation_questions = full_evaluation_questions
+    else:
+        evaluation_questions = (
+            optimization_result["best_trial_questions"]
+            if optimizer_method == "optuna"
+            else optimization_result["best_train_batch_questions"]
+        )
     if optimizer_method == "grpo":
         with torch.no_grad():
             direction_weights.weights.data.copy_(
@@ -803,7 +970,7 @@ def main():
                 )
             )
 
-    category_safe_name = category_name.replace("/", "_").replace(" ", "_")
+    category_safe_name = run_category_name.replace("/", "_").replace(" ", "_")
     final_result = _final_evaluate(
         direction_weights=direction_weights,
         extracted_directions=extracted_directions,
@@ -841,7 +1008,7 @@ def main():
 
     best_batch_model_harmfulness_result = _evaluate_model_harmfulness(
         model=model,
-        questions=all_category_questions,
+        questions=full_evaluation_questions,
         classifier_categories=classifier_categories,
     )
     best_batch_model_mean_harmfulness = best_batch_model_harmfulness_result["mean_harmfulness"]
@@ -870,8 +1037,17 @@ def main():
     answers_data = {
         "experiment_config": {
             "model": MODEL_NAME,
-            "category": category_name,
+            "category": run_category_name,
+            "category_mode": category_mode,
+            "category_filter": category_name if category_mode == "single" else None,
             "category_dataset_source": category_dataset_source,
+            "direction_source": direction_source,
+            "optimization_source": optimization_source,
+            "final_evaluation_source": final_evaluation_source,
+            "direction_prompt_count": direction_prompt_count,
+            "direction_prompt_seed": direction_prompt_seed,
+            "optimization_question_pool_size": len(all_category_questions),
+            "full_evaluation_question_count": len(full_evaluation_questions),
             "n_questions": len(evaluation_questions), "n_directions": n_directions,
             "optimizer_method": optimizer_method,
             "reward_sign": reward_sign,
@@ -925,8 +1101,15 @@ def main():
         "weights": direction_weights.weights.data.cpu(),
         "metadata": {
             "model": MODEL_NAME,
-            "category": category_name,
+            "category": run_category_name,
+            "category_mode": category_mode,
+            "category_filter": category_name if category_mode == "single" else None,
             "category_dataset_source": category_dataset_source,
+            "direction_source": direction_source,
+            "optimization_source": optimization_source,
+            "final_evaluation_source": final_evaluation_source,
+            "direction_prompt_count": direction_prompt_count,
+            "direction_prompt_seed": direction_prompt_seed,
             "n_directions": n_directions,
             "n_layers": n_layers,
             "optimizer_method": optimizer_method,

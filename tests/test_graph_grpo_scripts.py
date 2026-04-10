@@ -17,6 +17,7 @@ class TestGraphGrpoScripts(unittest.TestCase):
         fake_python.write_text(
             "#!/bin/sh\n"
             "echo \"ARGS:$*\"\n"
+            "echo \"CATEGORY_MODE=${CATEGORY_MODE:-}\"\n"
             "echo \"CATEGORY_DATASET_SOURCE=${CATEGORY_DATASET_SOURCE:-}\"\n"
             "echo \"CATEGORY_FILTER=${CATEGORY_FILTER:-}\"\n",
             encoding="utf-8",
@@ -46,6 +47,7 @@ class TestGraphGrpoScripts(unittest.TestCase):
             )
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("CATEGORY_MODE=single", result.stdout)
         self.assertIn("CATEGORY_DATASET_SOURCE=jailbreakbench", result.stdout)
         self.assertIn("CATEGORY_FILTER=Physical harm", result.stdout)
 
@@ -68,8 +70,28 @@ class TestGraphGrpoScripts(unittest.TestCase):
             )
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("CATEGORY_MODE=single", result.stdout)
         self.assertIn("CATEGORY_DATASET_SOURCE=combined", result.stdout)
         self.assertIn("CATEGORY_FILTER=Privacy", result.stdout)
+
+    def test_script_accepts_all_categories_flag(self):
+        temp_dir, env = self._build_env()
+        with temp_dir:
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(GRAPH_GRPO_SCRIPT),
+                    "--all-categories",
+                ],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("CATEGORY_MODE=all", result.stdout)
+        self.assertIn("CATEGORY_FILTER=", result.stdout)
 
     def test_script_rejects_unknown_dataset_source(self):
         result = subprocess.run(
@@ -120,6 +142,7 @@ class TestGraphGrpoScripts(unittest.TestCase):
             )
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("CATEGORY_MODE=single", result.stdout)
         self.assertIn("CATEGORY_DATASET_SOURCE=combined", result.stdout)
         self.assertIn("CATEGORY_FILTER=Physical harm", result.stdout)
 
