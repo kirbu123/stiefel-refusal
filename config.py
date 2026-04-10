@@ -122,12 +122,32 @@ BENCHMARKS_ENABLED = tuple(
 
 _jailbreakbench_categories = _parse_csv_env_list("JAILBREAKBENCH_CATEGORIES")
 JAILBREAKBENCH_CONFIG = {
-    "judge_mode": os.getenv("JAILBREAKBENCH_JUDGE_MODE", "project").strip().lower() or "project",
+    "judge_mode": os.getenv("JAILBREAKBENCH_JUDGE_MODE", "official").strip().lower() or "official",
     "max_samples": int(os.getenv("JAILBREAKBENCH_MAX_SAMPLES", "100").strip() or "100"),
     "categories": list(_jailbreakbench_categories),
     "harmful_score_threshold": int(
         os.getenv("JAILBREAKBENCH_HARMFUL_SCORE_THRESHOLD", "3").strip() or "3"
     ),
+    "official_judge": {
+        "model_name": os.getenv(
+            "JAILBREAKBENCH_OFFICIAL_JUDGE_MODEL_NAME",
+            "together_ai/meta-llama/Llama-3-70b-chat-hf",
+        ).strip() or "together_ai/meta-llama/Llama-3-70b-chat-hf",
+        "api_url": os.getenv(
+            "JAILBREAKBENCH_OFFICIAL_JUDGE_API_URL",
+            "https://api.together.xyz/v1/chat/completions",
+        ).strip() or "https://api.together.xyz/v1/chat/completions",
+        "api_key_env": os.getenv(
+            "JAILBREAKBENCH_OFFICIAL_JUDGE_API_KEY_ENV",
+            "TOGETHER_API_KEY",
+        ).strip() or "TOGETHER_API_KEY",
+        "batch_size": int(
+            os.getenv("JAILBREAKBENCH_OFFICIAL_JUDGE_BATCH_SIZE", "8").strip() or "8"
+        ),
+        "timeout_sec": int(
+            os.getenv("JAILBREAKBENCH_OFFICIAL_JUDGE_TIMEOUT_SEC", "60").strip() or "60"
+        ),
+    },
 }
 
 HARMBENCH_CONFIG = {

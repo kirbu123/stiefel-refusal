@@ -49,6 +49,7 @@ class TestGraphGrpoConfig(unittest.TestCase):
         optuna = config["optuna"]
         benchmarks = config["benchmarks"]
         jailbreakbench = benchmarks["jailbreakbench"]
+        jbb_official_judge = jailbreakbench["official_judge"]
         harmbench = benchmarks["harmbench"]
         official_classifier = harmbench["official_classifier"]
 
@@ -67,10 +68,21 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertEqual(weights["mode"], "scalar")
         self.assertEqual(weights["init_type"], "average")
         self.assertEqual(benchmarks["enabled"], [])
-        self.assertEqual(jailbreakbench["judge_mode"], "project")
+        self.assertEqual(jailbreakbench["judge_mode"], "official")
         self.assertEqual(jailbreakbench["max_samples"], 100)
         self.assertEqual(jailbreakbench["categories"], [])
         self.assertEqual(jailbreakbench["harmful_score_threshold"], 3)
+        self.assertEqual(
+            jbb_official_judge["model_name"],
+            "together_ai/meta-llama/Llama-3-70b-chat-hf",
+        )
+        self.assertEqual(
+            jbb_official_judge["api_url"],
+            "https://api.together.xyz/v1/chat/completions",
+        )
+        self.assertEqual(jbb_official_judge["api_key_env"], "TOGETHER_API_KEY")
+        self.assertEqual(jbb_official_judge["batch_size"], 8)
+        self.assertEqual(jbb_official_judge["timeout_sec"], 60)
         self.assertEqual(harmbench["judge_mode"], "official")
         self.assertEqual(harmbench["split"], "test")
         self.assertEqual(harmbench["max_samples"], 0)
@@ -105,10 +117,30 @@ class TestGraphGrpoConfig(unittest.TestCase):
             self.assertEqual(os.environ["OPTUNA_WEIGHT_MIN"], "-2.0")
             self.assertEqual(os.environ["OPTUNA_WEIGHT_MAX"], "2.0")
             self.assertEqual(os.environ["BENCHMARKS_ENABLED"], "")
-            self.assertEqual(os.environ["JAILBREAKBENCH_JUDGE_MODE"], "project")
+            self.assertEqual(os.environ["JAILBREAKBENCH_JUDGE_MODE"], "official")
             self.assertEqual(os.environ["JAILBREAKBENCH_MAX_SAMPLES"], "100")
             self.assertEqual(os.environ["JAILBREAKBENCH_CATEGORIES"], "")
             self.assertEqual(os.environ["JAILBREAKBENCH_HARMFUL_SCORE_THRESHOLD"], "3")
+            self.assertEqual(
+                os.environ["JAILBREAKBENCH_OFFICIAL_JUDGE_MODEL_NAME"],
+                "together_ai/meta-llama/Llama-3-70b-chat-hf",
+            )
+            self.assertEqual(
+                os.environ["JAILBREAKBENCH_OFFICIAL_JUDGE_API_URL"],
+                "https://api.together.xyz/v1/chat/completions",
+            )
+            self.assertEqual(
+                os.environ["JAILBREAKBENCH_OFFICIAL_JUDGE_API_KEY_ENV"],
+                "TOGETHER_API_KEY",
+            )
+            self.assertEqual(
+                os.environ["JAILBREAKBENCH_OFFICIAL_JUDGE_BATCH_SIZE"],
+                "8",
+            )
+            self.assertEqual(
+                os.environ["JAILBREAKBENCH_OFFICIAL_JUDGE_TIMEOUT_SEC"],
+                "60",
+            )
             self.assertEqual(os.environ["HARMBENCH_JUDGE_MODE"], "official")
             self.assertEqual(os.environ["HARMBENCH_SPLIT"], "test")
             self.assertEqual(os.environ["HARMBENCH_MAX_SAMPLES"], "0")

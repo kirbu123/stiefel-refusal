@@ -192,13 +192,35 @@ def apply_config_to_env(config: dict[str, Any], model_name: str | None = None):
     os.environ["BENCHMARKS_ENABLED"] = ",".join(str(item).strip() for item in enabled_benchmarks if str(item).strip())
 
     jbb = benchmarks.get("jailbreakbench", {})
-    os.environ["JAILBREAKBENCH_JUDGE_MODE"] = str(jbb.get("judge_mode", "project"))
+    os.environ["JAILBREAKBENCH_JUDGE_MODE"] = str(jbb.get("judge_mode", "official"))
     os.environ["JAILBREAKBENCH_MAX_SAMPLES"] = str(jbb.get("max_samples", 100))
     os.environ["JAILBREAKBENCH_CATEGORIES"] = ",".join(
         str(item).strip() for item in jbb.get("categories", []) if str(item).strip()
     )
     os.environ["JAILBREAKBENCH_HARMFUL_SCORE_THRESHOLD"] = str(
         jbb.get("harmful_score_threshold", 3)
+    )
+    jbb_official_judge = jbb.get("official_judge", {})
+    os.environ["JAILBREAKBENCH_OFFICIAL_JUDGE_MODEL_NAME"] = str(
+        jbb_official_judge.get(
+            "model_name",
+            "together_ai/meta-llama/Llama-3-70b-chat-hf",
+        )
+    )
+    os.environ["JAILBREAKBENCH_OFFICIAL_JUDGE_API_URL"] = str(
+        jbb_official_judge.get(
+            "api_url",
+            "https://api.together.xyz/v1/chat/completions",
+        )
+    )
+    os.environ["JAILBREAKBENCH_OFFICIAL_JUDGE_API_KEY_ENV"] = str(
+        jbb_official_judge.get("api_key_env", "TOGETHER_API_KEY")
+    )
+    os.environ["JAILBREAKBENCH_OFFICIAL_JUDGE_BATCH_SIZE"] = str(
+        jbb_official_judge.get("batch_size", 8)
+    )
+    os.environ["JAILBREAKBENCH_OFFICIAL_JUDGE_TIMEOUT_SEC"] = str(
+        jbb_official_judge.get("timeout_sec", 60)
     )
 
     harmbench = benchmarks.get("harmbench", {})
