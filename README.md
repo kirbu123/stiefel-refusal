@@ -140,6 +140,118 @@ Notes:
 - `answer_mode = "logits"` scores `A/B/C/D` directly from the model probabilities instead of parsing generated text.
 - For reasoning models that emit `<think>...</think>`, MMLU parsing strips the thinking block before extracting the final answer letter.
 
+### Academic Benchmarks Configuration
+
+`graph_grpo` also supports a dedicated `[academic_benchmarks]` block for `TinyHellaSwag`, `ARC`, `WinoGrande`, `GSM8K`, and `TruthfulQA`.
+
+Example:
+
+```toml
+[academic_benchmarks]
+enabled = ["tinyhellaswag", "arc", "winogrande", "gsm8k", "truthfulqa"]
+sample_seed = 42
+store_predictions = true
+
+[academic_benchmarks.tinyhellaswag]
+dataset = "tinyBenchmarks/tinyHellaswag"
+split = "validation"
+sample_size = 100
+
+[academic_benchmarks.arc]
+dataset = "allenai/ai2_arc"
+split = "validation"
+sample_size = 100
+
+[academic_benchmarks.winogrande]
+dataset = "allenai/winogrande"
+subset = "winogrande_xl"
+split = "validation"
+sample_size = 100
+
+[academic_benchmarks.gsm8k]
+dataset = "openai/gsm8k"
+subset = "main"
+split = "test"
+sample_size = 100
+max_new_tokens = 512
+
+[academic_benchmarks.truthfulqa]
+dataset = "truthfulqa/truthful_qa"
+subset = "multiple_choice"
+split = "validation"
+sample_size = 100
+```
+
+Global keys:
+
+- `enabled` -- list of academic benchmarks to run
+- `sample_seed` -- deterministic sampling seed shared by all enabled academic benchmarks
+- `store_predictions` -- when `true`, store per-example academic benchmark details in `results/graph_grpo/academic_benchmarks/details/`
+
+Per-benchmark keys:
+
+- `dataset` -- Hugging Face dataset ID used at runtime
+- `subset` -- optional dataset subset/config name (`winogrande_xl`, `main`, `multiple_choice`, etc.)
+- `split` -- dataset split used for evaluation
+- `sample_size` -- integer sample limit for the default fast path, or `null` for the full selected split
+- `max_new_tokens` -- generation budget for `gsm8k`
+
+Defaults and notes:
+
+- `sample_size = 100` is the default fast path for all five academic benchmarks.
+- Set any benchmark `sample_size = null` to run the full selected split.
+- `TinyHellaSwag` uses `IRT++` as the primary reported metric and stores the corresponding field as `irt_plus_plus`.
+- `TinyHellaSwag` requires the optional `tinyBenchmarks` Python package. Install it explicitly:
+
+```bash
+pip install git+https://github.com/felipemaiapolo/tinyBenchmarks
+```
+
+If `tinyhellaswag` is enabled but `tinyBenchmarks` is not installed, the run fails with a clear dependency error instead of silently skipping the benchmark.
+
+### Academic Evaluation Procedure
+
+`graph_grpo` evaluates academic benchmarks in exactly two places:
+
+1. `clean model` -- one cached run before optimization starts
+2. `best-value edited model` -- one final run after the best coefficients are applied
+
+Important details:
+
+- Academic benchmarks are not evaluated on every GRPO epoch.
+- Academic benchmarks are not evaluated on every Optuna trial.
+- The clean-model academic baseline is cached by `model_name + normalized benchmark config`.
+- Final edited-model details are stored under `results/graph_grpo/academic_benchmarks/details/`.
+- `mmlu` stays as a separate top-level block in `answers_*.json`; the new academic results live under `academic_benchmarks`.
+
+### Benchmarks, Sources, and Setups
+
+| Benchmark | Runtime dataset source | Original paper / official benchmark source | Setup source | Repo default split / variant | Metric(s) | Repo-specific notes |
+|---|---|---|---|---|---|---|
+| TinyHellaSwag | [`tinyBenchmarks/tinyHellaswag`](https://huggingface.co/datasets/tinyBenchmarks/tinyHellaswag) | [`tinyBenchmarks`](https://huggingface.co/papers/2402.14992), original [`HellaSwag`](https://huggingface.co/papers/1905.07830) | `tinyBenchmarks` package / dataset card | `validation`, sampled to `100` by default | `irt_plus_plus` (primary), `accuracy` | Follows the tinyBenchmarks setup. In the Python package this score is exposed as `gpirt`; this repo stores it as `irt_plus_plus`. |
+| ARC | [`allenai/ai2_arc`](https://huggingface.co/datasets/allenai/ai2_arc) | [`ARC`](https://huggingface.co/papers/1803.05457) | Dataset card + original benchmark split names | `validation` on both `ARC-Easy` and `ARC-Challenge` | `ARC-Easy accuracy`, `ARC-Challenge accuracy`, `macro_accuracy` | The repo reports both variants separately and also logs the simple macro-average across them. |
+| WinoGrande | [`allenai/winogrande`](https://huggingface.co/datasets/allenai/winogrande) | [`WinoGrande`](https://huggingface.co/papers/1907.10641) | Dataset card | `winogrande_xl` / `validation` | `accuracy` | The repo scores the two candidate sentence completions via continuation log-probabilities. |
+| GSM8K | [`openai/gsm8k`](https://huggingface.co/datasets/openai/gsm8k) | [`Training Verifiers to Solve Math Word Problems`](https://huggingface.co/papers/2110.14168) | Dataset card / original benchmark answer format | `main` / `test` | `exact_match` | The repo evaluates generated answers, first parsing `#### answer`, then falling back to the last numeric value after stripping `<think>...</think>`. |
+| TruthfulQA | [`truthfulqa/truthful_qa`](https://huggingface.co/datasets/truthfulqa/truthful_qa) | [`TruthfulQA`](https://huggingface.co/papers/2109.07958) | Official repo [`sylinrl/TruthfulQA`](https://github.com/sylinrl/TruthfulQA) and legacy HF reference [`eitanturok/truthful_qa`](https://huggingface.co/datasets/eitanturok/truthful_qa) | `multiple_choice` / `validation` | `MC1` (primary), `MC2` | The repo intentionally keeps the historical `MC1 + MC2` reporting for comparability, even though the official repo recommends the newer 2-option multiple-choice setup as of January 2025. That choice is an implementation decision for this repo, not a claim that the newer setup is invalid. |
+
+### Result Format
+
+When academic benchmarks are enabled, `answers_*.json` includes a top-level `academic_benchmarks` block. Each benchmark stores:
+
+- `original` -- clean-model summary for that benchmark
+- `modified` -- final edited-model summary for that benchmark
+- `delta_primary_metric` -- `modified.primary_metric_value - original.primary_metric_value`
+- `config` -- the exact normalized config snapshot used for that benchmark
+- `details_file` -- optional JSON file with the full clean/modified per-example results
+
+Task-specific summary fields:
+
+- `tinyhellaswag` -- `irt_plus_plus`, `accuracy`
+- `arc` -- `macro_accuracy`, plus `by_variant.ARC-Easy` and `by_variant.ARC-Challenge`
+- `winogrande` -- `accuracy`
+- `gsm8k` -- `exact_match`
+- `truthfulqa` -- `mc1`, `mc2`
+
 ## Project Structure
 
 ```
@@ -170,6 +282,7 @@ Each file is a self-contained experiment script. Launch via shell scripts (see `
 python -m baselines.graph_average
 python -m baselines.topic_ablation
 python -m baselines.tag_ablation
+python -m baselines.graph_grpo
 python -m baselines.graph_grpo_old
 ```
 
@@ -187,6 +300,8 @@ python -m baselines.graph_grpo_old
 |---|---|
 | `judges.py` | Core scoring functions: `evaluate_harmfulness_with_local_judge()` (LLM-as-a-Judge, 0-4 scale) and `classify_question_category_with_local_llm()` |
 | `metrics.py` | Batch helpers: `evaluate_responses()` scores a list of question-response pairs; `evaluate_locality()` measures harmfulness change on harmless questions before/after modification |
+| `academic_benchmarks.py` | Shared academic benchmark helpers for `TinyHellaSwag`, `ARC`, `WinoGrande`, `GSM8K`, and `TruthfulQA`, including caching and result serialization |
+| `model_scoring.py` | Shared chat-template generation and continuation log-prob scoring helpers used by `mmlu.py` and `academic_benchmarks.py` |
 | `mmlu.py` | Shared MMLU evaluation helpers: prompt building, deterministic sampling, caching, and result serialization |
 | `runner.py` | Standalone script to evaluate saved ablation results from JSON files |
 
@@ -277,6 +392,14 @@ results/
 │   └── locality/
 │       ├── distribution_plots/
 │       └── heatmap_plots/
+├── graph_grpo/
+│   ├── answers/
+│   ├── mmlu/                             # Optional per-example MMLU predictions
+│   ├── academic_benchmarks/
+│   │   ├── cache/                        # Cached clean-model academic evaluations
+│   │   └── details/                      # Final edited-model per-benchmark details
+│   ├── harmfulness/ ...
+│   └── locality/ ...
 ├── graph_grpo_old/
 │   ├── answers/
 │   ├── harmfulness/ ...
@@ -302,9 +425,25 @@ Saved answer files can now include a top-level `mmlu` block with:
 - `answer_comparison_preview` -- a compact before/after preview of how the model answered the same MMLU questions
 - `details_file` -- optional JSON with per-example predictions
 
+For `graph_grpo`, saved answer files can also include a top-level `academic_benchmarks` block. Each enabled benchmark stores:
+
+- `original` -- clean-model benchmark summary
+- `modified` -- final edited-model benchmark summary
+- `delta_primary_metric` -- difference in the benchmark's primary scalar metric
+- `config` -- exact benchmark config snapshot used for that run
+- `details_file` -- optional JSON with the full clean/modified benchmark outputs
+
+`graph_grpo` also writes academic cache/details files under:
+
+```
+results/graph_grpo/academic_benchmarks/
+├── cache/                                # Clean-model cached academic evaluations
+└── details/                              # Final edited-model per-benchmark details
+```
+
 ## Verification Notes
 
-The code changes are intended to be verified with lightweight unit tests and static checks only. Long-running editing methods are not required for validating the MMLU integration.
+The code changes are intended to be verified with lightweight unit tests and static checks only. Long-running editing methods are not required for validating the MMLU and academic benchmark integration.
 
 ## Credits
 

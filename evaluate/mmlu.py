@@ -18,16 +18,19 @@ from typing import Any, Iterable
 
 from config import MMLU_CONFIG, PROJECT_ROOT, RESULTS_DIR
 from data_utils import extract_response_after_think
+from evaluate.model_scoring import (
+    batchify,
+    build_chat_prompts,
+    generate_responses,
+    score_completion_logprob,
+    score_text_choice_variants,
+)
 
 
 CHOICE_LETTERS = ("A", "B", "C", "D")
 PREDICTION_PREVIEW_LIMIT = 10
 _DATASET_RECORDS_CACHE: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
 _PREPARED_DATA_CACHE: dict[str, dict[str, Any]] = {}
-
-
-def batchify(items: list[Any], batch_size: int) -> list[list[Any]]:
-    return [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
 
 
 def normalize_mmlu_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -287,18 +290,7 @@ def prepare_mmlu_data(config: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 def _generate_choice_responses(model: Any, prompts: list[str], max_new_tokens: int) -> list[str]:
-    responses: list[str] = []
-    batch_size = max(1, int(getattr(model.settings, "batch_size", 1)) or 1)
-
-    for batch in batchify(prompts, batch_size):
-        inputs, outputs = model.generate(batch, max_new_tokens=max_new_tokens)
-        decoded = model.tokenizer.batch_decode(
-            outputs[:, inputs["input_ids"].shape[1] :],
-            skip_special_tokens=True,
-        )
-        responses.extend(decoded)
-
-    return responses
+    return generate_responses(model, prompts, max_new_tokens=max_new_tokens)
 
 
 def _build_prediction_rows(entries: list[dict[str, Any]], responses: list[str]) -> list[dict[str, Any]]:
@@ -322,45 +314,11 @@ def _build_prediction_rows(entries: list[dict[str, Any]], responses: list[str]) 
 
 
 def _build_chat_prompts(model: Any, prompts: list[str]) -> list[str]:
-    chats = [model.get_chat(prompt) for prompt in prompts]
-    return model.tokenizer.apply_chat_template(
-        chats,
-        add_generation_prompt=True,
-        tokenize=False,
-    )
+    return build_chat_prompts(model, prompts)
 
 
 def _score_completion_logprob(model: Any, prompt_text: str, completion_text: str) -> float:
-    import torch
-    import torch.nn.functional as F
-
-    prompt_inputs = model.tokenizer(
-        prompt_text,
-        return_tensors="pt",
-        return_token_type_ids=False,
-        add_special_tokens=False,
-    )
-    full_inputs = model.tokenizer(
-        prompt_text + completion_text,
-        return_tensors="pt",
-        return_token_type_ids=False,
-        add_special_tokens=False,
-    ).to(model.model.device)
-
-    prompt_len = prompt_inputs["input_ids"].shape[1]
-    candidate_ids = full_inputs["input_ids"][:, prompt_len:]
-    if candidate_ids.shape[1] == 0:
-        return float("-inf")
-
-    with torch.no_grad():
-        outputs = model.model(**full_inputs)
-        log_probs = F.log_softmax(outputs.logits[:, :-1, :], dim=-1)
-
-    total = 0.0
-    start_position = prompt_len - 1
-    for step, token_id in enumerate(candidate_ids[0]):
-        total += log_probs[0, start_position + step, token_id.item()].item()
-    return total
+    return score_completion_logprob(model, prompt_text, completion_text)
 
 
 def _predict_with_logits(model: Any, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -370,10 +328,11 @@ def _predict_with_logits(model: Any, entries: list[dict[str, Any]]) -> list[dict
     for entry, prompt_text in zip(entries, chat_prompts):
         choice_scores = {}
         for letter in CHOICE_LETTERS:
-            variants = (letter, f" {letter}")
-            choice_scores[letter] = max(
-                _score_completion_logprob(model, prompt_text, variant)
-                for variant in variants
+            choice_scores[letter] = score_text_choice_variants(
+                model,
+                prompt_text,
+                letter,
+                variants=(letter, f" {letter}"),
             )
 
         predicted = max(choice_scores, key=choice_scores.get)

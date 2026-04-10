@@ -65,6 +65,40 @@ sample_seed = 42
 max_new_tokens = 2048
 store_predictions = true
 
+[academic_benchmarks]
+enabled = ["tinyhellaswag", "arc", "winogrande", "gsm8k", "truthfulqa"]
+sample_seed = 42
+store_predictions = true
+
+[academic_benchmarks.tinyhellaswag]
+dataset = "tinyBenchmarks/tinyHellaswag"
+split = "validation"
+sample_size = 100
+
+[academic_benchmarks.arc]
+dataset = "allenai/ai2_arc"
+split = "validation"
+sample_size = 100
+
+[academic_benchmarks.winogrande]
+dataset = "allenai/winogrande"
+subset = "winogrande_xl"
+split = "validation"
+sample_size = 100
+
+[academic_benchmarks.gsm8k]
+dataset = "openai/gsm8k"
+subset = "main"
+split = "test"
+sample_size = 100
+max_new_tokens = 512
+
+[academic_benchmarks.truthfulqa]
+dataset = "truthfulqa/truthful_qa"
+subset = "multiple_choice"
+split = "validation"
+sample_size = 100
+
 [benchmarks]
 enabled = []
 

@@ -44,6 +44,7 @@ from config import (
     MODEL_NAME, MODEL_BATCH_SIZE, CATEGORIES, GOOD_PROMPTS_DATASET, RESULTS_DIR,
     GRPO_CONFIG, ABLITERATION_PARAMS, FEW_SHOTS_PATH,
     GRAPH_FILE, EVALUATION_BACKEND,
+    ACADEMIC_BENCHMARKS_CONFIG,
     MMLU_CONFIG, DEBUG, get_method_results_dir,
 )
 from dataset.load_dataset import load_dataset_split
@@ -56,6 +57,13 @@ from evaluate.mmlu import (
     build_mmlu_result,
     evaluate_model_on_mmlu,
     get_cached_or_evaluate_original_mmlu,
+)
+from evaluate.academic_benchmarks import (
+    build_academic_benchmarks_result,
+    evaluate_model_on_academic_benchmarks,
+    get_academic_metric_names,
+    get_academic_metric_values,
+    get_cached_or_evaluate_original_academic_benchmarks,
 )
 from benchmarks.integration import (
     build_benchmark_runner,
@@ -309,6 +317,7 @@ def _build_wandb_run_name(
 
 def _define_model_state_eval_metrics(
     benchmark_names: List[str] | None = None,
+    academic_metric_names: List[str] | None = None,
 ) -> None:
     """Register shared wandb series so clean and best-value land on the same charts."""
     if not WANDB_AVAILABLE or not hasattr(wandb, "define_metric"):
@@ -328,6 +337,11 @@ def _define_model_state_eval_metrics(
             f"model_state_eval/{benchmark_name}_attack_success_rate",
             step_metric="model_state_eval/point_index",
         )
+    for metric_name in academic_metric_names or []:
+        wandb.define_metric(
+            f"model_state_eval/{metric_name}",
+            step_metric="model_state_eval/point_index",
+        )
 
 
 def _log_model_state_eval(
@@ -337,6 +351,7 @@ def _log_model_state_eval(
     harmfulness_on_full_dataset: Optional[float],
     mmlu_score: Optional[float],
     benchmark_attack_success_rates: Optional[Dict[str, float]] = None,
+    academic_metrics: Optional[Dict[str, float]] = None,
 ) -> None:
     """Log scalar and shared-series wandb metrics for clean/best model comparisons."""
     if not WANDB_AVAILABLE:
@@ -369,6 +384,11 @@ def _log_model_state_eval(
         payload[
             f"model_state_eval/{benchmark_name}_attack_success_rate"
         ] = attack_success_rate
+
+    for metric_name, value in (academic_metrics or {}).items():
+        for prefix in prefixes:
+            payload[f"{prefix}/{metric_name}"] = value
+        payload[f"model_state_eval/{metric_name}"] = value
 
     wandb.log(payload)
 
@@ -481,6 +501,7 @@ def _final_evaluate(
     classifier_categories: List[Dict[str, str]],
     n_layers: int,
     original_mmlu_result: Optional[Dict[str, Any]],
+    original_academic_results: Optional[Dict[str, Any]],
     results_dir: Path,
     benchmark_runner=None,
     benchmark_run_label: str = "graph_grpo_final",
@@ -520,6 +541,21 @@ def _final_evaluate(
                 f"{mmlu_block['original']['accuracy']:.4f} -> {mmlu_block['modified']['accuracy']:.4f}"
             )
 
+    academic_benchmarks = {}
+    if ACADEMIC_BENCHMARKS_CONFIG["enabled"] and original_academic_results:
+        print("Evaluating modified model on academic benchmarks...")
+        modified_academic_results = evaluate_model_on_academic_benchmarks(
+            model,
+            ACADEMIC_BENCHMARKS_CONFIG,
+        )
+        academic_benchmarks = build_academic_benchmarks_result(
+            config=ACADEMIC_BENCHMARKS_CONFIG,
+            original_results=original_academic_results,
+            modified_results=modified_academic_results,
+            method_results_dir=results_dir,
+            detail_prefix=benchmark_run_label,
+        )
+
     benchmark_results = {}
     if benchmark_runner is not None:
         print("Evaluating modified model on benchmarks...")
@@ -539,6 +575,7 @@ def _final_evaluate(
         "scores": harmfulness_result["scores"],
         "final_mean_harmfulness": harmfulness_result["mean_harmfulness"],
         "mmlu_block": mmlu_block,
+        "academic_benchmarks": academic_benchmarks,
         "benchmarks": benchmark_results,
     }
 
@@ -691,6 +728,15 @@ def main():
         if original_mmlu_result is not None:
             print(f"Original MMLU accuracy: {original_mmlu_result['summary']['accuracy']:.4f}")
 
+    original_academic_results = {}
+    if ACADEMIC_BENCHMARKS_CONFIG["enabled"]:
+        print("\nEvaluating original model on academic benchmarks...")
+        original_academic_results = get_cached_or_evaluate_original_academic_benchmarks(
+            model,
+            model_name=MODEL_NAME,
+            config=ACADEMIC_BENCHMARKS_CONFIG,
+        )
+
     print("Loading good prompts...")
     good_prompts = load_prompts(GOOD_PROMPTS_DATASET)
 
@@ -842,7 +888,8 @@ def main():
             },
         )
         _define_model_state_eval_metrics(
-            list(benchmark_runner.enabled_benchmark_names()) if benchmark_runner is not None else []
+            list(benchmark_runner.enabled_benchmark_names()) if benchmark_runner is not None else [],
+            get_academic_metric_names(ACADEMIC_BENCHMARKS_CONFIG),
         )
 
     print("\n" + "=" * 80)
@@ -872,6 +919,8 @@ def main():
     if original_mmlu_result is not None:
         clean_mmlu_score = original_mmlu_result["summary"]["accuracy"]
 
+    clean_academic_metrics = get_academic_metric_values(original_academic_results)
+
     clean_benchmark_summaries = {}
     if benchmark_runner is not None:
         print("Evaluating clean model on benchmarks...")
@@ -889,6 +938,7 @@ def main():
         harmfulness_on_full_dataset=clean_mean_harmfulness,
         mmlu_score=clean_mmlu_score,
         benchmark_attack_success_rates=clean_benchmark_attack_success_rates,
+        academic_metrics=clean_academic_metrics,
     )
 
     if optimizer_method == "grpo":
@@ -979,6 +1029,7 @@ def main():
         classifier_categories=classifier_categories,
         n_layers=n_layers,
         original_mmlu_result=original_mmlu_result,
+        original_academic_results=original_academic_results,
         results_dir=GRPO_RESULTS_DIR,
         benchmark_runner=benchmark_runner,
         benchmark_run_label=f"graph_grpo_{category_safe_name}",
@@ -1015,6 +1066,9 @@ def main():
     best_batch_model_mmlu_score = None
     if final_result["mmlu_block"] is not None:
         best_batch_model_mmlu_score = final_result["mmlu_block"]["modified"]["accuracy"]
+    best_batch_model_academic_metrics = get_academic_metric_values(
+        final_result["academic_benchmarks"],
+    )
     best_batch_model_benchmark_attack_success_rates = get_benchmark_attack_success_rates(
         final_result["benchmarks"],
     )
@@ -1030,6 +1084,7 @@ def main():
         harmfulness_on_full_dataset=best_batch_model_mean_harmfulness,
         mmlu_score=best_batch_model_mmlu_score,
         benchmark_attack_success_rates=best_batch_model_benchmark_attack_success_rates,
+        academic_metrics=best_batch_model_academic_metrics,
     )
 
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1088,6 +1143,8 @@ def main():
         answers_data["optimization_history"] = optimization_result["optimization_history"]
     if final_result["mmlu_block"] is not None:
         answers_data["mmlu"] = final_result["mmlu_block"]
+    if final_result["academic_benchmarks"]:
+        answers_data["academic_benchmarks"] = final_result["academic_benchmarks"]
     if final_result["benchmarks"]:
         answers_data["benchmarks"] = final_result["benchmarks"]
 

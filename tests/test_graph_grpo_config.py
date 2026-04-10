@@ -51,6 +51,12 @@ class TestGraphGrpoConfig(unittest.TestCase):
         weights = config["weights"]
         optimizer = config["optimizer"]
         optuna = config["optuna"]
+        academic_benchmarks = config["academic_benchmarks"]
+        tinyhellaswag = academic_benchmarks["tinyhellaswag"]
+        arc = academic_benchmarks["arc"]
+        winogrande = academic_benchmarks["winogrande"]
+        gsm8k = academic_benchmarks["gsm8k"]
+        truthfulqa = academic_benchmarks["truthfulqa"]
         benchmarks = config["benchmarks"]
         jailbreakbench = benchmarks["jailbreakbench"]
         jbb_official_judge = jailbreakbench["official_judge"]
@@ -74,6 +80,31 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertEqual(optuna["n_trials"], 50)
         self.assertEqual(optuna["weight_min"], -2.0)
         self.assertEqual(optuna["weight_max"], 2.0)
+        self.assertEqual(
+            academic_benchmarks["enabled"],
+            ["tinyhellaswag", "arc", "winogrande", "gsm8k", "truthfulqa"],
+        )
+        self.assertEqual(academic_benchmarks["sample_seed"], 42)
+        self.assertTrue(academic_benchmarks["store_predictions"])
+        self.assertEqual(tinyhellaswag["dataset"], "tinyBenchmarks/tinyHellaswag")
+        self.assertEqual(tinyhellaswag["split"], "validation")
+        self.assertEqual(tinyhellaswag["sample_size"], 100)
+        self.assertEqual(arc["dataset"], "allenai/ai2_arc")
+        self.assertEqual(arc["split"], "validation")
+        self.assertEqual(arc["sample_size"], 100)
+        self.assertEqual(winogrande["dataset"], "allenai/winogrande")
+        self.assertEqual(winogrande["subset"], "winogrande_xl")
+        self.assertEqual(winogrande["split"], "validation")
+        self.assertEqual(winogrande["sample_size"], 100)
+        self.assertEqual(gsm8k["dataset"], "openai/gsm8k")
+        self.assertEqual(gsm8k["subset"], "main")
+        self.assertEqual(gsm8k["split"], "test")
+        self.assertEqual(gsm8k["sample_size"], 100)
+        self.assertEqual(gsm8k["max_new_tokens"], 512)
+        self.assertEqual(truthfulqa["dataset"], "truthfulqa/truthful_qa")
+        self.assertEqual(truthfulqa["subset"], "multiple_choice")
+        self.assertEqual(truthfulqa["split"], "validation")
+        self.assertEqual(truthfulqa["sample_size"], 100)
         self.assertEqual(weights["mode"], "scalar")
         self.assertEqual(weights["init_type"], "average")
         self.assertEqual(benchmarks["enabled"], [])
@@ -138,6 +169,37 @@ class TestGraphGrpoConfig(unittest.TestCase):
             self.assertEqual(os.environ["OPTUNA_SAMPLER_SEED"], "42")
             self.assertEqual(os.environ["OPTUNA_WEIGHT_MIN"], "-2.0")
             self.assertEqual(os.environ["OPTUNA_WEIGHT_MAX"], "2.0")
+            self.assertEqual(
+                os.environ["ACADEMIC_BENCHMARKS_ENABLED"],
+                "tinyhellaswag,arc,winogrande,gsm8k,truthfulqa",
+            )
+            self.assertEqual(os.environ["ACADEMIC_BENCHMARKS_SAMPLE_SEED"], "42")
+            self.assertEqual(os.environ["ACADEMIC_BENCHMARKS_STORE_PREDICTIONS"], "true")
+            self.assertEqual(
+                os.environ["TINYHELLASWAG_DATASET"],
+                "tinyBenchmarks/tinyHellaswag",
+            )
+            self.assertEqual(os.environ["TINYHELLASWAG_SPLIT"], "validation")
+            self.assertEqual(os.environ["TINYHELLASWAG_SAMPLE_SIZE"], "100")
+            self.assertEqual(os.environ["ARC_DATASET"], "allenai/ai2_arc")
+            self.assertEqual(os.environ["ARC_SPLIT"], "validation")
+            self.assertEqual(os.environ["ARC_SAMPLE_SIZE"], "100")
+            self.assertEqual(os.environ["WINOGRANDE_DATASET"], "allenai/winogrande")
+            self.assertEqual(os.environ["WINOGRANDE_SUBSET"], "winogrande_xl")
+            self.assertEqual(os.environ["WINOGRANDE_SPLIT"], "validation")
+            self.assertEqual(os.environ["WINOGRANDE_SAMPLE_SIZE"], "100")
+            self.assertEqual(os.environ["GSM8K_DATASET"], "openai/gsm8k")
+            self.assertEqual(os.environ["GSM8K_SUBSET"], "main")
+            self.assertEqual(os.environ["GSM8K_SPLIT"], "test")
+            self.assertEqual(os.environ["GSM8K_SAMPLE_SIZE"], "100")
+            self.assertEqual(os.environ["GSM8K_MAX_NEW_TOKENS"], "512")
+            self.assertEqual(
+                os.environ["TRUTHFULQA_DATASET"],
+                "truthfulqa/truthful_qa",
+            )
+            self.assertEqual(os.environ["TRUTHFULQA_SUBSET"], "multiple_choice")
+            self.assertEqual(os.environ["TRUTHFULQA_SPLIT"], "validation")
+            self.assertEqual(os.environ["TRUTHFULQA_SAMPLE_SIZE"], "100")
             self.assertEqual(os.environ["BENCHMARKS_ENABLED"], "")
             self.assertEqual(os.environ["JAILBREAKBENCH_JUDGE_MODE"], "official")
             self.assertEqual(os.environ["JAILBREAKBENCH_MAX_SAMPLES"], "100")
@@ -219,6 +281,13 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertIn("OPTUNA_SAMPLER_SEED=42", script_text)
         self.assertIn("OPTUNA_WEIGHT_MIN=-2.0", script_text)
         self.assertIn("OPTUNA_WEIGHT_MAX=2.0", script_text)
+        self.assertIn("ACADEMIC_BENCHMARKS_ENABLED", script_text)
+        self.assertIn("TINYHELLASWAG_SAMPLE_SIZE", script_text)
+        self.assertIn("ARC_SAMPLE_SIZE", script_text)
+        self.assertIn("WINOGRANDE_SAMPLE_SIZE", script_text)
+        self.assertIn("GSM8K_SAMPLE_SIZE", script_text)
+        self.assertIn("GSM8K_MAX_NEW_TOKENS", script_text)
+        self.assertIn("TRUTHFULQA_SAMPLE_SIZE", script_text)
         self.assertNotIn("GRPO_ALPHAS", script_text)
 
     def test_run_graph_optuna_script_uses_optuna_optimizer(self):

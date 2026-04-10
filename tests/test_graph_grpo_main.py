@@ -89,6 +89,7 @@ class TestGraphGrpoMain(unittest.TestCase):
         train_metrics_sequence=None,
         modified_mmlu_scores=None,
         benchmark_results=None,
+        academic_benchmark_results=None,
         harmful_train=None,
         harmful_val=None,
         harmful_test=None,
@@ -184,6 +185,9 @@ class TestGraphGrpoMain(unittest.TestCase):
         fake_config.FEW_SHOTS_PATH = few_shots_path
         fake_config.GRAPH_FILE = graph_file
         fake_config.EVALUATION_BACKEND = "llamaguard"
+        fake_config.ACADEMIC_BENCHMARKS_CONFIG = {
+            "enabled": list((academic_benchmark_results or {}).keys()),
+        }
         fake_config.MMLU_CONFIG = {"enabled": mmlu_enabled}
         fake_config.DEBUG = False
         fake_config.get_method_results_dir = lambda method_name: self.temp_path / method_name
@@ -278,6 +282,96 @@ class TestGraphGrpoMain(unittest.TestCase):
         fake_mmlu.build_mmlu_result = fake_build_mmlu_result
         fake_mmlu.evaluate_model_on_mmlu = fake_evaluate_model_on_mmlu
         fake_mmlu.get_cached_or_evaluate_original_mmlu = fake_get_cached_or_evaluate_original_mmlu
+
+        fake_academic = types.ModuleType("evaluate.academic_benchmarks")
+
+        def _raw_academic_result_from_summary(summary):
+            return {
+                "summary": dict(summary),
+                "prediction_preview": [],
+            }
+
+        def fake_build_academic_benchmarks_result(
+            *,
+            config,
+            original_results,
+            modified_results,
+            method_results_dir,
+            detail_prefix,
+        ):
+            return academic_benchmark_results or {}
+
+        def fake_evaluate_model_on_academic_benchmarks(model, config):
+            return {
+                benchmark_name: _raw_academic_result_from_summary(
+                    benchmark_block["modified"]
+                )
+                for benchmark_name, benchmark_block in (academic_benchmark_results or {}).items()
+            }
+
+        def fake_get_cached_or_evaluate_original_academic_benchmarks(
+            model,
+            *,
+            model_name,
+            config,
+        ):
+            return {
+                benchmark_name: _raw_academic_result_from_summary(
+                    benchmark_block["original"]
+                )
+                for benchmark_name, benchmark_block in (academic_benchmark_results or {}).items()
+            }
+
+        def fake_get_academic_metric_names(config=None):
+            names = []
+            for benchmark_name in (academic_benchmark_results or {}).keys():
+                if benchmark_name == "tinyhellaswag":
+                    names.extend(
+                        ["tinyhellaswag_irt_plus_plus", "tinyhellaswag_accuracy"]
+                    )
+                elif benchmark_name == "arc":
+                    names.extend(
+                        ["arc_easy_accuracy", "arc_challenge_accuracy", "arc_macro_accuracy"]
+                    )
+                elif benchmark_name == "winogrande":
+                    names.append("winogrande_accuracy")
+                elif benchmark_name == "gsm8k":
+                    names.append("gsm8k_exact_match")
+                elif benchmark_name == "truthfulqa":
+                    names.extend(["truthfulqa_mc1", "truthfulqa_mc2"])
+            return names
+
+        def fake_get_academic_metric_values(results):
+            values = {}
+            for benchmark_name, benchmark_block in (results or {}).items():
+                summary = benchmark_block.get("summary") or benchmark_block.get("modified")
+                if benchmark_name == "tinyhellaswag":
+                    values["tinyhellaswag_irt_plus_plus"] = summary["irt_plus_plus"]
+                    values["tinyhellaswag_accuracy"] = summary["accuracy"]
+                elif benchmark_name == "arc":
+                    values["arc_easy_accuracy"] = summary["by_variant"]["ARC-Easy"]["accuracy"]
+                    values["arc_challenge_accuracy"] = summary["by_variant"]["ARC-Challenge"]["accuracy"]
+                    values["arc_macro_accuracy"] = summary["macro_accuracy"]
+                elif benchmark_name == "winogrande":
+                    values["winogrande_accuracy"] = summary["accuracy"]
+                elif benchmark_name == "gsm8k":
+                    values["gsm8k_exact_match"] = summary["exact_match"]
+                elif benchmark_name == "truthfulqa":
+                    values["truthfulqa_mc1"] = summary["mc1"]
+                    values["truthfulqa_mc2"] = summary["mc2"]
+            return values
+
+        fake_academic.build_academic_benchmarks_result = (
+            fake_build_academic_benchmarks_result
+        )
+        fake_academic.evaluate_model_on_academic_benchmarks = (
+            fake_evaluate_model_on_academic_benchmarks
+        )
+        fake_academic.get_academic_metric_names = fake_get_academic_metric_names
+        fake_academic.get_academic_metric_values = fake_get_academic_metric_values
+        fake_academic.get_cached_or_evaluate_original_academic_benchmarks = (
+            fake_get_cached_or_evaluate_original_academic_benchmarks
+        )
 
         fake_benchmarks_integration = types.ModuleType("benchmarks.integration")
         fake_benchmarks_integration.build_benchmark_runner = (
@@ -419,6 +513,7 @@ class TestGraphGrpoMain(unittest.TestCase):
             "model_utils": fake_model_utils,
             "baselines.graph_grpo.reward": fake_reward,
             "evaluate.mmlu": fake_mmlu,
+            "evaluate.academic_benchmarks": fake_academic,
             "benchmarks.integration": fake_benchmarks_integration,
             "baselines.graph_grpo.optuna_optimizer": fake_optuna,
             "baselines.graph_grpo.trainer": fake_trainer,
@@ -938,6 +1033,136 @@ class TestGraphGrpoMain(unittest.TestCase):
                 for payload in scalar_payloads
             )
         )
+
+    def test_main_saves_academic_benchmark_blocks_and_logs_series(self):
+        dataset = [
+            {"instruction": "physical-question-1", "category": "Physical harm", "source": "combined"},
+            {"instruction": "physical-question-2", "category": "Physical harm", "source": "combined"},
+        ]
+        academic_benchmark_results = {
+            "tinyhellaswag": {
+                "original": {
+                    "primary_metric_name": "irt_plus_plus",
+                    "primary_metric_value": 0.31,
+                    "irt_plus_plus": 0.31,
+                    "accuracy": 0.44,
+                },
+                "modified": {
+                    "primary_metric_name": "irt_plus_plus",
+                    "primary_metric_value": 0.48,
+                    "irt_plus_plus": 0.48,
+                    "accuracy": 0.55,
+                },
+                "config": {"sample_size": 100},
+                "details_file": "academic/tinyhellaswag.json",
+                "delta_primary_metric": 0.17,
+            },
+            "arc": {
+                "original": {
+                    "primary_metric_name": "macro_accuracy",
+                    "primary_metric_value": 0.5,
+                    "macro_accuracy": 0.5,
+                    "by_variant": {
+                        "ARC-Easy": {"accuracy": 0.6},
+                        "ARC-Challenge": {"accuracy": 0.4},
+                    },
+                },
+                "modified": {
+                    "primary_metric_name": "macro_accuracy",
+                    "primary_metric_value": 0.65,
+                    "macro_accuracy": 0.65,
+                    "by_variant": {
+                        "ARC-Easy": {"accuracy": 0.7},
+                        "ARC-Challenge": {"accuracy": 0.6},
+                    },
+                },
+                "config": {"sample_size": 100},
+                "details_file": "academic/arc.json",
+                "delta_primary_metric": 0.15,
+            },
+            "winogrande": {
+                "original": {
+                    "primary_metric_name": "accuracy",
+                    "primary_metric_value": 0.52,
+                    "accuracy": 0.52,
+                },
+                "modified": {
+                    "primary_metric_name": "accuracy",
+                    "primary_metric_value": 0.61,
+                    "accuracy": 0.61,
+                },
+                "config": {"sample_size": 100},
+                "details_file": "academic/winogrande.json",
+                "delta_primary_metric": 0.09,
+            },
+            "gsm8k": {
+                "original": {
+                    "primary_metric_name": "exact_match",
+                    "primary_metric_value": 0.18,
+                    "exact_match": 0.18,
+                },
+                "modified": {
+                    "primary_metric_name": "exact_match",
+                    "primary_metric_value": 0.27,
+                    "exact_match": 0.27,
+                },
+                "config": {"sample_size": 100},
+                "details_file": "academic/gsm8k.json",
+                "delta_primary_metric": 0.09,
+            },
+            "truthfulqa": {
+                "original": {
+                    "primary_metric_name": "mc1",
+                    "primary_metric_value": 0.36,
+                    "mc1": 0.36,
+                    "mc2": 0.41,
+                },
+                "modified": {
+                    "primary_metric_name": "mc1",
+                    "primary_metric_value": 0.43,
+                    "mc1": 0.43,
+                    "mc2": 0.49,
+                },
+                "config": {"sample_size": 100},
+                "details_file": "academic/truthfulqa.json",
+                "delta_primary_metric": 0.07,
+            },
+        }
+
+        result = self._run_main(
+            dataset=dataset,
+            category_dataset_source="combined",
+            category_filter="Physical harm",
+            model_batch_size=2,
+            optimizer_method="optuna",
+            weights_mode="scalar",
+            mmlu_enabled=False,
+            academic_benchmark_results=academic_benchmark_results,
+        )
+
+        self.assertIn("academic_benchmarks", result["answers_data"])
+        self.assertAlmostEqual(
+            result["answers_data"]["academic_benchmarks"]["tinyhellaswag"]["modified"]["irt_plus_plus"],
+            0.48,
+        )
+        self.assertAlmostEqual(
+            result["answers_data"]["academic_benchmarks"]["arc"]["modified"]["macro_accuracy"],
+            0.65,
+        )
+        self.assertAlmostEqual(
+            result["answers_data"]["academic_benchmarks"]["truthfulqa"]["modified"]["mc1"],
+            0.43,
+        )
+
+        scalar_payloads = [payload for payload, _step in result["wandb_log_calls"]]
+        self.assertTrue(any("clean_model/tinyhellaswag_irt_plus_plus" in payload for payload in scalar_payloads))
+        self.assertTrue(any("best_value_model/tinyhellaswag_irt_plus_plus" in payload for payload in scalar_payloads))
+        self.assertTrue(any("clean_model/arc_easy_accuracy" in payload for payload in scalar_payloads))
+        self.assertTrue(any("best_value_model/arc_challenge_accuracy" in payload for payload in scalar_payloads))
+        self.assertTrue(any("clean_model/winogrande_accuracy" in payload for payload in scalar_payloads))
+        self.assertTrue(any("best_value_model/gsm8k_exact_match" in payload for payload in scalar_payloads))
+        self.assertTrue(any("clean_model/truthfulqa_mc1" in payload for payload in scalar_payloads))
+        self.assertTrue(any("best_value_model/truthfulqa_mc2" in payload for payload in scalar_payloads))
 
 
 if __name__ == "__main__":
