@@ -167,6 +167,17 @@ class TestGraphAverageBenchmarks(unittest.TestCase):
                 "by_functional_category": {},
                 "by_semantic_category": {},
             },
+            "malicious_instruct": {
+                "original": {"attack_success_rate": 0.15},
+                "modified": {"attack_success_rate": 0.45},
+                "delta_attack_success_rate": 0.3,
+                "config": {"judge_mode": "official"},
+                "details_file": {
+                    "original": "mi_orig.json",
+                    "modified": "mi_mod.json",
+                },
+                "by_category": {},
+            },
         }
         fake_benchmark_runner = FakeBenchmarkRunner(benchmark_results)
         fake_benchmarks_integration = types.ModuleType("benchmarks.integration")
@@ -207,6 +218,10 @@ class TestGraphAverageBenchmarks(unittest.TestCase):
         self.assertAlmostEqual(
             payload["benchmarks"]["harmbench"]["modified"]["attack_success_rate"],
             0.4,
+        )
+        self.assertAlmostEqual(
+            payload["benchmarks"]["malicious_instruct"]["modified"]["attack_success_rate"],
+            0.45,
         )
         self.assertEqual(fake_benchmark_runner.prepare_calls, 1)
         self.assertEqual(fake_benchmark_runner.run_labels, ["graph_average_Physical_harm_max_weight=1.0_&max_weight_position=0.7_&min_weight=0.0_&min_weight_distance=0.3"])

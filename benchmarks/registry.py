@@ -39,8 +39,10 @@ class BenchmarkRegistry:
 def get_default_registry() -> BenchmarkRegistry:
     from .harmbench import HarmBenchBenchmark
     from .jailbreakbench import JailbreakBenchBenchmark
+    from .malicious_instruct import MaliciousInstructBenchmark
 
     registry = BenchmarkRegistry()
     registry.register(HarmBenchBenchmark())
     registry.register(JailbreakBenchBenchmark())
+    registry.register(MaliciousInstructBenchmark())
     return registry

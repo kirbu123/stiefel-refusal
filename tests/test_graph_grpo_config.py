@@ -52,6 +52,8 @@ class TestGraphGrpoConfig(unittest.TestCase):
         jbb_official_judge = jailbreakbench["official_judge"]
         harmbench = benchmarks["harmbench"]
         official_classifier = harmbench["official_classifier"]
+        malicious_instruct = benchmarks["malicious_instruct"]
+        mi_official_evaluator = malicious_instruct["official_evaluator"]
 
         self.assertEqual(model["batch_size"], 32)
         self.assertEqual(data["category_dataset_source"], "combined")
@@ -94,6 +96,16 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertEqual(official_classifier["batch_size"], 8)
         self.assertEqual(official_classifier["device"], "cuda")
         self.assertEqual(official_classifier["dtype"], "bfloat16")
+        self.assertEqual(malicious_instruct["judge_mode"], "official")
+        self.assertEqual(malicious_instruct["max_samples"], 0)
+        self.assertEqual(malicious_instruct["categories"], [])
+        self.assertEqual(malicious_instruct["harmful_score_threshold"], 3)
+        self.assertEqual(
+            mi_official_evaluator["model_name"],
+            "LibrAI/maliciousinstruct-evaluator",
+        )
+        self.assertEqual(mi_official_evaluator["batch_size"], 32)
+        self.assertEqual(mi_official_evaluator["device"], "cuda")
 
     def test_apply_config_to_env_sets_new_grpo_env_vars_without_alphas(self):
         config = load_config("graph_grpo")
@@ -152,6 +164,25 @@ class TestGraphGrpoConfig(unittest.TestCase):
             self.assertEqual(os.environ["HARMBENCH_OFFICIAL_CLASSIFIER_BATCH_SIZE"], "8")
             self.assertEqual(os.environ["HARMBENCH_OFFICIAL_CLASSIFIER_DEVICE"], "cuda")
             self.assertEqual(os.environ["HARMBENCH_OFFICIAL_CLASSIFIER_DTYPE"], "bfloat16")
+            self.assertEqual(os.environ["MALICIOUS_INSTRUCT_JUDGE_MODE"], "official")
+            self.assertEqual(os.environ["MALICIOUS_INSTRUCT_MAX_SAMPLES"], "0")
+            self.assertEqual(os.environ["MALICIOUS_INSTRUCT_CATEGORIES"], "")
+            self.assertEqual(
+                os.environ["MALICIOUS_INSTRUCT_HARMFUL_SCORE_THRESHOLD"],
+                "3",
+            )
+            self.assertEqual(
+                os.environ["MALICIOUS_INSTRUCT_OFFICIAL_EVALUATOR_MODEL_NAME"],
+                "LibrAI/maliciousinstruct-evaluator",
+            )
+            self.assertEqual(
+                os.environ["MALICIOUS_INSTRUCT_OFFICIAL_EVALUATOR_BATCH_SIZE"],
+                "32",
+            )
+            self.assertEqual(
+                os.environ["MALICIOUS_INSTRUCT_OFFICIAL_EVALUATOR_DEVICE"],
+                "cuda",
+            )
             self.assertNotIn("GRPO_ALPHAS", os.environ)
 
     def test_run_graph_grpo_script_uses_average_init_and_debug_false(self):

@@ -7,6 +7,7 @@ from benchmarks.settings import (
     get_enabled_benchmark_configs,
     normalize_harmbench_config,
     normalize_jailbreakbench_config,
+    normalize_malicious_instruct_config,
 )
 
 
@@ -53,9 +54,27 @@ class TestBenchmarkSettings(unittest.TestCase):
         self.assertEqual(normalized["official_classifier"]["device"], "cuda")
         self.assertEqual(normalized["official_classifier"]["dtype"], "bfloat16")
 
-    def test_get_enabled_benchmark_configs_returns_both_builtin_configs(self):
+    def test_normalize_malicious_instruct_config_defaults_to_official(self):
+        normalized = normalize_malicious_instruct_config()
+
+        self.assertEqual(normalized["judge_mode"], "official")
+        self.assertEqual(normalized["max_samples"], 0)
+        self.assertEqual(normalized["categories"], [])
+        self.assertEqual(normalized["harmful_score_threshold"], 3)
+        self.assertEqual(
+            normalized["official_evaluator"]["model_name"],
+            "LibrAI/maliciousinstruct-evaluator",
+        )
+        self.assertEqual(normalized["official_evaluator"]["batch_size"], 32)
+        self.assertEqual(normalized["official_evaluator"]["device"], "cuda")
+
+    def test_get_enabled_benchmark_configs_returns_all_builtin_configs(self):
         fake_config = types.ModuleType("config")
-        fake_config.BENCHMARKS_ENABLED = ("jailbreakbench", "harmbench")
+        fake_config.BENCHMARKS_ENABLED = (
+            "jailbreakbench",
+            "harmbench",
+            "malicious_instruct",
+        )
         fake_config.JAILBREAKBENCH_CONFIG = {
             "judge_mode": "official",
             "max_samples": 50,
@@ -83,11 +102,24 @@ class TestBenchmarkSettings(unittest.TestCase):
                 "dtype": "float32",
             },
         }
+        fake_config.MALICIOUS_INSTRUCT_CONFIG = {
+            "judge_mode": "official",
+            "max_samples": 12,
+            "categories": ["Privacy"],
+            "official_evaluator": {
+                "model_name": "test-mi-eval",
+                "batch_size": 16,
+                "device": "cpu",
+            },
+        }
         sys.modules["config"] = fake_config
 
         configs = get_enabled_benchmark_configs()
 
-        self.assertEqual(set(configs), {"jailbreakbench", "harmbench"})
+        self.assertEqual(
+            set(configs),
+            {"jailbreakbench", "harmbench", "malicious_instruct"},
+        )
         self.assertEqual(configs["jailbreakbench"]["judge_mode"], "official")
         self.assertEqual(configs["jailbreakbench"]["max_samples"], 50)
         self.assertEqual(
@@ -97,12 +129,19 @@ class TestBenchmarkSettings(unittest.TestCase):
         self.assertEqual(configs["harmbench"]["judge_mode"], "official")
         self.assertEqual(configs["harmbench"]["split"], "all")
         self.assertEqual(configs["harmbench"]["official_classifier"]["model_name"], "test-cls")
+        self.assertEqual(configs["malicious_instruct"]["judge_mode"], "official")
+        self.assertEqual(configs["malicious_instruct"]["max_samples"], 12)
+        self.assertEqual(
+            configs["malicious_instruct"]["official_evaluator"]["model_name"],
+            "test-mi-eval",
+        )
 
-    def test_default_registry_includes_harmbench_and_jailbreakbench(self):
+    def test_default_registry_includes_all_builtin_benchmarks(self):
         registry = get_default_registry()
 
         self.assertIn("harmbench", registry.names())
         self.assertIn("jailbreakbench", registry.names())
+        self.assertIn("malicious_instruct", registry.names())
 
 
 if __name__ == "__main__":

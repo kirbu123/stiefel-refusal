@@ -730,6 +730,14 @@ class TestGraphGrpoMain(unittest.TestCase):
                 "by_category": {},
                 "by_functional_category": {},
                 "by_semantic_category": {},
+            },
+            "malicious_instruct": {
+                "original": {"attack_success_rate": 0.15},
+                "modified": {"attack_success_rate": 0.45},
+                "delta_attack_success_rate": 0.3,
+                "config": {"judge_mode": "official"},
+                "details_file": {"original": "mi_orig.json", "modified": "mi_mod.json"},
+                "by_category": {},
             }
         }
 
@@ -752,6 +760,10 @@ class TestGraphGrpoMain(unittest.TestCase):
         self.assertAlmostEqual(
             result["answers_data"]["benchmarks"]["harmbench"]["modified"]["attack_success_rate"],
             0.4,
+        )
+        self.assertAlmostEqual(
+            result["answers_data"]["benchmarks"]["malicious_instruct"]["modified"]["attack_success_rate"],
+            0.45,
         )
         self.assertEqual(result["benchmark_runner"].prepare_calls, 1)
         self.assertEqual(
@@ -781,6 +793,18 @@ class TestGraphGrpoMain(unittest.TestCase):
         self.assertTrue(
             any(
                 "best_value_model/harmbench_attack_success_rate" in payload
+                for payload in scalar_payloads
+            )
+        )
+        self.assertTrue(
+            any(
+                "clean_model/malicious_instruct_attack_success_rate" in payload
+                for payload in scalar_payloads
+            )
+        )
+        self.assertTrue(
+            any(
+                "best_value_model/malicious_instruct_attack_success_rate" in payload
                 for payload in scalar_payloads
             )
         )

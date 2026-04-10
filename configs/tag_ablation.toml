@@ -65,3 +65,14 @@ model_name = "cais/HarmBench-Llama-2-13b-cls"
 batch_size = 8
 device = "cuda"
 dtype = "bfloat16"
+
+[benchmarks.malicious_instruct]
+judge_mode = "official"
+max_samples = 0
+categories = []
+harmful_score_threshold = 3
+
+[benchmarks.malicious_instruct.official_evaluator]
+model_name = "LibrAI/maliciousinstruct-evaluator"
+batch_size = 32
+device = "cuda"
