@@ -77,10 +77,22 @@ def apply_config_to_env(config: dict[str, Any], model_name: str | None = None):
     data = config.get("data", {})
     if data.get("graph_file"):
         os.environ["GRAPH_FILE"] = data["graph_file"]
+    if data.get("category_mode"):
+        os.environ.setdefault("CATEGORY_MODE", data["category_mode"])
     if data.get("category_dataset_source"):
         os.environ.setdefault("CATEGORY_DATASET_SOURCE", data["category_dataset_source"])
     if data.get("category_filter"):
         os.environ.setdefault("CATEGORY_FILTER", data["category_filter"])
+    if data.get("all_categories_harmful_prompt_count") is not None:
+        os.environ.setdefault(
+            "ALL_CATEGORIES_HARMFUL_PROMPT_COUNT",
+            str(data["all_categories_harmful_prompt_count"]),
+        )
+    if data.get("all_categories_harmful_prompt_seed") is not None:
+        os.environ.setdefault(
+            "ALL_CATEGORIES_HARMFUL_PROMPT_SEED",
+            str(data["all_categories_harmful_prompt_seed"]),
+        )
     if data.get("tag_filtered_questions_file"):
         os.environ["TAG_FILTERED_QUESTIONS_FILE"] = data["tag_filtered_questions_file"]
 

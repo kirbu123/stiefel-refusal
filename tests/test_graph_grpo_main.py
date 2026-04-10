@@ -79,14 +79,19 @@ class TestGraphGrpoMain(unittest.TestCase):
         dataset,
         category_dataset_source,
         category_filter,
+        category_mode="single",
         model_batch_size=2,
         optimizer_method="optuna",
         weights_mode="scalar",
+        weights_init_type="average",
         grpo_n_epochs=1,
         mmlu_enabled=False,
         train_metrics_sequence=None,
         modified_mmlu_scores=None,
         benchmark_results=None,
+        harmful_train=None,
+        harmful_val=None,
+        harmful_test=None,
     ):
         few_shots_path = self.temp_path / "few-shots.json"
         few_shots_path.write_text(json.dumps({"categories": []}), encoding="utf-8")
@@ -98,12 +103,14 @@ class TestGraphGrpoMain(unittest.TestCase):
         results_root.mkdir(parents=True, exist_ok=True)
 
         loader_calls = []
+        split_loader_calls = []
         wandb_init_calls = []
         wandb_log_calls = []
         define_metric_calls = []
         train_step_questions = []
         optuna_trial_batches = []
         mmlu_eval_calls = []
+        direction_compute_calls = []
         benchmark_runner = None
 
         if benchmark_results is not None:
@@ -208,10 +215,36 @@ class TestGraphGrpoMain(unittest.TestCase):
         fake_data_utils.load_datasets_with_categories = fake_load_datasets_with_categories
         fake_data_utils.extract_response_after_think = lambda response: response.split("</think>")[-1].strip()
 
+        fake_dataset_load_dataset = types.ModuleType("dataset.load_dataset")
+        harmful_train_data = list(harmful_train or [])
+        harmful_val_data = list(harmful_val or [])
+        harmful_test_data = list(harmful_test or [])
+
+        def fake_load_dataset_split(harmtype, split, instructions_only=False):
+            split_loader_calls.append((harmtype, split, instructions_only))
+            split_map = {
+                ("harmful", "train"): harmful_train_data,
+                ("harmful", "val"): harmful_val_data,
+                ("harmful", "test"): harmful_test_data,
+                ("harmless", "train"): [],
+                ("harmless", "val"): [],
+                ("harmless", "test"): [],
+            }
+            selected = list(split_map[(harmtype, split)])
+            if instructions_only:
+                return list(selected)
+            return [{"instruction": item} for item in selected]
+
+        fake_dataset_load_dataset.load_dataset_split = fake_load_dataset_split
+        fake_dataset_pkg = types.ModuleType("dataset")
+        fake_dataset_pkg.load_dataset = fake_dataset_load_dataset
+
         fake_refusal_directions = types.ModuleType("refusal_directions")
-        fake_refusal_directions.compute_refusal_direction = (
-            lambda model, harmful_prompts, good_prompts: torch.ones((2, 2), dtype=torch.float32)
-        )
+        def fake_compute_refusal_direction(model, harmful_prompts, good_prompts):
+            direction_compute_calls.append(list(harmful_prompts))
+            return torch.ones((2, 2), dtype=torch.float32)
+
+        fake_refusal_directions.compute_refusal_direction = fake_compute_refusal_direction
         fake_refusal_directions.save_refusal_directions = lambda *args, **kwargs: None
         fake_refusal_directions.load_refusal_directions = lambda *args, **kwargs: ([], [])
 
@@ -379,6 +412,8 @@ class TestGraphGrpoMain(unittest.TestCase):
             "heretic.utils": fake_heretic_utils,
             "heretic.model": fake_heretic_model,
             "config": fake_config,
+            "dataset": fake_dataset_pkg,
+            "dataset.load_dataset": fake_dataset_load_dataset,
             "data_utils": fake_data_utils,
             "refusal_directions": fake_refusal_directions,
             "model_utils": fake_model_utils,
@@ -390,11 +425,14 @@ class TestGraphGrpoMain(unittest.TestCase):
         }
 
         env = {
+            "CATEGORY_MODE": category_mode,
             "CATEGORY_DATASET_SOURCE": category_dataset_source,
             "CATEGORY_FILTER": category_filter,
+            "ALL_CATEGORIES_HARMFUL_PROMPT_COUNT": "128",
+            "ALL_CATEGORIES_HARMFUL_PROMPT_SEED": "42",
             "OPTIMIZER_METHOD": optimizer_method,
             "WEIGHTS_MODE": weights_mode,
-            "WEIGHTS_INIT_TYPE": "average",
+            "WEIGHTS_INIT_TYPE": weights_init_type,
         }
 
         sys.modules.pop("baselines.graph_grpo.__main__", None)
@@ -410,12 +448,14 @@ class TestGraphGrpoMain(unittest.TestCase):
         return {
             "answers_data": answers_data,
             "loader_calls": loader_calls,
+            "split_loader_calls": split_loader_calls,
             "wandb_init_calls": wandb_init_calls,
             "wandb_log_calls": wandb_log_calls,
             "define_metric_calls": define_metric_calls,
             "train_step_questions": train_step_questions,
             "optuna_trial_batches": optuna_trial_batches,
             "mmlu_eval_calls": mmlu_eval_calls,
+            "direction_compute_calls": direction_compute_calls,
             "models": FakeModel.instances,
             "benchmark_runner": benchmark_runner,
         }
@@ -512,6 +552,88 @@ class TestGraphGrpoMain(unittest.TestCase):
             "Physical harm",
         )
 
+    def test_main_all_mode_uses_train_val_test_splits(self):
+        result = self._run_main(
+            dataset=[],
+            category_dataset_source="combined",
+            category_filter="",
+            category_mode="all",
+            model_batch_size=2,
+            optimizer_method="optuna",
+            weights_mode="scalar",
+            mmlu_enabled=False,
+            harmful_train=["train-1", "train-2", "train-3"],
+            harmful_val=["val-1", "val-2", "val-3", "val-4"],
+            harmful_test=["test-1", "test-2"],
+        )
+
+        self.assertEqual(result["loader_calls"], [])
+        self.assertEqual(
+            result["split_loader_calls"],
+            [
+                ("harmful", "val", True),
+                ("harmful", "test", True),
+                ("harmful", "train", True),
+            ],
+        )
+        self.assertEqual(
+            result["direction_compute_calls"],
+            [["train-1"], ["train-2"], ["train-3"]],
+        )
+        self.assertEqual(result["answers_data"]["experiment_config"]["category"], "all_categories")
+        self.assertEqual(result["answers_data"]["experiment_config"]["category_mode"], "all")
+        self.assertEqual(
+            result["answers_data"]["experiment_config"]["direction_source"],
+            "dataset/splits/harmful_train.json",
+        )
+        self.assertEqual(
+            result["answers_data"]["experiment_config"]["optimization_source"],
+            "dataset/splits/harmful_val.json",
+        )
+        self.assertEqual(
+            result["answers_data"]["experiment_config"]["final_evaluation_source"],
+            "dataset/splits/harmful_test.json",
+        )
+        self.assertEqual(result["answers_data"]["questions"], ["test-1", "test-2"])
+        self.assertEqual(result["models"][0].response_calls[0], ["test-1", "test-2"])
+        self.assertEqual(result["models"][0].response_calls[1], ["test-1", "test-2"])
+        self.assertEqual(result["models"][0].response_calls[2], ["test-1", "test-2"])
+        self.assertEqual(len(result["optuna_trial_batches"]), 3)
+        self.assertTrue(all(len(batch) == 2 for batch in result["optuna_trial_batches"]))
+        self.assertTrue(
+            all(set(batch).issubset({"val-1", "val-2", "val-3", "val-4"}) for batch in result["optuna_trial_batches"])
+        )
+        self.assertNotEqual(
+            result["answers_data"]["questions"],
+            result["optuna_trial_batches"][1],
+        )
+        run_name = result["wandb_init_calls"][0]["name"]
+        self.assertEqual(
+            result["wandb_init_calls"][0]["project"],
+            "weighted_refusal_direction",
+        )
+        self.assertIn("optuna_category_mode_all_all_categories", run_name)
+
+    def test_main_rejects_topic_init_in_all_mode(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "does not support WEIGHTS_INIT_TYPE='topic' when CATEGORY_MODE='all'",
+        ):
+            self._run_main(
+                dataset=[],
+                category_dataset_source="combined",
+                category_filter="",
+                category_mode="all",
+                model_batch_size=2,
+                optimizer_method="grpo",
+                weights_mode="scalar",
+                weights_init_type="topic",
+                mmlu_enabled=False,
+                harmful_train=["train-1"],
+                harmful_val=["val-1", "val-2"],
+                harmful_test=["test-1"],
+            )
+
     def test_grpo_logs_clean_and_best_batch_series_and_restores_best_epoch(self):
         dataset = [
             {"instruction": "physical-question-1", "category": "Physical harm", "source": "combined"},
@@ -574,7 +696,11 @@ class TestGraphGrpoMain(unittest.TestCase):
         self.assertEqual(result["mmlu_eval_calls"], ["modified"])
         self.assertTrue(result["define_metric_calls"])
         run_name = result["wandb_init_calls"][0]["name"]
-        self.assertIn("grpo_Physical_harm", run_name)
+        self.assertEqual(
+            result["wandb_init_calls"][0]["project"],
+            "weighted_refusal_direction",
+        )
+        self.assertIn("grpo_category_mode_single_Physical_harm", run_name)
         self.assertIn("weights_scalar", run_name)
         self.assertIn("init_average", run_name)
         self.assertIn("n_groups2", run_name)
@@ -679,7 +805,11 @@ class TestGraphGrpoMain(unittest.TestCase):
         )
 
         run_name = result["wandb_init_calls"][0]["name"]
-        self.assertIn("optuna_Physical_harm", run_name)
+        self.assertEqual(
+            result["wandb_init_calls"][0]["project"],
+            "weighted_refusal_direction",
+        )
+        self.assertIn("optuna_category_mode_single_Physical_harm", run_name)
         self.assertIn("weights_scalar", run_name)
         self.assertIn("init_average", run_name)
         self.assertIn("sampler_tpe", run_name)

@@ -8,6 +8,28 @@ from data_utils import (
 )
 
 
+def resolve_graph_grpo_category_mode(
+    env_value: str | None,
+    default: str = "single",
+) -> str:
+    """Default graph_grpo to the historical single-category workflow."""
+    if env_value is None:
+        return default
+
+    normalized = env_value.strip()
+    if not normalized:
+        return default
+    return normalized
+
+
+def validate_graph_grpo_category_mode(mode: str) -> None:
+    """Validate graph_grpo category-selection mode."""
+    if mode not in {"single", "all"}:
+        raise ValueError(
+            f"graph_grpo only supports CATEGORY_MODE in {{'single', 'all'}}, got '{mode}'."
+        )
+
+
 def resolve_graph_grpo_category_dataset_source(
     env_value: str | None,
     default: str = "combined",
@@ -46,8 +68,14 @@ def resolve_graph_grpo_category_filter(
     return normalized
 
 
-def validate_graph_grpo_category_filter(category_filter: str) -> None:
-    """Validate graph_grpo category selection."""
+def validate_graph_grpo_category_filter(
+    category_filter: str,
+    category_mode: str = "single",
+) -> None:
+    """Validate graph_grpo category selection when running in single-category mode."""
+    if category_mode == "all":
+        return
+
     if category_filter not in SUPPORTED_JAILBREAKBENCH_CATEGORIES:
         valid_categories = ", ".join(SUPPORTED_JAILBREAKBENCH_CATEGORIES)
         raise ValueError(
@@ -117,6 +145,30 @@ def resolve_graph_grpo_debug_question_count(
     return value
 
 
+def resolve_graph_grpo_all_categories_harmful_prompt_count(
+    env_value: str | None,
+    default: int = 128,
+) -> int:
+    """Resolve the number of harmful train prompts used to build all-category directions."""
+    if env_value is None or not env_value.strip():
+        return default
+
+    value = int(env_value.strip())
+    if value < 1:
+        raise ValueError(f"ALL_CATEGORIES_HARMFUL_PROMPT_COUNT must be >= 1, got {value}")
+    return value
+
+
+def resolve_graph_grpo_all_categories_harmful_prompt_seed(
+    env_value: str | None,
+    default: int = 42,
+) -> int:
+    """Resolve the sampling seed for all-category harmful train prompts."""
+    if env_value is None or not env_value.strip():
+        return default
+    return int(env_value.strip())
+
+
 def resolve_graph_grpo_debug_noise_scale(
     base_noise_scale: float,
     env_value: str | None,
@@ -143,13 +195,23 @@ def resolve_graph_grpo_weights_init_type(env_value: str | None) -> str:
     return normalized
 
 
-def validate_graph_grpo_weights_init_type(init_type: str) -> None:
+def validate_graph_grpo_weights_init_type(
+    init_type: str,
+    category_mode: str = "single",
+) -> None:
     """Reject zero init because the current differentiable path cannot leave it."""
     if init_type == "zero":
         raise ValueError(
             "graph_grpo does not support WEIGHTS_INIT_TYPE='zero': "
             "the current differentiable intervention path has a dead start at zero, "
             "so training cannot move off that point. Use 'average' (default) or 'topic'."
+        )
+
+    if category_mode == "all" and init_type == "topic":
+        raise ValueError(
+            "graph_grpo does not support WEIGHTS_INIT_TYPE='topic' when "
+            "CATEGORY_MODE='all': the all-category prompt-based directions do not have "
+            "a stable topic root. Use 'average'."
         )
 
 

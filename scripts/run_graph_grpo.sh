@@ -3,11 +3,12 @@ export WANDB_ENTITY="andrey"
 
 set -euo pipefail
 
+CATEGORY_MODE="${CATEGORY_MODE:-single}"
 CATEGORY_DATASET_SOURCE="${CATEGORY_DATASET_SOURCE:-combined}"
 CATEGORY_FILTER="${CATEGORY_FILTER:-Physical harm}"
 
 usage() {
-  echo "Usage: $0 [--category-dataset-source combined|jailbreakbench] [--category <name>]" >&2
+  echo "Usage: $0 [--category-dataset-source combined|jailbreakbench] [--category <name>] [--all-categories]" >&2
 }
 
 validate_category_dataset_source() {
@@ -49,8 +50,14 @@ while [[ $# -gt 0 ]]; do
         usage
         exit 1
       fi
+      CATEGORY_MODE="single"
       CATEGORY_FILTER="$2"
       shift 2
+      ;;
+    --all-categories)
+      CATEGORY_MODE="all"
+      CATEGORY_FILTER=""
+      shift
       ;;
     -h|--help)
       usage
@@ -65,8 +72,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 validate_category_dataset_source "$CATEGORY_DATASET_SOURCE"
-validate_category "$CATEGORY_FILTER"
+if [[ "$CATEGORY_MODE" == "single" ]]; then
+  validate_category "$CATEGORY_FILTER"
+fi
 
+export CATEGORY_MODE
 export CATEGORY_DATASET_SOURCE
 export CATEGORY_FILTER
 
@@ -85,6 +95,8 @@ export BATCH_SIZE=32
 
 # ---- Graph file (tags for refusal directions) ----
 export GRAPH_FILE="graphs/physical harm_wordnet_graph_actions_terms.txt"
+export ALL_CATEGORIES_HARMFUL_PROMPT_COUNT="${ALL_CATEGORIES_HARMFUL_PROMPT_COUNT:-128}"
+export ALL_CATEGORIES_HARMFUL_PROMPT_SEED="${ALL_CATEGORIES_HARMFUL_PROMPT_SEED:-42}"
 
 # ---- GRPO-IS training hyperparameters ----
 export GRPO_N_GROUPS=8
