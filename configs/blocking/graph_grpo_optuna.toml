@@ -47,7 +47,7 @@ weight_min = -2.0
 weight_max = 2.0
 
 [reward]
-metric = "harmfulness"
+metric = "llamaguard_unsafe"
 sign = -1
 
 [evaluation]

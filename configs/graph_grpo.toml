@@ -37,7 +37,7 @@ init_type = "average"
 method = "grpo"
 
 [reward]
-metric = "harmfulness"
+metric = "llamaguard_unsafe"
 sign = 1
 
 [optuna]

@@ -1,5 +1,5 @@
 [model]
-name = "Qwen/Qwen3.5-9B"
+name = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 batch_size = 32
 max_response_length = 2048
 system_prompt = "You are a helpful assistant."
@@ -47,7 +47,7 @@ weight_min = -2.0
 weight_max = 2.0
 
 [reward]
-metric = "harmfulness"
+metric = "llamaguard_unsafe"
 sign = 1
 
 [evaluation]
