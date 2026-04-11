@@ -84,10 +84,10 @@ export ALL_CATEGORIES_HARMFUL_PROMPT_SEED="${ALL_CATEGORIES_HARMFUL_PROMPT_SEED:
 
 export CUDA_VISIBLE_DEVICES=7
 
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/.."
 
 if [ -n "${MODEL_NAME:-}" ]; then
-  python -m cli.run_config --method graph_grpo --config configs/blocking/graph_grpo_optuna.toml --model "$MODEL_NAME"
+  python -m cli.run_config --method graph_grpo --config configs/graph_grpo_optuna.toml --model "$MODEL_NAME"
 else
-  python -m cli.run_config --method graph_grpo --config configs/blocking/graph_grpo_optuna.toml
+  python -m cli.run_config --method graph_grpo --config configs/graph_grpo_optuna.toml
 fi

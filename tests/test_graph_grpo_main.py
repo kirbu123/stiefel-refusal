@@ -1,10 +1,12 @@
 import importlib
+import io
 import json
 import os
 import sys
 import tempfile
 import types
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -533,16 +535,19 @@ class TestGraphGrpoMain(unittest.TestCase):
         }
 
         sys.modules.pop("baselines.graph_grpo.__main__", None)
-        with patch.dict(sys.modules, fake_modules, clear=False):
-            with patch.dict(os.environ, env, clear=False):
-                module = importlib.import_module("baselines.graph_grpo.__main__")
-                module.main()
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            with patch.dict(sys.modules, fake_modules, clear=False):
+                with patch.dict(os.environ, env, clear=False):
+                    module = importlib.import_module("baselines.graph_grpo.__main__")
+                    module.main()
 
         answers_files = sorted((self.temp_path / "graph_grpo" / "answers").glob("answers_*.json"))
         self.assertTrue(answers_files)
         answers_data = json.loads(answers_files[-1].read_text(encoding="utf-8"))
 
         return {
+            "stdout": stdout.getvalue(),
             "answers_data": answers_data,
             "loader_calls": loader_calls,
             "split_loader_calls": split_loader_calls,
@@ -882,6 +887,12 @@ class TestGraphGrpoMain(unittest.TestCase):
         self.assertEqual(dense_history["weights_mode"], "dense")
         self.assertIn("weights_shape", dense_history)
         self.assertNotIn("weights", dense_history)
+        self.assertIn(
+            "Skipping scalar weight distribution plots for weights_mode='dense'",
+            result["stdout"],
+        )
+        plot_files = sorted((self.temp_path / "graph_grpo").glob("scalar_weights_distribution_*.pdf"))
+        self.assertEqual(plot_files, [])
 
     def test_optuna_samples_random_batch_each_trial_and_saves_best_trial_batch(self):
         dataset = [
@@ -931,6 +942,22 @@ class TestGraphGrpoMain(unittest.TestCase):
             result["answers_data"]["optimal_objective_source"],
             "best_trial_mean_objective",
         )
+        self.assertIn("Evaluating initialized weights on full evaluation split", result["stdout"])
+        self.assertIn("Initialized weights harmfulness: 1.000", result["stdout"])
+        scalar_payloads = [payload for payload, _step in result["wandb_log_calls"]]
+        self.assertFalse(
+            any(
+                "initialized" in metric_name.lower()
+                for payload in scalar_payloads
+                for metric_name in payload
+            )
+        )
+        plot_files = sorted((self.temp_path / "graph_grpo").glob("scalar_weights_distribution_*.pdf"))
+        self.assertEqual(len(plot_files), 2)
+        self.assertTrue(any("scalar_weights_distribution_initial" in path.name for path in plot_files))
+        self.assertTrue(any("scalar_weights_distribution_final" in path.name for path in plot_files))
+        self.assertTrue(all(path.suffix == ".pdf" for path in plot_files))
+        self.assertTrue(all(path.stat().st_size > 0 for path in plot_files))
 
     def test_main_saves_benchmark_blocks_and_logs_generic_series(self):
         dataset = [
