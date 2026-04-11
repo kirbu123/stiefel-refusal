@@ -134,6 +134,7 @@ export OPTUNA_WEIGHT_MAX=2.0
 # ---- Evaluation backend ----
 # Options: local_llm_judge | llamaguard
 export EVALUATION_BACKEND="llamaguard"
+export REWARD_METRIC="${REWARD_METRIC:-harmfulness}"
 
 # ---- Judge / Classifier APIs (used by local_llm_judge) ----
 export JUDGE_API_URL="http://localhost:31181/v1/chat/completions"

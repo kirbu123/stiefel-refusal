@@ -223,6 +223,7 @@ def evaluate_weights(
     loss_agg_mode: str = "token-mean",
     backend: Optional[str] = None,
     harmless_questions: Optional[List[str]] = None,
+    reward_metric: str = "harmfulness",
 ) -> Dict[str, Any]:
     """Evaluate a scalar vector or dense tensor of coefficients on the current question batch."""
     with torch.no_grad():
@@ -297,7 +298,13 @@ def evaluate_weights(
             batch_name="Harmless",
         )
 
-    harmfulness_scores = compute_reward(questions, responses, classifier_categories, backend)
+    harmfulness_scores = compute_reward(
+        questions,
+        responses,
+        classifier_categories,
+        backend,
+        reward_metric=reward_metric,
+    )
     rewards = [float(score) * float(reward_sign) for score in harmfulness_scores]
 
     mean_harmfulness = float(np.mean(harmfulness_scores)) if harmfulness_scores else 0.0
@@ -306,7 +313,7 @@ def evaluate_weights(
     best_reward = float(np.max(rewards)) if rewards else 0.0
     mean_kl = harmful_mean_kl + harmless_mean_kl
     mean_objective = float(mean_reward - float(kl_loss_coef) * mean_kl)
-    return {
+    result = {
         "weights": weights.detach().cpu().tolist(),
         "responses": responses,
         "scores": [float(score) for score in harmfulness_scores],
@@ -324,6 +331,10 @@ def evaluate_weights(
         "harmless_n_questions": len(harmless_questions),
         "weights_mode": direction_weights.mode,
     }
+    if reward_metric == "llamaguard_unsafe":
+        result["mean_unsafe_rate"] = mean_harmfulness
+        result["best_unsafe_rate"] = best_harmfulness
+    return result
 
 
 def evaluate_scalar_weights(
@@ -341,6 +352,7 @@ def evaluate_scalar_weights(
     loss_agg_mode: str = "token-mean",
     backend: Optional[str] = None,
     harmless_questions: Optional[List[str]] = None,
+    reward_metric: str = "harmfulness",
 ) -> Dict[str, Any]:
     """Backward-compatible wrapper for scalar Optuna evaluation."""
     return evaluate_weights(
@@ -358,6 +370,7 @@ def evaluate_scalar_weights(
         loss_agg_mode=loss_agg_mode,
         backend=backend,
         harmless_questions=harmless_questions,
+        reward_metric=reward_metric,
     )
 
 
@@ -376,6 +389,7 @@ def evaluate_dense_weights(
     loss_agg_mode: str = "token-mean",
     backend: Optional[str] = None,
     harmless_questions: Optional[List[str]] = None,
+    reward_metric: str = "harmfulness",
 ) -> Dict[str, Any]:
     """Convenience wrapper for dense Optuna evaluation."""
     return evaluate_weights(
@@ -393,6 +407,7 @@ def evaluate_dense_weights(
         loss_agg_mode=loss_agg_mode,
         backend=backend,
         harmless_questions=harmless_questions,
+        reward_metric=reward_metric,
     )
 
 
@@ -417,6 +432,7 @@ def optimize_weights_with_optuna(
     harmless_question_sampler: Optional[Callable[[], List[str]]] = None,
     loss_agg_mode: str = "token-mean",
     backend: Optional[str] = None,
+    reward_metric: str = "harmfulness",
 ) -> Dict[str, Any]:
     """Search scalar or dense direction weights with Optuna and update the module in-place."""
     device = direction_weights.weights.device
@@ -466,6 +482,7 @@ def optimize_weights_with_optuna(
             loss_agg_mode=loss_agg_mode,
             backend=backend,
             harmless_questions=trial_harmless_questions,
+            reward_metric=reward_metric,
         )
 
         trial.set_user_attr("weights_mode", weights_mode)
@@ -473,6 +490,9 @@ def optimize_weights_with_optuna(
         trial.set_user_attr("best_reward", trial_result["best_reward"])
         trial.set_user_attr("mean_harmfulness", trial_result["mean_harmfulness"])
         trial.set_user_attr("best_harmfulness", trial_result["best_harmfulness"])
+        if reward_metric == "llamaguard_unsafe":
+            trial.set_user_attr("mean_unsafe_rate", trial_result.get("mean_unsafe_rate"))
+            trial.set_user_attr("best_unsafe_rate", trial_result.get("best_unsafe_rate"))
         trial.set_user_attr("mean_kl", trial_result["mean_kl"])
         trial.set_user_attr("harmful_mean_kl", trial_result.get("harmful_mean_kl"))
         trial.set_user_attr("harmless_mean_kl", trial_result.get("harmless_mean_kl"))
@@ -496,6 +516,16 @@ def optimize_weights_with_optuna(
 
     best_trial = study.best_trial
     best_mean_harmfulness = best_trial.user_attrs.get("mean_harmfulness")
+    best_mean_unsafe_rate = (
+        best_trial.user_attrs.get("mean_unsafe_rate")
+        if reward_metric == "llamaguard_unsafe"
+        else None
+    )
+    best_unsafe_rate = (
+        best_trial.user_attrs.get("best_unsafe_rate")
+        if reward_metric == "llamaguard_unsafe"
+        else None
+    )
     best_mean_kl = best_trial.user_attrs.get("mean_kl")
     best_harmful_mean_kl = best_trial.user_attrs.get("harmful_mean_kl")
     best_harmless_mean_kl = best_trial.user_attrs.get("harmless_mean_kl")
@@ -539,9 +569,12 @@ def optimize_weights_with_optuna(
                 "weights_norm",
             ):
                 history_item[key] = trial.user_attrs.get(key)
+        if reward_metric == "llamaguard_unsafe":
+            history_item["mean_unsafe_rate"] = trial.user_attrs.get("mean_unsafe_rate")
+            history_item["best_unsafe_rate"] = trial.user_attrs.get("best_unsafe_rate")
         optimization_history.append(history_item)
 
-    return {
+    result = {
         "best_weights": best_weights.detach().cpu().tolist(),
         "best_value": float(best_trial.value),
         "best_trial_number": best_trial.number,
@@ -557,6 +590,10 @@ def optimize_weights_with_optuna(
         "sampler_name": sampler_name,
         "optimization_history": optimization_history,
     }
+    if reward_metric == "llamaguard_unsafe":
+        result["best_mean_unsafe_rate"] = best_mean_unsafe_rate
+        result["best_unsafe_rate"] = best_unsafe_rate
+    return result
 
 
 def optimize_scalar_weights_with_optuna(
@@ -580,6 +617,7 @@ def optimize_scalar_weights_with_optuna(
     harmless_question_sampler: Optional[Callable[[], List[str]]] = None,
     loss_agg_mode: str = "token-mean",
     backend: Optional[str] = None,
+    reward_metric: str = "harmfulness",
 ) -> Dict[str, Any]:
     """Backward-compatible scalar wrapper around the generic Optuna optimizer."""
     return optimize_weights_with_optuna(
@@ -603,4 +641,5 @@ def optimize_scalar_weights_with_optuna(
         harmless_question_sampler=harmless_question_sampler,
         loss_agg_mode=loss_agg_mode,
         backend=backend,
+        reward_metric=reward_metric,
     )

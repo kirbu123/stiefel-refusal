@@ -150,6 +150,62 @@ class TestGraphGrpoOptuna(unittest.TestCase):
             result["mean_reward"] - 0.01 * result["mean_kl"],
         )
 
+    def test_evaluate_scalar_weights_records_llamaguard_unsafe_rate_metrics(self):
+        direction_weights = LearnableDirectionWeights(
+            n_directions=2,
+            n_layers=1,
+            hidden_size=2,
+            init_type="average",
+            mode="scalar",
+        )
+        model = _DummyModel()
+        extracted_directions = [
+            torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32),
+            torch.tensor([[0.0, 1.0], [1.0, 0.0]], dtype=torch.float32),
+        ]
+
+        with patch.object(optuna_module, "apply_abliteration_with_hyperparams"):
+            with patch.object(
+                optuna_module,
+                "compute_sequence_log_probs",
+                side_effect=[
+                    (
+                        torch.ones((2, 2), dtype=torch.float32),
+                        torch.ones((2, 2), dtype=torch.float32),
+                    ),
+                    (
+                        torch.zeros((2, 2), dtype=torch.float32),
+                        torch.ones((2, 2), dtype=torch.float32),
+                    ),
+                ],
+            ):
+                with patch.object(optuna_module, "compute_reward", return_value=[1.0, 0.0]) as reward_mock:
+                    result = optuna_module.evaluate_scalar_weights(
+                        direction_weights=direction_weights,
+                        extracted_directions=extracted_directions,
+                        scalar_weights=torch.tensor([1.0, 0.0], dtype=torch.float32),
+                        model=model,
+                        questions=["unsafe-q", "safe-q"],
+                        abliteration_params={
+                            "max_weight": 2.0,
+                            "max_weight_position": 0.5,
+                            "min_weight": 0.25,
+                            "min_weight_distance": 0.4,
+                        },
+                        classifier_categories=[],
+                        n_layers=1,
+                        ref_alpha=1.0,
+                        reward_sign=1.0,
+                        kl_loss_coef=0.0,
+                        backend="llamaguard",
+                        reward_metric="llamaguard_unsafe",
+                    )
+
+        self.assertEqual(reward_mock.call_args.kwargs["reward_metric"], "llamaguard_unsafe")
+        self.assertEqual(result["scores"], [1.0, 0.0])
+        self.assertEqual(result["mean_unsafe_rate"], 0.5)
+        self.assertEqual(result["best_unsafe_rate"], 1.0)
+
     def test_evaluate_dense_weights_returns_metrics(self):
         direction_weights = LearnableDirectionWeights(
             n_directions=2,
@@ -260,6 +316,7 @@ class TestGraphGrpoOptuna(unittest.TestCase):
             loss_agg_mode="token-mean",
             backend=None,
             harmless_questions=None,
+            reward_metric="harmfulness",
         ):
             score = float(weights.sum().item())
             mean_kl = 0.5
@@ -368,6 +425,7 @@ class TestGraphGrpoOptuna(unittest.TestCase):
             loss_agg_mode="token-mean",
             backend=None,
             harmless_questions=None,
+            reward_metric="harmfulness",
         ):
             score = score_by_batch[questions[0]]
             mean_kl = 0.25
@@ -450,6 +508,7 @@ class TestGraphGrpoOptuna(unittest.TestCase):
             loss_agg_mode="token-mean",
             backend=None,
             harmless_questions=None,
+            reward_metric="harmfulness",
         ):
             score = float(weights.sum().item())
             mean_kl = 0.5

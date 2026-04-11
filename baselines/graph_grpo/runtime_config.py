@@ -310,3 +310,29 @@ def validate_graph_grpo_reward_sign(reward_sign: float) -> None:
     """Reject zero reward scaling to avoid a degenerate objective."""
     if reward_sign == 0:
         raise ValueError("REWARD_SIGN must be non-zero.")
+
+
+def resolve_graph_grpo_reward_metric(
+    env_value: str | None,
+    default: str = "harmfulness",
+) -> str:
+    """Resolve the response-level reward metric used by graph_grpo."""
+    if env_value is None or not env_value.strip():
+        return default
+    return env_value.strip().lower()
+
+
+def validate_graph_grpo_reward_metric(reward_metric: str, backend: str) -> None:
+    """Validate reward metric compatibility with the selected evaluator backend."""
+    if reward_metric not in {"harmfulness", "llamaguard_unsafe"}:
+        raise ValueError(
+            "graph_grpo only supports REWARD_METRIC in "
+            "{'harmfulness', 'llamaguard_unsafe'}, "
+            f"got '{reward_metric}'."
+        )
+
+    if reward_metric == "llamaguard_unsafe" and backend.strip().lower() != "llamaguard":
+        raise ValueError(
+            "REWARD_METRIC='llamaguard_unsafe' requires "
+            "EVALUATION_BACKEND='llamaguard'."
+        )

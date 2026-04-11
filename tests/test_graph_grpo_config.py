@@ -24,6 +24,7 @@ from baselines.graph_grpo.runtime_config import (
     resolve_graph_grpo_optuna_sampler_seed,
     resolve_graph_grpo_optuna_weight_max,
     resolve_graph_grpo_optuna_weight_min,
+    resolve_graph_grpo_reward_metric,
     resolve_graph_grpo_weights_mode,
     resolve_graph_grpo_weights_init_type,
     validate_graph_grpo_category_mode,
@@ -33,6 +34,7 @@ from baselines.graph_grpo.runtime_config import (
     validate_graph_grpo_optimizer_method,
     validate_graph_grpo_optuna_sampler,
     validate_graph_grpo_optuna_weight_range,
+    validate_graph_grpo_reward_metric,
     validate_graph_grpo_weights_mode,
     validate_graph_grpo_weights_init_type,
 )
@@ -50,6 +52,7 @@ class TestGraphGrpoConfig(unittest.TestCase):
         grpo = config["grpo"]
         weights = config["weights"]
         optimizer = config["optimizer"]
+        reward = config["reward"]
         optuna = config["optuna"]
         academic_benchmarks = config["academic_benchmarks"]
         tinyhellaswag = academic_benchmarks["tinyhellaswag"]
@@ -76,6 +79,8 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertEqual(grpo["kl_loss_coef"], 0.01)
         self.assertNotIn("alphas", grpo)
         self.assertEqual(optimizer["method"], "grpo")
+        self.assertEqual(reward["metric"], "harmfulness")
+        self.assertEqual(reward["sign"], 1)
         self.assertEqual(optuna["sampler"], "tpe")
         self.assertEqual(optuna["n_trials"], 50)
         self.assertEqual(optuna["weight_min"], -2.0)
@@ -164,6 +169,8 @@ class TestGraphGrpoConfig(unittest.TestCase):
             self.assertEqual(os.environ["WEIGHTS_MODE"], "scalar")
             self.assertEqual(os.environ["WEIGHTS_INIT_TYPE"], "average")
             self.assertEqual(os.environ["OPTIMIZER_METHOD"], "grpo")
+            self.assertEqual(os.environ["REWARD_METRIC"], "harmfulness")
+            self.assertEqual(os.environ["REWARD_SIGN"], "1")
             self.assertEqual(os.environ["OPTUNA_SAMPLER"], "tpe")
             self.assertEqual(os.environ["OPTUNA_N_TRIALS"], "50")
             self.assertEqual(os.environ["OPTUNA_SAMPLER_SEED"], "42")
@@ -281,6 +288,7 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertIn("OPTUNA_SAMPLER_SEED=42", script_text)
         self.assertIn("OPTUNA_WEIGHT_MIN=-2.0", script_text)
         self.assertIn("OPTUNA_WEIGHT_MAX=2.0", script_text)
+        self.assertIn("REWARD_METRIC", script_text)
         self.assertIn("ACADEMIC_BENCHMARKS_ENABLED", script_text)
         self.assertIn("TINYHELLASWAG_SAMPLE_SIZE", script_text)
         self.assertIn("ARC_SAMPLE_SIZE", script_text)
@@ -294,6 +302,7 @@ class TestGraphGrpoConfig(unittest.TestCase):
         script_text = (PROJECT_ROOT / "scripts" / "run_graph_optuna.sh").read_text(encoding="utf-8")
 
         self.assertIn('OPTIMIZER_METHOD="optuna"', script_text)
+        self.assertIn("REWARD_METRIC", script_text)
 
     def test_graph_grpo_runtime_defaults_optimizer_method_to_grpo(self):
         self.assertEqual(resolve_graph_grpo_category_mode(None), "single")
@@ -313,6 +322,9 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertEqual(resolve_graph_grpo_optuna_sampler(None), "tpe")
         self.assertEqual(resolve_graph_grpo_optuna_sampler(""), "tpe")
         self.assertEqual(resolve_graph_grpo_optuna_sampler("random"), "random")
+        self.assertEqual(resolve_graph_grpo_reward_metric(None), "harmfulness")
+        self.assertEqual(resolve_graph_grpo_reward_metric(""), "harmfulness")
+        self.assertEqual(resolve_graph_grpo_reward_metric("llamaguard_unsafe"), "llamaguard_unsafe")
 
     def test_graph_grpo_runtime_validates_optimizer_method_and_compatibility(self):
         validate_graph_grpo_category_mode("single")
@@ -332,6 +344,8 @@ class TestGraphGrpoConfig(unittest.TestCase):
         validate_graph_grpo_optuna_sampler("gp")
         validate_graph_grpo_optuna_sampler("cmaes")
         validate_graph_grpo_optuna_sampler("qmc")
+        validate_graph_grpo_reward_metric("harmfulness", "local_llm_judge")
+        validate_graph_grpo_reward_metric("llamaguard_unsafe", "llamaguard")
 
         with self.assertRaisesRegex(ValueError, "graph_grpo only supports OPTIMIZER_METHOD"):
             validate_graph_grpo_optimizer_method("random-search")
@@ -347,6 +361,12 @@ class TestGraphGrpoConfig(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "graph_grpo only supports OPTUNA_SAMPLER"):
             validate_graph_grpo_optuna_sampler("nsga2")
+
+        with self.assertRaisesRegex(ValueError, "graph_grpo only supports REWARD_METRIC"):
+            validate_graph_grpo_reward_metric("unsafe_probability", "llamaguard")
+
+        with self.assertRaisesRegex(ValueError, "requires EVALUATION_BACKEND='llamaguard'"):
+            validate_graph_grpo_reward_metric("llamaguard_unsafe", "local_llm_judge")
 
     def test_graph_grpo_runtime_defaults_weights_mode_to_scalar(self):
         self.assertEqual(resolve_graph_grpo_weights_mode(None), "scalar")

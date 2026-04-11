@@ -86,6 +86,7 @@ from baselines.graph_grpo.runtime_config import (
     resolve_graph_grpo_optuna_sampler_seed,
     resolve_graph_grpo_optuna_weight_max,
     resolve_graph_grpo_optuna_weight_min,
+    resolve_graph_grpo_reward_metric,
     resolve_graph_grpo_reward_sign,
     resolve_graph_grpo_weights_mode,
     resolve_graph_grpo_weights_init_type,
@@ -96,6 +97,7 @@ from baselines.graph_grpo.runtime_config import (
     validate_graph_grpo_optimizer_method,
     validate_graph_grpo_optuna_sampler,
     validate_graph_grpo_optuna_weight_range,
+    validate_graph_grpo_reward_metric,
     validate_graph_grpo_reward_sign,
     validate_graph_grpo_weights_mode,
     validate_graph_grpo_weights_init_type,
@@ -122,6 +124,7 @@ def _evaluate_model_harmfulness(
     model,
     questions: List[str],
     classifier_categories: List[Dict[str, str]],
+    reward_metric: str = "harmfulness",
 ) -> Dict[str, Any]:
     """Evaluate the current model state on the selected harmfulness batch."""
     from baselines.graph_grpo.reward import compute_reward
@@ -136,13 +139,18 @@ def _evaluate_model_harmfulness(
         responses,
         classifier_categories,
         EVALUATION_BACKEND,
+        reward_metric=reward_metric,
     )]
     mean_harmfulness = float(np.mean(scores)) if scores else None
-    return {
+    result = {
         "responses": responses,
         "scores": scores,
         "mean_harmfulness": mean_harmfulness,
     }
+    if reward_metric == "llamaguard_unsafe":
+        result["mean_unsafe_rate"] = mean_harmfulness
+        result["best_unsafe_rate"] = float(np.max(scores)) if scores else None
+    return result
 
 
 def _save_scalar_weights_distribution_plot(
@@ -366,6 +374,7 @@ def _build_wandb_run_name(
     grpo_config: Dict[str, Any],
     optuna_config: Dict[str, Any],
     model_name: str,
+    reward_metric: str = "harmfulness",
     results_root: Optional[Path] = None,
 ) -> str:
     """Build a readable wandb run name with common and optimizer-specific knobs."""
@@ -375,6 +384,7 @@ def _build_wandb_run_name(
         _sanitize_run_name_part(category_name),
         f"weights_{_sanitize_run_name_part(weights_mode)}",
         f"init_{_sanitize_run_name_part(weights_init_type)}",
+        f"reward_{_sanitize_run_name_part(reward_metric)}",
     ]
 
     if results_root is not None:
@@ -499,6 +509,7 @@ def _run_grpo_training(
     n_layers: int,
     debug_question_count: int,
     reward_sign: float,
+    reward_metric: str,
 ) -> Dict[str, Any]:
     optimizer = torch.optim.Adam(direction_weights.parameters(), lr=GRPO_CONFIG["learning_rate"])
     training_history = []
@@ -507,6 +518,8 @@ def _run_grpo_training(
     best_train_batch_mean_reward: Optional[float] = None
     best_train_batch_mean_objective = float("-inf")
     best_train_batch_mean_harmfulness: Optional[float] = None
+    best_train_batch_mean_unsafe_rate: Optional[float] = None
+    best_train_batch_best_unsafe_rate: Optional[float] = None
     best_train_batch_mean_kl: Optional[float] = None
     best_weights = direction_weights.weights.detach().cpu().clone()
     print("\n" + "=" * 80)
@@ -539,6 +552,7 @@ def _run_grpo_training(
             clip_ratio=GRPO_CONFIG["clip_ratio"],
             loss_agg_mode=GRPO_CONFIG["loss_agg_mode"],
             reward_sign=reward_sign,
+            reward_metric=reward_metric,
             kl_loss_coef=GRPO_CONFIG["kl_loss_coef"],
             backend=EVALUATION_BACKEND,
         )
@@ -565,6 +579,16 @@ def _run_grpo_training(
             best_train_batch_mean_harmfulness = (
                 float(mean_harmfulness) if mean_harmfulness is not None else None
             )
+            best_train_batch_mean_unsafe_rate = (
+                float(metrics["mean_unsafe_rate"])
+                if metrics.get("mean_unsafe_rate") is not None
+                else None
+            )
+            best_train_batch_best_unsafe_rate = (
+                float(metrics["best_unsafe_rate"])
+                if metrics.get("best_unsafe_rate") is not None
+                else None
+            )
             best_train_batch_mean_kl = float(mean_kl) if mean_kl is not None else None
             best_train_batch_questions = list(epoch_questions)
             best_weights = direction_weights.weights.detach().cpu().clone()
@@ -585,6 +609,8 @@ def _run_grpo_training(
         "best_train_batch_mean_reward": best_train_batch_mean_reward,
         "best_train_batch_mean_objective": best_train_batch_mean_objective,
         "best_train_batch_mean_harmfulness": best_train_batch_mean_harmfulness,
+        "best_train_batch_mean_unsafe_rate": best_train_batch_mean_unsafe_rate,
+        "best_train_batch_best_unsafe_rate": best_train_batch_best_unsafe_rate,
         "best_train_batch_mean_kl": best_train_batch_mean_kl,
     }
 
@@ -601,6 +627,7 @@ def _final_evaluate(
     results_dir: Path,
     benchmark_runner=None,
     benchmark_run_label: str = "graph_grpo_final",
+    reward_metric: str = "harmfulness",
 ) -> Dict[str, Any]:
     print("\n" + "=" * 80)
     print("FINAL EVALUATION")
@@ -664,9 +691,10 @@ def _final_evaluate(
         model=model,
         questions=category_questions,
         classifier_categories=classifier_categories,
+        reward_metric=reward_metric,
     )
 
-    return {
+    result = {
         "responses": harmfulness_result["responses"],
         "scores": harmfulness_result["scores"],
         "final_mean_harmfulness": harmfulness_result["mean_harmfulness"],
@@ -674,6 +702,10 @@ def _final_evaluate(
         "academic_benchmarks": academic_benchmarks,
         "benchmarks": benchmark_results,
     }
+    if reward_metric == "llamaguard_unsafe":
+        result["mean_unsafe_rate"] = harmfulness_result.get("mean_unsafe_rate")
+        result["best_unsafe_rate"] = harmfulness_result.get("best_unsafe_rate")
+    return result
 
 
 def main():
@@ -702,6 +734,7 @@ def main():
     optuna_weight_min = resolve_graph_grpo_optuna_weight_min(os.getenv("OPTUNA_WEIGHT_MIN"))
     optuna_weight_max = resolve_graph_grpo_optuna_weight_max(os.getenv("OPTUNA_WEIGHT_MAX"))
     reward_sign = resolve_graph_grpo_reward_sign(os.getenv("REWARD_SIGN"))
+    reward_metric = resolve_graph_grpo_reward_metric(os.getenv("REWARD_METRIC"))
     effective_noise_scale = debug_noise_scale if DEBUG else GRPO_CONFIG["noise_scale"]
 
     validate_graph_grpo_category_mode(category_mode)
@@ -714,6 +747,8 @@ def main():
     validate_graph_grpo_optuna_sampler(optuna_sampler)
     validate_graph_grpo_optuna_weight_range(optuna_weight_min, optuna_weight_max)
     validate_graph_grpo_reward_sign(reward_sign)
+    validate_graph_grpo_reward_metric(reward_metric, EVALUATION_BACKEND)
+    score_metric_label = "unsafe rate" if reward_metric == "llamaguard_unsafe" else "harmfulness"
 
     run_category_name = category_name if category_mode == "single" else "all_categories"
     category_display_name = (
@@ -742,6 +777,7 @@ def main():
     print(f"Weights Init Type: {weights_init_type}")
     print(f"Batch Size: {MODEL_BATCH_SIZE}")
     print(f"Evaluation backend: {EVALUATION_BACKEND}")
+    print(f"Reward metric: {reward_metric}")
     print(f"Reward sign: {reward_sign:+g}")
     if category_mode == "all":
         print(
@@ -966,6 +1002,7 @@ def main():
                 grpo_config=GRPO_CONFIG,
                 optuna_config=optuna_config,
                 model_name=MODEL_NAME,
+                reward_metric=reward_metric,
                 results_root=RESULTS_DIR,
             ),
             config={
@@ -986,6 +1023,7 @@ def main():
                 "direction_prompt_seed": direction_prompt_seed,
                 "grpo_config": GRPO_CONFIG, "abliteration_params": ABLITERATION_PARAMS,
                 "optuna_config": optuna_config if optimizer_method == "optuna" else None,
+                "reward_metric": reward_metric,
                 "reward_sign": reward_sign,
             },
         )
@@ -1013,9 +1051,14 @@ def main():
         model=model,
         questions=full_evaluation_questions,
         classifier_categories=classifier_categories,
+        reward_metric=reward_metric,
     )
     clean_mean_harmfulness = clean_harmfulness_result["mean_harmfulness"]
-    print(f"Clean model harmfulness: {clean_mean_harmfulness:.3f}" if clean_mean_harmfulness is not None else "Clean model harmfulness: n/a")
+    print(
+        f"Clean model {score_metric_label}: {clean_mean_harmfulness:.3f}"
+        if clean_mean_harmfulness is not None
+        else f"Clean model {score_metric_label}: n/a"
+    )
 
     clean_mmlu_score = None
     if original_mmlu_result is not None:
@@ -1068,12 +1111,13 @@ def main():
         model=model,
         questions=full_evaluation_questions,
         classifier_categories=classifier_categories,
+        reward_metric=reward_metric,
     )
     initialized_mean_harmfulness = initialized_harmfulness_result["mean_harmfulness"]
     print(
-        f"Initialized weights harmfulness: {initialized_mean_harmfulness:.3f}"
+        f"Initialized weights {score_metric_label}: {initialized_mean_harmfulness:.3f}"
         if initialized_mean_harmfulness is not None
-        else "Initialized weights harmfulness: n/a"
+        else f"Initialized weights {score_metric_label}: n/a"
     )
     model.reload_model()
 
@@ -1088,6 +1132,7 @@ def main():
             n_layers=n_layers,
             debug_question_count=debug_question_count,
             reward_sign=reward_sign,
+            reward_metric=reward_metric,
         )
     else:
         print("\n" + "=" * 80)
@@ -1136,6 +1181,7 @@ def main():
             ),
             loss_agg_mode=GRPO_CONFIG["loss_agg_mode"],
             backend=EVALUATION_BACKEND,
+            reward_metric=reward_metric,
         )
         optimization_result["training_history"] = []
         optimization_result["optuna_config"] = optuna_config
@@ -1143,6 +1189,7 @@ def main():
             f"Best Optuna trial: #{optimization_result['best_trial_number']} "
             f"with mean objective={optimization_result['best_value']:.3f} "
             f"(mean harmfulness={optimization_result.get('best_mean_harmfulness')}, "
+            f"mean unsafe rate={optimization_result.get('best_mean_unsafe_rate')}, "
             f"mean kl={optimization_result.get('best_mean_kl')}, "
             f"harmful kl={optimization_result.get('best_harmful_mean_kl')}, "
             f"harmless kl={optimization_result.get('best_harmless_mean_kl')})"
@@ -1154,6 +1201,7 @@ def main():
                     "optuna/best_value": optimization_result["best_value"],
                     "optuna/best_objective": optimization_result.get("best_mean_objective", optimization_result["best_value"]),
                     "optuna/best_harmfulness": optimization_result.get("best_mean_harmfulness"),
+                    "optuna/best_unsafe_rate": optimization_result.get("best_mean_unsafe_rate"),
                     "optuna/best_kl": optimization_result.get("best_mean_kl"),
                     "optuna/best_harmful_kl": optimization_result.get("best_harmful_mean_kl"),
                     "optuna/best_harmless_kl": optimization_result.get("best_harmless_mean_kl"),
@@ -1190,9 +1238,12 @@ def main():
         results_dir=GRPO_RESULTS_DIR,
         benchmark_runner=benchmark_runner,
         benchmark_run_label=f"graph_grpo_{category_safe_name}",
+        reward_metric=reward_metric,
     )
 
     final_mean_harmfulness = final_result["final_mean_harmfulness"]
+    final_mean_unsafe_rate = final_result.get("mean_unsafe_rate")
+    final_best_unsafe_rate = final_result.get("best_unsafe_rate")
     if optimizer_method == "grpo":
         optimal_objective = optimization_result["best_train_batch_mean_objective"]
         optimal_harmfulness = optimization_result["best_train_batch_mean_harmfulness"]
@@ -1218,6 +1269,7 @@ def main():
         model=model,
         questions=full_evaluation_questions,
         classifier_categories=classifier_categories,
+        reward_metric=reward_metric,
     )
     best_batch_model_mean_harmfulness = best_batch_model_harmfulness_result["mean_harmfulness"]
     best_batch_model_mmlu_score = None
@@ -1292,6 +1344,7 @@ def main():
             "full_evaluation_question_count": len(full_evaluation_questions),
             "n_questions": len(evaluation_questions), "n_directions": n_directions,
             "optimizer_method": optimizer_method,
+            "reward_metric": reward_metric,
             "reward_sign": reward_sign,
             "weights_mode": weights_mode, "weights_init_type": weights_init_type,
             "weights_shape": weights_shape,
@@ -1315,16 +1368,27 @@ def main():
         },
         "timestamp": datetime.now().isoformat(),
     }
+    if reward_metric == "llamaguard_unsafe":
+        answers_data["final_mean_unsafe_rate"] = final_mean_unsafe_rate
+        answers_data["final_best_unsafe_rate"] = final_best_unsafe_rate
+        answers_data["score_statistics"]["mean_unsafe_rate"] = final_mean_unsafe_rate
+        answers_data["score_statistics"]["best_unsafe_rate"] = final_best_unsafe_rate
     if optimizer_method == "grpo":
         answers_data["experiment_config"]["best_grpo_epoch"] = optimization_result["best_epoch"]
         answers_data["experiment_config"]["best_train_batch_mean_reward"] = optimization_result["best_train_batch_mean_reward"]
         answers_data["experiment_config"]["best_train_batch_mean_objective"] = optimization_result["best_train_batch_mean_objective"]
         answers_data["experiment_config"]["best_train_batch_mean_harmfulness"] = optimization_result["best_train_batch_mean_harmfulness"]
+        if reward_metric == "llamaguard_unsafe":
+            answers_data["experiment_config"]["best_train_batch_mean_unsafe_rate"] = optimization_result["best_train_batch_mean_unsafe_rate"]
+            answers_data["experiment_config"]["best_train_batch_best_unsafe_rate"] = optimization_result["best_train_batch_best_unsafe_rate"]
         answers_data["experiment_config"]["best_train_batch_mean_kl"] = optimization_result["best_train_batch_mean_kl"]
         answers_data["experiment_config"]["best_train_batch_size"] = len(optimization_result["best_train_batch_questions"])
     else:
         answers_data["experiment_config"]["best_trial_mean_objective"] = optimization_result.get("best_mean_objective")
         answers_data["experiment_config"]["best_trial_mean_harmfulness"] = optimization_result.get("best_mean_harmfulness")
+        if reward_metric == "llamaguard_unsafe":
+            answers_data["experiment_config"]["best_trial_mean_unsafe_rate"] = optimization_result.get("best_mean_unsafe_rate")
+            answers_data["experiment_config"]["best_trial_best_unsafe_rate"] = optimization_result.get("best_unsafe_rate")
         answers_data["experiment_config"]["best_trial_mean_kl"] = optimization_result.get("best_mean_kl")
         answers_data["experiment_config"]["best_trial_harmful_mean_kl"] = optimization_result.get("best_harmful_mean_kl")
         answers_data["experiment_config"]["best_trial_harmless_mean_kl"] = optimization_result.get("best_harmless_mean_kl")
@@ -1362,6 +1426,7 @@ def main():
             "n_directions": n_directions,
             "n_layers": n_layers,
             "optimizer_method": optimizer_method,
+            "reward_metric": reward_metric,
             "weights_mode": weights_mode,
             "weights_init_type": weights_init_type,
             "weights_shape": weights_shape,

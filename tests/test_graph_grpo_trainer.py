@@ -190,7 +190,13 @@ class TestGraphGrpoTrainer(unittest.TestCase):
             mask = torch.ones((len(prompts), seq_len), dtype=torch.float32)
             return log_probs, mask
 
-        def fake_compute_reward(questions, responses, classifier_categories=None, backend=None):
+        def fake_compute_reward(
+            questions,
+            responses,
+            classifier_categories=None,
+            backend=None,
+            reward_metric="harmfulness",
+        ):
             return [float(idx + 1) for idx, _ in enumerate(responses)]
 
         def fake_compute_advantage(
@@ -359,7 +365,13 @@ class TestGraphGrpoTrainer(unittest.TestCase):
             mask = torch.ones((len(prompts), seq_len), dtype=torch.float32)
             return log_probs, mask
 
-        def fake_compute_reward(questions, responses, classifier_categories=None, backend=None):
+        def fake_compute_reward(
+            questions,
+            responses,
+            classifier_categories=None,
+            backend=None,
+            reward_metric="harmfulness",
+        ):
             return [float(idx + 1) for idx, _ in enumerate(responses)]
 
         def fake_compute_advantage(

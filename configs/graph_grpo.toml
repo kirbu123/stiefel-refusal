@@ -36,6 +36,10 @@ init_type = "average"
 [optimizer]
 method = "grpo"
 
+[reward]
+metric = "harmfulness"
+sign = 1
+
 [optuna]
 sampler = "tpe"
 n_trials = 50
