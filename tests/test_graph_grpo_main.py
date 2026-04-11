@@ -2,6 +2,7 @@ import importlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import types
@@ -96,6 +97,7 @@ class TestGraphGrpoMain(unittest.TestCase):
         harmful_val=None,
         harmful_test=None,
         reward_metric="harmfulness",
+        results_root_name="results",
     ):
         few_shots_path = self.temp_path / "few-shots.json"
         few_shots_path.write_text(json.dumps({"categories": []}), encoding="utf-8")
@@ -103,7 +105,7 @@ class TestGraphGrpoMain(unittest.TestCase):
         graph_file = self.temp_path / "graph.txt"
         graph_file.write_text("physical harm root\nprivacy root\n", encoding="utf-8")
 
-        results_root = self.temp_path / "results"
+        results_root = self.temp_path / results_root_name
         results_root.mkdir(parents=True, exist_ok=True)
 
         loader_calls = []
@@ -679,6 +681,46 @@ class TestGraphGrpoMain(unittest.TestCase):
         self.assertEqual(
             result["wandb_init_calls"][0]["config"]["category"],
             "Physical harm",
+        )
+
+    def test_wandb_run_names_share_schema_between_blocking_and_nonblocking(self):
+        dataset = [
+            {"instruction": "physical-question", "category": "Physical harm", "source": "combined"},
+        ]
+
+        nonblocking = self._run_main(
+            dataset=dataset,
+            category_dataset_source="combined",
+            category_filter="Physical harm",
+            model_batch_size=1,
+            optimizer_method="optuna",
+            weights_mode="scalar",
+            mmlu_enabled=False,
+            results_root_name="results",
+        )
+        blocking = self._run_main(
+            dataset=dataset,
+            category_dataset_source="combined",
+            category_filter="Physical harm",
+            model_batch_size=1,
+            optimizer_method="optuna",
+            weights_mode="scalar",
+            mmlu_enabled=False,
+            results_root_name="results/blocking",
+        )
+
+        nonblocking_name = nonblocking["wandb_init_calls"][0]["name"]
+        blocking_name = blocking["wandb_init_calls"][0]["name"]
+        self.assertTrue(nonblocking_name.startswith("nonblocking_model_test-model_"))
+        self.assertTrue(blocking_name.startswith("blocking_model_test-model_"))
+
+        def normalize_mode_and_timestamp(run_name):
+            without_timestamp = re.sub(r"_[0-9]{8}_[0-9]{6}$", "", run_name)
+            return re.sub(r"^(?:blocking|nonblocking)_", "", without_timestamp)
+
+        self.assertEqual(
+            normalize_mode_and_timestamp(nonblocking_name),
+            normalize_mode_and_timestamp(blocking_name),
         )
 
     def test_main_all_mode_uses_train_val_test_splits(self):

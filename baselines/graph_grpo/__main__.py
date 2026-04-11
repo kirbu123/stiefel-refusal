@@ -378,7 +378,15 @@ def _build_wandb_run_name(
     results_root: Optional[Path] = None,
 ) -> str:
     """Build a readable wandb run name with common and optimizer-specific knobs."""
+    run_mode = "nonblocking"
+    if results_root is not None:
+        root_parts = {p.lower() for p in results_root.parts}
+        if "blocking" in root_parts:
+            run_mode = "blocking"
+
     parts = [
+        run_mode,
+        f"model_{_sanitize_run_name_part(model_name)}",
         _sanitize_run_name_part(optimizer_method),
         f"category_mode_{_sanitize_run_name_part(category_mode)}",
         _sanitize_run_name_part(category_name),
@@ -386,14 +394,6 @@ def _build_wandb_run_name(
         f"init_{_sanitize_run_name_part(weights_init_type)}",
         f"reward_{_sanitize_run_name_part(reward_metric)}",
     ]
-
-    if results_root is not None:
-        root_parts = {p.lower() for p in results_root.parts}
-        if "blocking" in root_parts:
-            parts = [
-                "blocking",
-                f"model_{_sanitize_run_name_part(model_name)}",
-            ] + parts
 
     if optimizer_method == "grpo":
         parts.extend([
