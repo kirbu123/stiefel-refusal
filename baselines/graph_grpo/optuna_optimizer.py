@@ -176,6 +176,38 @@ def summarize_weights(weights: torch.Tensor) -> Dict[str, Any]:
     }
 
 
+def _extract_generated_responses(responses_raw: List[str]) -> List[str]:
+    responses = []
+    for raw in responses_raw:
+        extracted = extract_response_after_think(raw)
+        responses.append(extracted if extracted else raw.strip())
+    return responses
+
+
+def _compute_mean_kl_from_log_probs(
+    policy_log_probs: torch.Tensor,
+    response_mask: torch.Tensor,
+    ref_log_probs: torch.Tensor,
+    ref_response_mask: torch.Tensor,
+    loss_agg_mode: str,
+    batch_name: str,
+) -> float:
+    if tuple(ref_response_mask.shape) != tuple(response_mask.shape):
+        raise ValueError(
+            f"{batch_name} reference-policy response mask shape does not match "
+            f"modified-policy mask shape: {tuple(ref_response_mask.shape)} vs "
+            f"{tuple(response_mask.shape)}."
+        )
+
+    _, mean_kl_tensor = compute_masked_mean_kl(
+        log_prob=policy_log_probs,
+        ref_log_prob=ref_log_probs,
+        response_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+    )
+    return float(mean_kl_tensor.item())
+
+
 def evaluate_weights(
     direction_weights: LearnableDirectionWeights,
     extracted_directions: List[torch.Tensor],
@@ -190,6 +222,7 @@ def evaluate_weights(
     kl_loss_coef: float = 0.0,
     loss_agg_mode: str = "token-mean",
     backend: Optional[str] = None,
+    harmless_questions: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Evaluate a scalar vector or dense tensor of coefficients on the current question batch."""
     with torch.no_grad():
@@ -210,27 +243,59 @@ def evaluate_weights(
     )
 
     responses_raw = model.get_responses_batched(questions)
-    responses = []
-    for raw in responses_raw:
-        extracted = extract_response_after_think(raw)
-        responses.append(extracted if extracted else raw.strip())
+    responses = _extract_generated_responses(responses_raw)
+
+    harmless_questions = [
+        question.strip()
+        for question in (harmless_questions or [])
+        if isinstance(question, str) and question.strip()
+    ]
+    harmless_responses: List[str] = []
+    if harmless_questions:
+        harmless_responses_raw = model.get_responses_batched(harmless_questions)
+        harmless_responses = _extract_generated_responses(harmless_responses_raw)
+
     with torch.no_grad():
         policy_log_probs, response_mask = compute_sequence_log_probs(model, questions, responses)
+        harmless_policy_log_probs = None
+        harmless_response_mask = None
+        if harmless_questions:
+            harmless_policy_log_probs, harmless_response_mask = compute_sequence_log_probs(
+                model,
+                harmless_questions,
+                harmless_responses,
+            )
 
     model.reload_model()
     with torch.no_grad():
         ref_log_probs, ref_response_mask = compute_sequence_log_probs(model, questions, responses)
-    if tuple(ref_response_mask.shape) != tuple(response_mask.shape):
-        raise ValueError(
-            "Reference-policy response mask shape does not match modified-policy mask shape: "
-            f"{tuple(ref_response_mask.shape)} vs {tuple(response_mask.shape)}."
-        )
-    _, mean_kl_tensor = compute_masked_mean_kl(
-        log_prob=policy_log_probs,
-        ref_log_prob=ref_log_probs,
+        harmless_ref_log_probs = None
+        harmless_ref_response_mask = None
+        if harmless_questions:
+            harmless_ref_log_probs, harmless_ref_response_mask = compute_sequence_log_probs(
+                model,
+                harmless_questions,
+                harmless_responses,
+            )
+
+    harmful_mean_kl = _compute_mean_kl_from_log_probs(
+        policy_log_probs=policy_log_probs,
         response_mask=response_mask,
+        ref_log_probs=ref_log_probs,
+        ref_response_mask=ref_response_mask,
         loss_agg_mode=loss_agg_mode,
+        batch_name="Harmful",
     )
+    harmless_mean_kl = 0.0
+    if harmless_questions:
+        harmless_mean_kl = _compute_mean_kl_from_log_probs(
+            policy_log_probs=harmless_policy_log_probs,
+            response_mask=harmless_response_mask,
+            ref_log_probs=harmless_ref_log_probs,
+            ref_response_mask=harmless_ref_response_mask,
+            loss_agg_mode=loss_agg_mode,
+            batch_name="Harmless",
+        )
 
     harmfulness_scores = compute_reward(questions, responses, classifier_categories, backend)
     rewards = [float(score) * float(reward_sign) for score in harmfulness_scores]
@@ -239,7 +304,7 @@ def evaluate_weights(
     best_harmfulness = float(np.max(harmfulness_scores)) if harmfulness_scores else 0.0
     mean_reward = float(np.mean(rewards)) if rewards else 0.0
     best_reward = float(np.max(rewards)) if rewards else 0.0
-    mean_kl = float(mean_kl_tensor.item())
+    mean_kl = harmful_mean_kl + harmless_mean_kl
     mean_objective = float(mean_reward - float(kl_loss_coef) * mean_kl)
     return {
         "weights": weights.detach().cpu().tolist(),
@@ -250,10 +315,13 @@ def evaluate_weights(
         "mean_harmfulness": mean_harmfulness,
         "best_harmfulness": best_harmfulness,
         "mean_kl": mean_kl,
+        "harmful_mean_kl": harmful_mean_kl,
+        "harmless_mean_kl": harmless_mean_kl,
         "kl_loss": mean_kl,
         "mean_objective": mean_objective,
         "kl_loss_coef": float(kl_loss_coef),
         "n_questions": len(questions),
+        "harmless_n_questions": len(harmless_questions),
         "weights_mode": direction_weights.mode,
     }
 
@@ -272,6 +340,7 @@ def evaluate_scalar_weights(
     kl_loss_coef: float = 0.0,
     loss_agg_mode: str = "token-mean",
     backend: Optional[str] = None,
+    harmless_questions: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Backward-compatible wrapper for scalar Optuna evaluation."""
     return evaluate_weights(
@@ -288,6 +357,7 @@ def evaluate_scalar_weights(
         kl_loss_coef=kl_loss_coef,
         loss_agg_mode=loss_agg_mode,
         backend=backend,
+        harmless_questions=harmless_questions,
     )
 
 
@@ -305,6 +375,7 @@ def evaluate_dense_weights(
     kl_loss_coef: float = 0.0,
     loss_agg_mode: str = "token-mean",
     backend: Optional[str] = None,
+    harmless_questions: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Convenience wrapper for dense Optuna evaluation."""
     return evaluate_weights(
@@ -321,6 +392,7 @@ def evaluate_dense_weights(
         kl_loss_coef=kl_loss_coef,
         loss_agg_mode=loss_agg_mode,
         backend=backend,
+        harmless_questions=harmless_questions,
     )
 
 
@@ -341,6 +413,8 @@ def optimize_weights_with_optuna(
     weight_min: float,
     weight_max: float,
     question_sampler: Optional[Callable[[], List[str]]] = None,
+    harmless_questions: Optional[List[str]] = None,
+    harmless_question_sampler: Optional[Callable[[], List[str]]] = None,
     loss_agg_mode: str = "token-mean",
     backend: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -349,6 +423,11 @@ def optimize_weights_with_optuna(
     dtype = direction_weights.weights.dtype
     weights_mode = direction_weights.mode
     fallback_questions = list(questions) if questions is not None else None
+    fallback_harmless_questions = (
+        list(harmless_questions)
+        if harmless_questions is not None
+        else []
+    )
 
     if question_sampler is None and fallback_questions is None:
         raise ValueError("Optuna optimization requires either `questions` or `question_sampler`.")
@@ -358,6 +437,11 @@ def optimize_weights_with_optuna(
             list(question_sampler())
             if question_sampler is not None
             else list(fallback_questions)
+        )
+        trial_harmless_questions = (
+            list(harmless_question_sampler())
+            if harmless_question_sampler is not None
+            else list(fallback_harmless_questions)
         )
         trial_weights = suggest_trial_weights(
             trial=trial,
@@ -381,6 +465,7 @@ def optimize_weights_with_optuna(
             kl_loss_coef=kl_loss_coef,
             loss_agg_mode=loss_agg_mode,
             backend=backend,
+            harmless_questions=trial_harmless_questions,
         )
 
         trial.set_user_attr("weights_mode", weights_mode)
@@ -389,9 +474,13 @@ def optimize_weights_with_optuna(
         trial.set_user_attr("mean_harmfulness", trial_result["mean_harmfulness"])
         trial.set_user_attr("best_harmfulness", trial_result["best_harmfulness"])
         trial.set_user_attr("mean_kl", trial_result["mean_kl"])
+        trial.set_user_attr("harmful_mean_kl", trial_result.get("harmful_mean_kl"))
+        trial.set_user_attr("harmless_mean_kl", trial_result.get("harmless_mean_kl"))
         trial.set_user_attr("mean_objective", trial_result["mean_objective"])
         trial.set_user_attr("n_questions", trial_result["n_questions"])
+        trial.set_user_attr("harmless_n_questions", trial_result.get("harmless_n_questions"))
         trial.set_user_attr("questions", trial_questions)
+        trial.set_user_attr("harmless_questions", trial_harmless_questions)
         for key, value in summarize_weights(trial_weights).items():
             trial.set_user_attr(key, value)
         if weights_mode == "scalar":
@@ -408,6 +497,8 @@ def optimize_weights_with_optuna(
     best_trial = study.best_trial
     best_mean_harmfulness = best_trial.user_attrs.get("mean_harmfulness")
     best_mean_kl = best_trial.user_attrs.get("mean_kl")
+    best_harmful_mean_kl = best_trial.user_attrs.get("harmful_mean_kl")
+    best_harmless_mean_kl = best_trial.user_attrs.get("harmless_mean_kl")
     best_mean_objective = best_trial.user_attrs.get("mean_objective")
     best_weights = reconstruct_weights_from_params(
         params=best_trial.params,
@@ -428,8 +519,11 @@ def optimize_weights_with_optuna(
             "mean_harmfulness": trial.user_attrs.get("mean_harmfulness"),
             "best_harmfulness": trial.user_attrs.get("best_harmfulness"),
             "mean_kl": trial.user_attrs.get("mean_kl"),
+            "harmful_mean_kl": trial.user_attrs.get("harmful_mean_kl"),
+            "harmless_mean_kl": trial.user_attrs.get("harmless_mean_kl"),
             "mean_objective": trial.user_attrs.get("mean_objective"),
             "n_questions": trial.user_attrs.get("n_questions"),
+            "harmless_n_questions": trial.user_attrs.get("harmless_n_questions"),
             "weights_mode": trial.user_attrs.get("weights_mode"),
             "state": trial.state.name,
         }
@@ -452,8 +546,13 @@ def optimize_weights_with_optuna(
         "best_value": float(best_trial.value),
         "best_trial_number": best_trial.number,
         "best_trial_questions": list(best_trial.user_attrs.get("questions", fallback_questions or [])),
+        "best_trial_harmless_questions": list(
+            best_trial.user_attrs.get("harmless_questions", fallback_harmless_questions)
+        ),
         "best_mean_harmfulness": best_mean_harmfulness,
         "best_mean_kl": best_mean_kl,
+        "best_harmful_mean_kl": best_harmful_mean_kl,
+        "best_harmless_mean_kl": best_harmless_mean_kl,
         "best_mean_objective": best_mean_objective,
         "sampler_name": sampler_name,
         "optimization_history": optimization_history,
@@ -477,6 +576,8 @@ def optimize_scalar_weights_with_optuna(
     weight_min: float,
     weight_max: float,
     question_sampler: Optional[Callable[[], List[str]]] = None,
+    harmless_questions: Optional[List[str]] = None,
+    harmless_question_sampler: Optional[Callable[[], List[str]]] = None,
     loss_agg_mode: str = "token-mean",
     backend: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -498,6 +599,8 @@ def optimize_scalar_weights_with_optuna(
         weight_min=weight_min,
         weight_max=weight_max,
         question_sampler=question_sampler,
+        harmless_questions=harmless_questions,
+        harmless_question_sampler=harmless_question_sampler,
         loss_agg_mode=loss_agg_mode,
         backend=backend,
     )

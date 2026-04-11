@@ -148,12 +148,16 @@ def resolve_graph_grpo_debug_question_count(
 def resolve_graph_grpo_all_categories_harmful_prompt_count(
     env_value: str | None,
     default: int = 128,
-) -> int:
+) -> int | None:
     """Resolve the number of harmful train prompts used to build all-category directions."""
     if env_value is None or not env_value.strip():
         return default
 
-    value = int(env_value.strip())
+    normalized = env_value.strip().lower()
+    if normalized in ("all", "none", "null"):
+        return None
+
+    value = int(normalized)
     if value < 1:
         raise ValueError(f"ALL_CATEGORIES_HARMFUL_PROMPT_COUNT must be >= 1, got {value}")
     return value

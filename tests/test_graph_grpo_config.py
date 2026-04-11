@@ -391,6 +391,7 @@ class TestGraphGrpoConfig(unittest.TestCase):
         self.assertEqual(resolve_graph_grpo_debug_noise_scale(0.01, None), 0.01)
         self.assertEqual(resolve_graph_grpo_debug_noise_scale(0.1, "0.005"), 0.005)
         self.assertEqual(resolve_graph_grpo_all_categories_harmful_prompt_count("16"), 16)
+        self.assertIsNone(resolve_graph_grpo_all_categories_harmful_prompt_count("all"))
         self.assertEqual(resolve_graph_grpo_all_categories_harmful_prompt_seed("7"), 7)
         self.assertEqual(resolve_graph_grpo_optuna_n_trials(None), 50)
         self.assertEqual(resolve_graph_grpo_optuna_sampler_seed(None), 42)

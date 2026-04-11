@@ -174,6 +174,16 @@ def _load_harmful_split_questions(split: str) -> List[str]:
     return [question.strip() for question in questions if isinstance(question, str) and question.strip()]
 
 
+def _load_harmless_split_questions(split: str) -> List[str]:
+    """Load non-empty harmless instructions from the shared train/val/test split files."""
+    questions = load_dataset_split(
+        harmtype="harmless",
+        split=split,
+        instructions_only=True,
+    )
+    return [question.strip() for question in questions if isinstance(question, str) and question.strip()]
+
+
 def _sample_fixed_questions(
     questions: List[str],
     sample_count: int,
@@ -759,9 +769,14 @@ def main():
             raise ValueError(
                 "No harmful train prompts found for CATEGORY_MODE='all'."
             )
+        harmful_train_sample_count = (
+            len(harmful_train_questions)
+            if all_categories_harmful_prompt_count is None
+            else min(all_categories_harmful_prompt_count, len(harmful_train_questions))
+        )
         sampled_harmful_train_questions = _sample_fixed_questions(
             harmful_train_questions,
-            min(all_categories_harmful_prompt_count, len(harmful_train_questions)),
+            harmful_train_sample_count,
             all_categories_harmful_prompt_seed,
         )
         direction_prompt_count = len(sampled_harmful_train_questions)
@@ -961,6 +976,15 @@ def main():
             f"  Each Optuna trial will train on a random batch of {train_question_count} "
             f"question(s) sampled from {len(all_category_questions)} available"
         )
+        harmless_kl_questions = _load_harmless_split_questions("val")
+        if harmless_kl_questions:
+            print(
+                f"  Each Optuna trial will also compute KL on a random harmless batch "
+                f"of {min(MODEL_BATCH_SIZE, len(harmless_kl_questions))} question(s) "
+                f"sampled from {len(harmless_kl_questions)} available"
+            )
+        else:
+            print("  Warning: no harmless val questions found for Optuna KL regularization")
         optimization_result = optimize_weights_with_optuna(
             direction_weights=direction_weights,
             extracted_directions=extracted_directions,
@@ -981,6 +1005,14 @@ def main():
                 all_category_questions=all_category_questions,
                 debug_question_count=debug_question_count,
             ),
+            harmless_question_sampler=(
+                lambda: _sample_training_questions(
+                    all_category_questions=harmless_kl_questions,
+                    debug_question_count=debug_question_count,
+                )
+                if harmless_kl_questions
+                else None
+            ),
             loss_agg_mode=GRPO_CONFIG["loss_agg_mode"],
             backend=EVALUATION_BACKEND,
         )
@@ -990,7 +1022,9 @@ def main():
             f"Best Optuna trial: #{optimization_result['best_trial_number']} "
             f"with mean objective={optimization_result['best_value']:.3f} "
             f"(mean harmfulness={optimization_result.get('best_mean_harmfulness')}, "
-            f"mean kl={optimization_result.get('best_mean_kl')})"
+            f"mean kl={optimization_result.get('best_mean_kl')}, "
+            f"harmful kl={optimization_result.get('best_harmful_mean_kl')}, "
+            f"harmless kl={optimization_result.get('best_harmless_mean_kl')})"
         )
         if WANDB_AVAILABLE:
             wandb.log(
@@ -1000,6 +1034,8 @@ def main():
                     "optuna/best_objective": optimization_result.get("best_mean_objective", optimization_result["best_value"]),
                     "optuna/best_harmfulness": optimization_result.get("best_mean_harmfulness"),
                     "optuna/best_kl": optimization_result.get("best_mean_kl"),
+                    "optuna/best_harmful_kl": optimization_result.get("best_harmful_mean_kl"),
+                    "optuna/best_harmless_kl": optimization_result.get("best_harmless_mean_kl"),
                 }
             )
 
@@ -1139,6 +1175,11 @@ def main():
         answers_data["experiment_config"]["best_trial_mean_objective"] = optimization_result.get("best_mean_objective")
         answers_data["experiment_config"]["best_trial_mean_harmfulness"] = optimization_result.get("best_mean_harmfulness")
         answers_data["experiment_config"]["best_trial_mean_kl"] = optimization_result.get("best_mean_kl")
+        answers_data["experiment_config"]["best_trial_harmful_mean_kl"] = optimization_result.get("best_harmful_mean_kl")
+        answers_data["experiment_config"]["best_trial_harmless_mean_kl"] = optimization_result.get("best_harmless_mean_kl")
+        answers_data["experiment_config"]["best_trial_harmless_batch_size"] = len(
+            optimization_result.get("best_trial_harmless_questions", [])
+        )
     if optimization_result["optimization_history"]:
         answers_data["optimization_history"] = optimization_result["optimization_history"]
     if final_result["mmlu_block"] is not None:
