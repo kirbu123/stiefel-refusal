@@ -15,6 +15,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+import numpy as np
+
 from config import (
     ACADEMIC_BENCHMARKS_CONFIG,
     PROJECT_ROOT,
@@ -417,7 +419,8 @@ def _evaluate_tinybenchmarks_score_vector(
             "Install it with `pip install git+https://github.com/felipemaiapolo/tinyBenchmarks`."
         ) from exc
 
-    result = tinybenchmarks.evaluate(score_vector, benchmark)
+    score_array = np.asarray(score_vector, dtype=np.int64)
+    result = tinybenchmarks.evaluate(score_array, benchmark)
     if benchmark in result:
         return result[benchmark]
     return result

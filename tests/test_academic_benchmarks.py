@@ -1,7 +1,10 @@
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+import numpy as np
 
 import evaluate.academic_benchmarks as academic
 
@@ -152,6 +155,25 @@ class TestAcademicBenchmarks(unittest.TestCase):
         with patch.object(academic.importlib, "import_module", side_effect=ImportError):
             with self.assertRaisesRegex(ImportError, "tinyBenchmarks"):
                 academic._evaluate_tinybenchmarks_score_vector([1, 0, 1], "hellaswag")
+
+    def test_tinybenchmarks_score_vector_is_numpy_array(self):
+        captured = {}
+        fake_tinybenchmarks = types.SimpleNamespace()
+
+        def fake_evaluate(score_vector, benchmark):
+            captured["score_vector"] = score_vector
+            captured["benchmark"] = benchmark
+            return {"hellaswag": {"gpirt": 0.5}}
+
+        fake_tinybenchmarks.evaluate = fake_evaluate
+
+        with patch.object(academic.importlib, "import_module", return_value=fake_tinybenchmarks):
+            result = academic._evaluate_tinybenchmarks_score_vector([1, 0, 1], "hellaswag")
+
+        self.assertEqual(result["gpirt"], 0.5)
+        self.assertEqual(captured["benchmark"], "hellaswag")
+        self.assertIsInstance(captured["score_vector"], np.ndarray)
+        self.assertEqual(captured["score_vector"].shape, (3,))
 
     def test_evaluate_arc_aggregates_variants(self):
         arc_easy_records = [
