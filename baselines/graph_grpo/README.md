@@ -95,12 +95,24 @@ IS-веса корректируют разницу между behaviour policy 
 
 ```python
 # reward.py -> evaluate/judges.py
-scores = compute_reward(flat_questions, flat_responses, classifier_categories, backend)
+scores = compute_reward(
+    flat_questions,
+    flat_responses,
+    classifier_categories,
+    backend,
+    reward_metric=reward_metric,
+)
 ```
 
 Оценка вредоносности через `EVALUATION_BACKEND`:
 - `llamaguard` — LlamaGuard (LLM-классификатор безопасности)
 - `local_llm_judge` — локальный LLM-судья через API
+
+`REWARD_METRIC=harmfulness` сохраняет прежнее поведение и использует численный
+score evaluator-а. `REWARD_METRIC=llamaguard_unsafe` доступен только с
+`EVALUATION_BACKEND=llamaguard` и даёт per-response reward `1.0`, если
+LlamaGuard вернул `label == "unsafe"`, иначе `0.0`; среднее остаётся долей в
+диапазоне `[0, 1]`, без умножения на 100.
 
 Награда помещается в последний валидный токен ответа (формат token-level rewards для verl).
 
@@ -337,3 +349,5 @@ scale заменяется на `DEBUG_NOISE_SCALE`, чтобы smoke-run был
 `final_mean_harmfulness`, `optimal_objective`, `optimal_harmfulness`,
 `optimal_objective_source`, `optimal_harmfulness_source`, а также
 `best_train_batch_mean_kl` / `best_trial_mean_kl` в `experiment_config`.
+При `REWARD_METRIC=llamaguard_unsafe` дополнительно сохраняются
+`mean_unsafe_rate` / `best_unsafe_rate` поля на той же шкале `[0, 1]`.

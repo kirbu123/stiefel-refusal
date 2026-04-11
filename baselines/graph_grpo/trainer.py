@@ -96,6 +96,7 @@ def train_grpo_is_step(
     clip_ratio: float,
     loss_agg_mode: str,
     reward_sign: float = 1.0,
+    reward_metric: str = "harmfulness",
     kl_loss_coef: float = 0.0,
     backend: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -118,6 +119,7 @@ def train_grpo_is_step(
         clip_ratio: PPO clip epsilon
         loss_agg_mode: Loss aggregation mode
         reward_sign: Scale/sign applied to harmfulness scores for optimization
+        reward_metric: Reward metric used by compute_reward
         kl_loss_coef: Coefficient for KL regularization against the clean base model
         backend: Evaluation backend
 
@@ -263,12 +265,22 @@ def train_grpo_is_step(
 
     # Step 5: Rewards
     t0 = time.time()
-    print(f"  [Step 5] Computing rewards for {len(flat_responses)} responses (backend={backend})...")
-    harmfulness_scores = compute_reward(flat_questions, flat_responses, classifier_categories, backend)
+    print(
+        f"  [Step 5] Computing rewards for {len(flat_responses)} responses "
+        f"(backend={backend}, reward_metric={reward_metric})..."
+    )
+    harmfulness_scores = compute_reward(
+        flat_questions,
+        flat_responses,
+        classifier_categories,
+        backend,
+        reward_metric=reward_metric,
+    )
     harmfulness_tensor = torch.tensor(harmfulness_scores, dtype=torch.float32, device=device)
     reward_tensor = harmfulness_tensor * float(reward_sign)
+    score_label = "Unsafe rate" if reward_metric == "llamaguard_unsafe" else "Harmfulness"
     print(
-        f"    Harmfulness: mean={harmfulness_tensor.mean():.3f}, std={harmfulness_tensor.std():.3f}, "
+        f"    {score_label}: mean={harmfulness_tensor.mean():.3f}, std={harmfulness_tensor.std():.3f}, "
         f"min={harmfulness_tensor.min():.1f}, max={harmfulness_tensor.max():.1f}"
     )
     print(
@@ -441,4 +453,7 @@ def train_grpo_is_step(
         **{f"offpolicy/{k}": v for k, v in offpolicy_metrics.items()},
         **{f"is/{k}": v for k, v in is_metrics.items()},
     }
+    if reward_metric == "llamaguard_unsafe":
+        metrics["mean_unsafe_rate"] = float(harmfulness_tensor.mean().item())
+        metrics["best_unsafe_rate"] = float(harmfulness_tensor.max().item())
     return metrics

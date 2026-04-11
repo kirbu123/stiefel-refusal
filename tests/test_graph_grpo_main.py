@@ -95,6 +95,7 @@ class TestGraphGrpoMain(unittest.TestCase):
         harmful_train=None,
         harmful_val=None,
         harmful_test=None,
+        reward_metric="harmfulness",
     ):
         few_shots_path = self.temp_path / "few-shots.json"
         few_shots_path.write_text(json.dumps({"categories": []}), encoding="utf-8")
@@ -111,7 +112,9 @@ class TestGraphGrpoMain(unittest.TestCase):
         wandb_log_calls = []
         define_metric_calls = []
         train_step_questions = []
+        train_step_reward_metrics = []
         optuna_trial_batches = []
+        optuna_reward_metrics = []
         mmlu_eval_calls = []
         direction_compute_calls = []
         benchmark_runner = None
@@ -259,7 +262,19 @@ class TestGraphGrpoMain(unittest.TestCase):
         fake_model_utils.apply_abliteration_with_hyperparams = lambda *args, **kwargs: None
 
         fake_reward = types.ModuleType("baselines.graph_grpo.reward")
-        fake_reward.compute_reward = lambda questions, responses, classifier_categories, backend: [1 for _ in questions]
+
+        def fake_compute_reward(
+            questions,
+            responses,
+            classifier_categories,
+            backend,
+            reward_metric="harmfulness",
+        ):
+            if reward_metric == "llamaguard_unsafe":
+                return [1.0 if "unsafe" in question else 0.0 for question in questions]
+            return [1 for _ in questions]
+
+        fake_reward.compute_reward = fake_compute_reward
 
         fake_mmlu = types.ModuleType("evaluate.mmlu")
         modified_scores_iter = iter(modified_mmlu_scores or [0.75])
@@ -414,7 +429,9 @@ class TestGraphGrpoMain(unittest.TestCase):
             harmless_question_sampler=None,
             loss_agg_mode="token-mean",
             backend=None,
+            reward_metric="harmfulness",
         ):
+            optuna_reward_metrics.append(reward_metric)
             if question_sampler is not None:
                 trial_batches = [list(question_sampler()) for _ in range(min(n_trials, 3))]
             else:
@@ -444,6 +461,8 @@ class TestGraphGrpoMain(unittest.TestCase):
                         "best_reward": float(trial_index + 1),
                         "mean_harmfulness": float(trial_index + 1),
                         "best_harmfulness": float(trial_index + 1),
+                        "mean_unsafe_rate": 0.5 if reward_metric == "llamaguard_unsafe" else None,
+                        "best_unsafe_rate": 1.0 if reward_metric == "llamaguard_unsafe" else None,
                         "mean_kl": mean_kl,
                         "mean_objective": mean_objective,
                         "n_questions": len(trial_questions),
@@ -462,6 +481,8 @@ class TestGraphGrpoMain(unittest.TestCase):
                         "best_reward": float(trial_index + 1),
                         "mean_harmfulness": float(trial_index + 1),
                         "best_harmfulness": float(trial_index + 1),
+                        "mean_unsafe_rate": 0.5 if reward_metric == "llamaguard_unsafe" else None,
+                        "best_unsafe_rate": 1.0 if reward_metric == "llamaguard_unsafe" else None,
                         "mean_kl": mean_kl,
                         "mean_objective": mean_objective,
                         "n_questions": len(trial_questions),
@@ -474,6 +495,8 @@ class TestGraphGrpoMain(unittest.TestCase):
                 "best_value": optimization_history[best_trial_index]["mean_objective"],
                 "best_mean_objective": optimization_history[best_trial_index]["mean_objective"],
                 "best_mean_harmfulness": float(best_trial_index + 1),
+                "best_mean_unsafe_rate": 0.5 if reward_metric == "llamaguard_unsafe" else None,
+                "best_unsafe_rate": 1.0 if reward_metric == "llamaguard_unsafe" else None,
                 "best_mean_kl": optimization_history[best_trial_index]["mean_kl"],
                 "best_weights": best_weights_tensor.tolist(),
                 "best_trial_questions": trial_batches[best_trial_index],
@@ -493,6 +516,7 @@ class TestGraphGrpoMain(unittest.TestCase):
 
         def fake_train_grpo_is_step(*args, **kwargs):
             train_step_questions.append(list(kwargs["questions"]))
+            train_step_reward_metrics.append(kwargs.get("reward_metric"))
             metrics = dict(next(trainer_metrics_iter))
             metrics.setdefault("mean_kl", 0.0)
             metrics.setdefault("kl_loss", metrics["mean_kl"])
@@ -532,6 +556,7 @@ class TestGraphGrpoMain(unittest.TestCase):
             "OPTIMIZER_METHOD": optimizer_method,
             "WEIGHTS_MODE": weights_mode,
             "WEIGHTS_INIT_TYPE": weights_init_type,
+            "REWARD_METRIC": reward_metric,
         }
 
         sys.modules.pop("baselines.graph_grpo.__main__", None)
@@ -555,7 +580,9 @@ class TestGraphGrpoMain(unittest.TestCase):
             "wandb_log_calls": wandb_log_calls,
             "define_metric_calls": define_metric_calls,
             "train_step_questions": train_step_questions,
+            "train_step_reward_metrics": train_step_reward_metrics,
             "optuna_trial_batches": optuna_trial_batches,
+            "optuna_reward_metrics": optuna_reward_metrics,
             "mmlu_eval_calls": mmlu_eval_calls,
             "direction_compute_calls": direction_compute_calls,
             "models": FakeModel.instances,
@@ -862,6 +889,48 @@ class TestGraphGrpoMain(unittest.TestCase):
         self.assertFalse(any("best_value_model/mmlu_score" in payload for payload in scalar_payloads))
         self.assertFalse(any("best_batch_model/mmlu_score" in payload for payload in scalar_payloads))
 
+    def test_main_threads_llamaguard_unsafe_reward_metric_through_grpo(self):
+        dataset = [
+            {"instruction": "unsafe-question", "category": "Physical harm", "source": "combined"},
+            {"instruction": "safe-question", "category": "Physical harm", "source": "combined"},
+        ]
+
+        result = self._run_main(
+            dataset=dataset,
+            category_dataset_source="combined",
+            category_filter="Physical harm",
+            model_batch_size=2,
+            optimizer_method="grpo",
+            weights_mode="scalar",
+            grpo_n_epochs=1,
+            mmlu_enabled=False,
+            reward_metric="llamaguard_unsafe",
+            train_metrics_sequence=[
+                {
+                    "mean_reward": 0.5,
+                    "best_reward": 1.0,
+                    "mean_harmfulness": 0.5,
+                    "mean_unsafe_rate": 0.5,
+                    "best_unsafe_rate": 1.0,
+                }
+            ],
+        )
+
+        self.assertEqual(result["train_step_reward_metrics"], ["llamaguard_unsafe"])
+        self.assertEqual(
+            result["answers_data"]["experiment_config"]["reward_metric"],
+            "llamaguard_unsafe",
+        )
+        self.assertEqual(
+            result["answers_data"]["experiment_config"]["best_train_batch_mean_unsafe_rate"],
+            0.5,
+        )
+        self.assertEqual(
+            result["answers_data"]["experiment_config"]["best_train_batch_best_unsafe_rate"],
+            1.0,
+        )
+        self.assertEqual(result["answers_data"]["final_mean_unsafe_rate"], 0.5)
+
     def test_main_reaches_dense_optuna_path_and_saves_dense_weights(self):
         dataset = [
             {"instruction": "physical-question-1", "category": "Physical harm", "source": "combined"},
@@ -958,6 +1027,47 @@ class TestGraphGrpoMain(unittest.TestCase):
         self.assertTrue(any("scalar_weights_distribution_final" in path.name for path in plot_files))
         self.assertTrue(all(path.suffix == ".pdf" for path in plot_files))
         self.assertTrue(all(path.stat().st_size > 0 for path in plot_files))
+
+    def test_main_threads_llamaguard_unsafe_reward_metric_through_optuna(self):
+        dataset = [
+            {"instruction": "unsafe-question", "category": "Physical harm", "source": "combined"},
+            {"instruction": "safe-question", "category": "Physical harm", "source": "combined"},
+        ]
+
+        result = self._run_main(
+            dataset=dataset,
+            category_dataset_source="combined",
+            category_filter="Physical harm",
+            model_batch_size=2,
+            optimizer_method="optuna",
+            weights_mode="scalar",
+            mmlu_enabled=False,
+            reward_metric="llamaguard_unsafe",
+        )
+
+        self.assertEqual(result["optuna_reward_metrics"], ["llamaguard_unsafe"])
+        self.assertEqual(
+            result["answers_data"]["experiment_config"]["reward_metric"],
+            "llamaguard_unsafe",
+        )
+        self.assertEqual(
+            result["wandb_init_calls"][0]["config"]["reward_metric"],
+            "llamaguard_unsafe",
+        )
+        self.assertIn("reward_llamaguard_unsafe", result["wandb_init_calls"][0]["name"])
+        self.assertEqual(result["answers_data"]["final_scores"], [1, 0])
+        self.assertEqual(result["answers_data"]["final_mean_unsafe_rate"], 0.5)
+        self.assertEqual(result["answers_data"]["final_best_unsafe_rate"], 1.0)
+        self.assertEqual(result["answers_data"]["score_statistics"]["mean_unsafe_rate"], 0.5)
+        self.assertEqual(result["answers_data"]["score_statistics"]["best_unsafe_rate"], 1.0)
+        self.assertEqual(
+            result["answers_data"]["experiment_config"]["best_trial_mean_unsafe_rate"],
+            0.5,
+        )
+        self.assertEqual(
+            result["answers_data"]["optimization_history"][0]["mean_unsafe_rate"],
+            0.5,
+        )
 
     def test_main_saves_benchmark_blocks_and_logs_generic_series(self):
         dataset = [

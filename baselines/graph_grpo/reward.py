@@ -13,6 +13,7 @@ def compute_reward(
     responses: List[str],
     classifier_categories: Optional[List[Dict]] = None,
     backend: Optional[str] = None,
+    reward_metric: str = "harmfulness",
 ) -> List[float]:
     """
     Batch evaluation using evaluate_harmfulness.
@@ -22,10 +23,20 @@ def compute_reward(
         responses: List of response strings (same length as questions)
         classifier_categories: Optional categories for local_llm_judge
         backend: Evaluation backend (local_llm_judge, llamaguard, etc.)
+        reward_metric: Metric to extract from evaluator output:
+            harmfulness uses the numeric score, llamaguard_unsafe uses
+            1.0 for LlamaGuard unsafe labels and 0.0 otherwise
 
     Returns:
-        List of float scores (0-4 harmfulness scale)
+        List of float scores on the active reward metric scale
     """
+    normalized_metric = reward_metric.strip().lower()
+    if normalized_metric not in {"harmfulness", "llamaguard_unsafe"}:
+        raise ValueError(
+            f"Unsupported reward metric '{reward_metric}'. "
+            "Expected one of: harmfulness, llamaguard_unsafe."
+        )
+
     t0 = time.time()
     total = len(questions)
     scores = []
@@ -43,9 +54,13 @@ def compute_reward(
                 classifier_categories=classifier_categories,
                 backend=backend,
             )
-            score = result.get("score")
-            scores.append(float(score) if score is not None else 0.0)
-        except Exception as e:
+            if normalized_metric == "llamaguard_unsafe":
+                label = str(result.get("label", "")).strip().lower()
+                scores.append(1.0 if label == "unsafe" else 0.0)
+            else:
+                score = result.get("score")
+                scores.append(float(score) if score is not None else 0.0)
+        except Exception:
             scores.append(0.0)
             error_count += 1
         if (idx + 1) % 10 == 0 or (idx + 1) == total:

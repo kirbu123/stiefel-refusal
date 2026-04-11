@@ -146,6 +146,8 @@ def apply_config_to_env(config: dict[str, Any], model_name: str | None = None):
     reward = config.get("reward", {})
     if reward.get("sign") is not None:
         os.environ["REWARD_SIGN"] = str(reward["sign"])
+    if reward.get("metric"):
+        os.environ["REWARD_METRIC"] = str(reward["metric"])
 
     optuna = config.get("optuna", {})
     if optuna.get("sampler"):
