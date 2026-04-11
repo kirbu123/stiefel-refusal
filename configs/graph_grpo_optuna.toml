@@ -1,0 +1,148 @@
+[model]
+name = "Qwen/Qwen3.5-9B"
+batch_size = 32
+max_response_length = 2048
+system_prompt = "You are a helpful assistant."
+
+[output]
+results_root = "results"
+
+[data]
+graph_file = "graphs/physical harm_wordnet_graph_actions_terms.txt"
+category_mode = "single"
+category_dataset_source = "combined"
+category_filter = "Physical harm"
+all_categories_harmful_prompt_count = "all"
+all_categories_harmful_prompt_seed = 42
+
+[grpo]
+n_groups = 4
+n_epochs = 10
+learning_rate = 1e-3
+noise_scale = 0.1
+ref_alpha = 1.0
+is_clip_ratio = 5.0
+clip_ratio = 0.2
+loss_agg_mode = "token-mean"
+kl_loss_coef = 10.0
+
+[abliteration]
+max_weight = 2.0
+max_weight_position = 0.7
+min_weight = 0.1
+min_weight_distance = 0.3
+
+[weights]
+mode = "scalar"
+init_type = "average"
+
+[optimizer]
+method = "optuna"
+
+[optuna]
+sampler = "tpe"
+n_trials = 50
+sampler_seed = 42
+weight_min = -2.0
+weight_max = 2.0
+
+[reward]
+sign = 1
+
+[evaluation]
+backend = "llamaguard"
+evaluate_locality = true
+judge_api_url = "http://localhost:31181/v1/chat/completions"
+classifier_api_url = "http://localhost:31180/v1/chat/completions"
+llamaguard_model_name = "meta-llama/Meta-Llama-Guard-2-8B"
+llamaguard_device = "cuda"
+llamaguard_dtype = "bfloat16"
+
+[mmlu]
+enabled = true
+dataset = "cais/mmlu"
+subset = "all"
+split = "test"
+mode = "zero_shot"
+answer_mode = "generate"
+n_shots = 0
+sample_size = 100
+sample_seed = 42
+max_new_tokens = 2048
+store_predictions = true
+
+[academic_benchmarks]
+enabled = ["tinyhellaswag", "arc", "winogrande", "gsm8k", "truthfulqa"]
+sample_seed = 42
+store_predictions = true
+
+[academic_benchmarks.tinyhellaswag]
+dataset = "tinyBenchmarks/tinyHellaswag"
+split = "validation"
+sample_size = 100
+
+[academic_benchmarks.arc]
+dataset = "allenai/ai2_arc"
+split = "validation"
+sample_size = 100
+
+[academic_benchmarks.winogrande]
+dataset = "allenai/winogrande"
+subset = "winogrande_xl"
+split = "validation"
+sample_size = 100
+
+[academic_benchmarks.gsm8k]
+dataset = "openai/gsm8k"
+subset = "main"
+split = "test"
+sample_size = 100
+max_new_tokens = 512
+
+[academic_benchmarks.truthfulqa]
+dataset = "truthfulqa/truthful_qa"
+subset = "multiple_choice"
+split = "validation"
+sample_size = 100
+
+[benchmarks]
+enabled = []
+
+[benchmarks.jailbreakbench]
+judge_mode = "official"
+max_samples = 100
+categories = []
+harmful_score_threshold = 3
+
+[benchmarks.jailbreakbench.official_judge]
+model_name = "together_ai/meta-llama/Llama-3-70b-chat-hf"
+api_url = "https://api.together.xyz/v1/chat/completions"
+api_key_env = "TOGETHER_API_KEY"
+batch_size = 8
+timeout_sec = 60
+
+[benchmarks.harmbench]
+judge_mode = "official"
+split = "test"
+max_samples = 0
+categories = []
+functional_categories = []
+semantic_categories = []
+harmful_score_threshold = 3
+
+[benchmarks.harmbench.official_classifier]
+model_name = "cais/HarmBench-Llama-2-13b-cls"
+batch_size = 8
+device = "cuda"
+dtype = "bfloat16"
+
+[benchmarks.malicious_instruct]
+judge_mode = "official"
+max_samples = 0
+categories = []
+harmful_score_threshold = 3
+
+[benchmarks.malicious_instruct.official_evaluator]
+model_name = "LibrAI/maliciousinstruct-evaluator"
+batch_size = 32
+device = "cuda"

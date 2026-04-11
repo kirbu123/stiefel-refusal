@@ -145,6 +145,92 @@ def _evaluate_model_harmfulness(
     }
 
 
+def _save_scalar_weights_distribution_plot(
+    weights: torch.Tensor,
+    output_path: Path,
+    state_label: str,
+    category_name: str,
+    optimizer_method: str,
+    weights_init_type: str,
+) -> None:
+    """Save a polished scalar-weight distribution histogram as a PDF."""
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    values = weights.detach().cpu().float().view(-1).numpy()
+    count = int(values.size)
+    mean_value = float(np.mean(values)) if count else 0.0
+    std_value = float(np.std(values)) if count else 0.0
+    min_value = float(np.min(values)) if count else 0.0
+    max_value = float(np.max(values)) if count else 0.0
+    bins = min(40, max(10, count // 4)) if count else 10
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.hist(
+        values,
+        bins=bins,
+        color="#4C78A8",
+        edgecolor="#1F2933",
+        linewidth=0.8,
+        alpha=0.85,
+    )
+    ax.axvline(0.0, color="#222222", linestyle="--", linewidth=1.5, label="Zero")
+    ax.axvline(mean_value, color="#D55E00", linestyle="-", linewidth=1.8, label="Mean")
+    ax.set_xlabel("Scalar coefficient value", fontsize=12)
+    ax.set_ylabel("Number of scalar coefficients", fontsize=12)
+    ax.set_title(
+        f"{state_label} Scalar Coefficient Value Distribution",
+        fontsize=15,
+        fontweight="bold",
+        pad=14,
+    )
+    subtitle = (
+        f"Category: {category_name} | Optimizer: {optimizer_method} | "
+        f"Weight init: {weights_init_type}"
+    )
+    ax.text(
+        0.5,
+        1.01,
+        subtitle,
+        transform=ax.transAxes,
+        ha="center",
+        va="bottom",
+        fontsize=10,
+        color="#4A5568",
+    )
+    stats_text = (
+        f"Count: {count}\n"
+        f"Mean: {mean_value:.6f}\n"
+        f"Std: {std_value:.6f}\n"
+        f"Min: {min_value:.6f}\n"
+        f"Max: {max_value:.6f}"
+    )
+    ax.text(
+        0.98,
+        0.96,
+        stats_text,
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=10,
+        bbox={
+            "boxstyle": "round,pad=0.45",
+            "facecolor": "#F7FAFC",
+            "edgecolor": "#CBD5E0",
+            "alpha": 0.95,
+        },
+    )
+    ax.grid(axis="y", alpha=0.25, linewidth=0.8)
+    ax.legend(loc="upper left", frameon=True)
+    fig.tight_layout()
+    fig.savefig(output_path, format="pdf", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _load_graph_grpo_category_items(
     category_dataset_source: str,
     category_name: str,
@@ -826,6 +912,7 @@ def main():
     device = extracted_directions[0].device
     direction_weights = direction_weights.to(device)
     weights_shape = list(direction_weights.weights.shape)
+    initial_weights = direction_weights.weights.detach().cpu().clone()
     print(f"Trainable weights shape: {weights_shape}")
 
     if not all_category_questions:
@@ -955,6 +1042,40 @@ def main():
         benchmark_attack_success_rates=clean_benchmark_attack_success_rates,
         academic_metrics=clean_academic_metrics,
     )
+
+    print("\n" + "=" * 80)
+    print("INITIALIZED WEIGHTS EVALUATION")
+    print("=" * 80)
+    print(
+        f"Evaluating initialized weights on full evaluation split: "
+        f"{len(full_evaluation_questions)} question(s)"
+    )
+    with torch.no_grad():
+        initialized_direction = direction_weights(
+            [direction.detach() for direction in extracted_directions]
+        )
+    model.reload_model()
+    apply_abliteration_with_hyperparams(
+        model,
+        initialized_direction,
+        ABLITERATION_PARAMS["max_weight"] * GRPO_CONFIG["ref_alpha"],
+        ABLITERATION_PARAMS["max_weight_position"],
+        ABLITERATION_PARAMS["min_weight"] * GRPO_CONFIG["ref_alpha"],
+        ABLITERATION_PARAMS["min_weight_distance"],
+        n_layers,
+    )
+    initialized_harmfulness_result = _evaluate_model_harmfulness(
+        model=model,
+        questions=full_evaluation_questions,
+        classifier_categories=classifier_categories,
+    )
+    initialized_mean_harmfulness = initialized_harmfulness_result["mean_harmfulness"]
+    print(
+        f"Initialized weights harmfulness: {initialized_mean_harmfulness:.3f}"
+        if initialized_mean_harmfulness is not None
+        else "Initialized weights harmfulness: n/a"
+    )
+    model.reload_model()
 
     if optimizer_method == "grpo":
         optimization_result = _run_grpo_training(
@@ -1124,6 +1245,36 @@ def main():
     )
 
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    if weights_mode == "scalar":
+        initial_weights_plot_file = (
+            GRPO_RESULTS_DIR
+            / f"scalar_weights_distribution_initial_{category_safe_name}_{timestamp_str}.pdf"
+        )
+        final_weights_plot_file = (
+            GRPO_RESULTS_DIR
+            / f"scalar_weights_distribution_final_{category_safe_name}_{timestamp_str}.pdf"
+        )
+        _save_scalar_weights_distribution_plot(
+            weights=initial_weights,
+            output_path=initial_weights_plot_file,
+            state_label="Initial",
+            category_name=run_category_name,
+            optimizer_method=optimizer_method,
+            weights_init_type=weights_init_type,
+        )
+        print(f"Initial scalar weights distribution saved to: {initial_weights_plot_file}")
+        _save_scalar_weights_distribution_plot(
+            weights=direction_weights.weights.data.cpu(),
+            output_path=final_weights_plot_file,
+            state_label="Final",
+            category_name=run_category_name,
+            optimizer_method=optimizer_method,
+            weights_init_type=weights_init_type,
+        )
+        print(f"Final scalar weights distribution saved to: {final_weights_plot_file}")
+    else:
+        print(f"Skipping scalar weight distribution plots for weights_mode='{weights_mode}'")
 
     answers_data = {
         "experiment_config": {
