@@ -408,6 +408,8 @@ class TestGraphGrpoMain(unittest.TestCase):
             weight_min,
             weight_max,
             question_sampler=None,
+            harmless_questions=None,
+            harmless_question_sampler=None,
             loss_agg_mode="token-mean",
             backend=None,
         ):

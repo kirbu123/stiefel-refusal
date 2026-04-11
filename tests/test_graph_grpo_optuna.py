@@ -259,6 +259,7 @@ class TestGraphGrpoOptuna(unittest.TestCase):
             kl_loss_coef,
             loss_agg_mode="token-mean",
             backend=None,
+            harmless_questions=None,
         ):
             score = float(weights.sum().item())
             mean_kl = 0.5
@@ -366,6 +367,7 @@ class TestGraphGrpoOptuna(unittest.TestCase):
             kl_loss_coef,
             loss_agg_mode="token-mean",
             backend=None,
+            harmless_questions=None,
         ):
             score = score_by_batch[questions[0]]
             mean_kl = 0.25
@@ -447,6 +449,7 @@ class TestGraphGrpoOptuna(unittest.TestCase):
             kl_loss_coef,
             loss_agg_mode="token-mean",
             backend=None,
+            harmless_questions=None,
         ):
             score = float(weights.sum().item())
             mean_kl = 0.5

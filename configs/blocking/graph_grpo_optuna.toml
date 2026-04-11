@@ -12,7 +12,7 @@ graph_file = "graphs/physical harm_wordnet_graph_actions_terms.txt"
 category_mode = "single"
 category_dataset_source = "combined"
 category_filter = "Physical harm"
-all_categories_harmful_prompt_count = 128
+all_categories_harmful_prompt_count = "all"
 all_categories_harmful_prompt_seed = 42
 
 [grpo]
@@ -24,6 +24,7 @@ ref_alpha = 1.0
 is_clip_ratio = 5.0
 clip_ratio = 0.2
 loss_agg_mode = "token-mean"
+kl_loss_coef = 10.0
 
 [abliteration]
 max_weight = 2.0
@@ -69,6 +70,40 @@ sample_size = 100
 sample_seed = 42
 max_new_tokens = 2048
 store_predictions = true
+
+[academic_benchmarks]
+enabled = ["tinyhellaswag", "arc", "winogrande", "gsm8k", "truthfulqa"]
+sample_seed = 42
+store_predictions = true
+
+[academic_benchmarks.tinyhellaswag]
+dataset = "tinyBenchmarks/tinyHellaswag"
+split = "validation"
+sample_size = 100
+
+[academic_benchmarks.arc]
+dataset = "allenai/ai2_arc"
+split = "validation"
+sample_size = 100
+
+[academic_benchmarks.winogrande]
+dataset = "allenai/winogrande"
+subset = "winogrande_xl"
+split = "validation"
+sample_size = 100
+
+[academic_benchmarks.gsm8k]
+dataset = "openai/gsm8k"
+subset = "main"
+split = "test"
+sample_size = 100
+max_new_tokens = 512
+
+[academic_benchmarks.truthfulqa]
+dataset = "truthfulqa/truthful_qa"
+subset = "multiple_choice"
+split = "validation"
+sample_size = 100
 
 [benchmarks]
 enabled = []
