@@ -1,5 +1,6 @@
 # %%
 import argparse
+import copy
 import json
 import os
 import os.path
@@ -19,6 +20,8 @@ import nnsight
 
 from pathlib import Path
 import sys
+from collections import Counter
+from datetime import datetime
 _GFR = Path(__file__).resolve().parent.parent / "geometry-of-refusal"
 sys.path.insert(0, str(_GFR))
 
@@ -27,6 +30,9 @@ from generate_utils import (projection_einops,
                             intervene_with_fn_vector_ablation,
                             intervene_with_fn_vector_addition)
 from scoring import refusal_metric, get_bypass_scores 
+
+from evaluate.evaluation_llamaguard import get_llamaguard_evaluator, unload_llamaguard_evaluator
+from evaluate import mmlu as mmlu_eval
 
 dotenv.load_dotenv(override=True)
 
@@ -133,6 +139,24 @@ DEFAULT_CONFIG = {
     'filter_data': True,              # Whether to filter data
     'filter_batch_size': 32,          # Batch size for filtering data
     'splits': "saladbench",           # Dataset split to use
+
+    # Evaluation
+    'eval_llamaguard': False,
+    'eval_mmlu': False,
+    'eval_split': "val",              # {train,val,test} -> data/{splits}_splits/*_{eval_split}.json
+    'eval_max_new_tokens': 256,
+    'eval_batch_size': 8,
+
+    # MMLU evaluation (subset of evaluate/mmlu.py config)
+    'mmlu_dataset': "cais/mmlu",
+    'mmlu_subset': "all",
+    'mmlu_mode': "zero_shot",
+    'mmlu_answer_mode': "generate",
+    'mmlu_n_shots': 5,
+    'mmlu_sample_size': 100,
+    'mmlu_sample_seed': 42,
+    'mmlu_max_new_tokens': 8,
+    'mmlu_store_predictions': False,
 }
 
 def parse_args():
@@ -215,6 +239,34 @@ def parse_args():
                     help='Batch size for filtering data')
     parser.add_argument('--splits', type=str, default=DEFAULT_CONFIG['splits'],
                     help='Dataset split to use')
+
+    # Evaluation
+    parser.add_argument('--eval_llamaguard', action='store_true',
+                    help='Evaluate initial and refined generations with LlamaGuard on harmful/harmless eval split')
+    parser.add_argument('--eval_mmlu', action='store_true',
+                    help='Evaluate initial and refined generations on MMLU (generate-mode by default)')
+    parser.add_argument('--eval_split', type=str, default=DEFAULT_CONFIG['eval_split'],
+                    choices=['train', 'val', 'test'],
+                    help='Which split jsons to use for LlamaGuard eval: data/{splits}_splits/*_{eval_split}.json')
+    parser.add_argument('--eval_max_new_tokens', type=int, default=DEFAULT_CONFIG['eval_max_new_tokens'],
+                    help='Max new tokens for generation during LlamaGuard eval')
+    parser.add_argument('--eval_batch_size', type=int, default=DEFAULT_CONFIG['eval_batch_size'],
+                    help='Batch size for generation during eval')
+
+    # MMLU
+    parser.add_argument('--mmlu_dataset', type=str, default=DEFAULT_CONFIG['mmlu_dataset'])
+    parser.add_argument('--mmlu_subset', type=str, default=DEFAULT_CONFIG['mmlu_subset'])
+    parser.add_argument('--mmlu_mode', type=str, default=DEFAULT_CONFIG['mmlu_mode'],
+                    choices=['zero_shot', 'few_shot'])
+    parser.add_argument('--mmlu_answer_mode', type=str, default=DEFAULT_CONFIG['mmlu_answer_mode'],
+                    choices=['generate'],
+                    help='Only generate-mode is supported in rdo_refusal.py')
+    parser.add_argument('--mmlu_n_shots', type=int, default=DEFAULT_CONFIG['mmlu_n_shots'])
+    parser.add_argument('--mmlu_sample_size', type=int, default=DEFAULT_CONFIG['mmlu_sample_size'])
+    parser.add_argument('--mmlu_sample_seed', type=int, default=DEFAULT_CONFIG['mmlu_sample_seed'])
+    parser.add_argument('--mmlu_max_new_tokens', type=int, default=DEFAULT_CONFIG['mmlu_max_new_tokens'])
+    parser.add_argument('--mmlu_store_predictions', action='store_true',
+                    help='Store full MMLU predictions in the output JSON (can be large)')
     
     return parser.parse_args()
 
@@ -710,7 +762,7 @@ class RefusalCone(nn.Module):
                 v_ortho = v_ortho / torch.norm(v_ortho)
 
                 self.fn_vectors[0].data = v_ortho.to(self.fn_vectors[0].dtype).to(self.fn_vectors[0].device)
-    
+
     def normalize(self):
         for i in range(len(self.fn_vectors)):
             self.fn_vectors[i].data.div_(self.fn_vectors[i].data.norm())
@@ -1017,6 +1069,7 @@ def refusal_cone_optimization(model, train_dataset,
     accumulation_steps = effective_batch_size // batch_size
     print("Accumulation steps", accumulation_steps)
     vectors = []
+    cayley_params = []
     train_losses = []
     stopped = False
     lowest_training_loss = float('inf')
@@ -1210,6 +1263,7 @@ def refusal_cone_optimization(model, train_dataset,
                         vectors.append(torch.stack(operation.fn_vectors, dim=0).detach().cpu().data.clone())
                     else:
                         vectors.append(operation.stack_directions_for_log())
+                        cayley_params.append(operation.cayley_param.detach().cpu().data.clone())
                     bypass_scores.append(basis_bypass_scores)
 
                     training_metrics = {
@@ -1292,14 +1346,31 @@ def refusal_cone_optimization(model, train_dataset,
             break
 
     save_vectors = vectors
+    save_cayley_params = cayley_params
     lowest_loss_index = torch.argmin(torch.tensor(train_losses)).item()
     lowest_loss_vector = save_vectors[lowest_loss_index]
+    lowest_loss_cayley_param = None
+    if direction_mode != "baseline":
+        try:
+            lowest_loss_cayley_param = save_cayley_params[lowest_loss_index]
+        except Exception:
+            lowest_loss_cayley_param = None
     if tb_checkpoint_dir is not None:
         os.makedirs(tb_checkpoint_dir, exist_ok=True)
         torch.save(save_vectors, os.path.join(tb_checkpoint_dir, "vectors.pt"))
         torch.save(lowest_loss_vector, os.path.join(tb_checkpoint_dir, "lowest_loss_vector.pt"))
+        if direction_mode != "baseline" and lowest_loss_cayley_param is not None:
+            torch.save(save_cayley_params, os.path.join(tb_checkpoint_dir, "cayley_params.pt"))
+            torch.save(lowest_loss_cayley_param, os.path.join(tb_checkpoint_dir, "lowest_loss_cayley_param.pt"))
 
-    return {"vectors": vectors, "lowest_loss": lowest_training_loss, "refusal_scores": bypass_scores, "train_losses": train_losses, "lowest_loss_vector": lowest_loss_vector}
+    return {
+        "vectors": vectors,
+        "lowest_loss": lowest_training_loss,
+        "refusal_scores": bypass_scores,
+        "train_losses": train_losses,
+        "lowest_loss_vector": lowest_loss_vector,
+        "lowest_loss_cayley_param": lowest_loss_cayley_param,
+    }
 
 # %%
 def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], **kwargs):
@@ -1356,7 +1427,313 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
     finally:
         tb_writer.close()
     print(f"TensorBoard log dir: {tb_run_dir}")
+    if args.eval_llamaguard or args.eval_mmlu:
+        refined = _extract_refined_artifact(results, args.direction_mode)
+        mmlu_cfg = {
+            "enabled": True,
+            "dataset": args.mmlu_dataset,
+            "subset": args.mmlu_subset,
+            "split": "test",
+            "mode": args.mmlu_mode,
+            "answer_mode": args.mmlu_answer_mode,
+            "n_shots": args.mmlu_n_shots,
+            "sample_size": args.mmlu_sample_size,
+            "sample_seed": args.mmlu_sample_seed,
+            "max_new_tokens": args.mmlu_max_new_tokens,
+            "store_predictions": bool(args.mmlu_store_predictions),
+        }
+        _evaluate_llamaguard_and_mmlu(
+            tb_run_dir=tb_run_dir,
+            model=model,
+            refined_artifact=refined,
+            direction_mode=args.direction_mode,
+            splits_name=args.splits,
+            eval_split=args.eval_split,
+            eval_max_new_tokens=args.eval_max_new_tokens,
+            eval_batch_size=args.eval_batch_size,
+            mmlu_cfg=mmlu_cfg,
+        )
     return results
+
+
+def _safe_json_dump(path: str, payload: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+def _extract_refined_artifact(training_results: dict, direction_mode: str):
+    """
+    Return an object representing the learned "refined" intervention.
+    - baseline/rotation: a vector direction (Tensor [d_model])
+    - activation_rot: per-layer cayley_param (Tensor [n_layers, d, d])
+    """
+    if training_results is None:
+        return None
+    if direction_mode == "activation_rot":
+        return training_results.get("lowest_loss_cayley_param")
+
+    vec = training_results.get("lowest_loss_vector")
+    if vec is None:
+        return None
+    if isinstance(vec, torch.Tensor):
+        if vec.ndim == 2 and vec.shape[0] >= 1:
+            vec = vec[0]
+        return vec
+    return None
+
+
+def _cayley_from_param(param_2d: torch.Tensor) -> torch.Tensor:
+    """Compute Cayley orthogonal matrix from an unconstrained parameter matrix."""
+    # param_2d: (d, d)
+    U = torch.triu(param_2d, diagonal=1)
+    A = U - U.T
+    d = A.shape[0]
+    I = torch.eye(d, device=A.device, dtype=A.dtype)
+    return (I - A) @ torch.linalg.inv(I + A)
+
+
+def _generate_nnsight(
+    model: LanguageModel,
+    prompts: list[str],
+    *,
+    max_new_tokens: int,
+    batch_size: int,
+    intervene_step_fn=None,
+) -> list[str]:
+    """
+    Generate decoded completions for each prompt.
+
+    intervene_step_fn(model): called once per decoding step inside the generation loop
+    (after invoke, before generator.next()).
+    """
+    decoded: list[str] = []
+    tokenizer = model.tokenizer
+
+    for i in range(0, len(prompts), batch_size):
+        batch = prompts[i : i + batch_size]
+        tok = tokenizer(batch, add_special_tokens=True, padding=True, truncation=False, return_tensors="pt")
+        input_lens = (tok["attention_mask"].sum(dim=1)).tolist()
+
+        with model.generate(max_new_tokens=max_new_tokens, do_sample=False) as generator:
+            with generator.invoke(batch):
+                out = model.generator.output.save()
+                for _ in range(max_new_tokens - 1):
+                    if intervene_step_fn is not None:
+                        intervene_step_fn(model)
+                    generator.next()
+
+        tokens = out.value  # (batch, seq)
+        for row, in_len in zip(tokens, input_lens):
+            decoded.append(tokenizer.decode(row[in_len:], skip_special_tokens=True))
+
+    return decoded
+
+
+def _make_ablation_step_fn(fn_vector: torch.Tensor):
+    fn_vector = fn_vector / (fn_vector.norm() + 1e-12)
+    def step_fn(model: LanguageModel):
+        v = fn_vector.to(model.dtype).to(model.device)
+        for layer in model.model.layers:
+            layer.input[:] -= projection_einops(layer.input[:], v)
+            layer.self_attn.output[0][:] -= projection_einops(layer.self_attn.output[0][:], v)
+            layer.mlp.output[:] -= projection_einops(layer.mlp.output[:], v)
+    return step_fn
+
+
+def _make_activation_rotation_step_fn(cayley_param: torch.Tensor):
+    # cayley_param: (n_layers, d, d) on cpu; move to cuda/float32 once.
+    cayley_param = cayley_param.to(device="cuda", dtype=torch.float32)
+    Ms = []
+    for layer_idx in range(cayley_param.shape[0]):
+        M = _cayley_from_param(cayley_param[layer_idx])
+        Ms.append(M)
+
+    def step_fn(model: LanguageModel):
+        # Rotate only layer inputs, consistent with RefusalDirectionActivationRotation.
+        for layer_idx, layer in enumerate(model.model.layers):
+            M = Ms[layer_idx]
+            try:
+                Mx = M.to(device=layer.input.device, dtype=layer.input.dtype)
+            except Exception:
+                Mx = M
+            layer.input = layer.input @ Mx.T
+
+    return step_fn
+
+
+def _aggregate_llamaguard(results: list[dict]) -> dict:
+    scores = [r.get("score") for r in results if r.get("score") is not None]
+    unsafe_ps = [r.get("unsafe_probability") for r in results if r.get("unsafe_probability") is not None]
+    labels = [r.get("label") for r in results if r.get("label") in ("safe", "unsafe")]
+    score_counts = Counter(scores)
+    unsafe_count = sum(1 for l in labels if l == "unsafe")
+    label_total = len(labels)
+    return {
+        "n": len(results),
+        "mean_score": (sum(scores) / len(scores)) if scores else None,
+        "mean_unsafe_probability": (sum(unsafe_ps) / len(unsafe_ps)) if unsafe_ps else None,
+        "pct_unsafe": (unsafe_count / label_total) if label_total else None,
+        "score_counts": {str(k): int(v) for k, v in sorted(score_counts.items(), key=lambda kv: kv[0])},
+    }
+
+
+def _load_eval_split_json(splits_name: str, kind: str, split: str) -> list[dict]:
+    path = f"data/{splits_name}_splits/{kind}_{split}.json"
+    return json.load(open(path, "r", encoding="utf-8"))
+
+
+def _evaluate_llamaguard_and_mmlu(
+    *,
+    tb_run_dir: str,
+    model: LanguageModel,
+    refined_artifact,
+    direction_mode: str,
+    splits_name: str,
+    eval_split: str,
+    eval_max_new_tokens: int,
+    eval_batch_size: int,
+    mmlu_cfg: dict,
+):
+    """
+    Runs LlamaGuard on harmful+harmless {eval_split} and MMLU on initial/refined.
+    Saves JSON artifacts under tb_run_dir and logs a few scalars to TensorBoard.
+    """
+    eval_writer = SummaryWriter(log_dir=tb_run_dir)
+    try:
+        payload: dict = {
+            "saved_at": datetime.now().isoformat(),
+            "direction_mode": direction_mode,
+            "eval_split": eval_split,
+        }
+
+        # --- LlamaGuard ---
+        if args.eval_llamaguard:
+            harmful = _load_eval_split_json(splits_name, "harmful", eval_split)
+            harmless = _load_eval_split_json(splits_name, "harmless", eval_split)
+            harmful_q = [d["instruction"] for d in harmful]
+            harmless_q = [d["instruction"] for d in harmless]
+
+            harmful_prompts = apply_chat_template(model.tokenizer, harmful_q)
+            harmless_prompts = apply_chat_template(model.tokenizer, harmless_q)
+
+            initial_harmful = _generate_nnsight(model, harmful_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size)
+            initial_harmless = _generate_nnsight(model, harmless_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size)
+
+            refined_harmful = None
+            refined_harmless = None
+            if refined_artifact is not None:
+                if direction_mode == "activation_rot":
+                    step_fn = _make_activation_rotation_step_fn(refined_artifact)
+                else:
+                    step_fn = _make_ablation_step_fn(refined_artifact)
+                refined_harmful = _generate_nnsight(model, harmful_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size, intervene_step_fn=step_fn)
+                refined_harmless = _generate_nnsight(model, harmless_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size, intervene_step_fn=step_fn)
+
+            evaluator = get_llamaguard_evaluator()
+            initial_harmful_results = evaluator.evaluate_batch(list(zip(harmful_q, initial_harmful)), progress_every=20)
+            initial_harmless_results = evaluator.evaluate_batch(list(zip(harmless_q, initial_harmless)), progress_every=20)
+            refined_harmful_results = evaluator.evaluate_batch(list(zip(harmful_q, refined_harmful)), progress_every=20) if refined_harmful is not None else None
+            refined_harmless_results = evaluator.evaluate_batch(list(zip(harmless_q, refined_harmless)), progress_every=20) if refined_harmless is not None else None
+
+            llamaguard_block = {
+                "harmful": {
+                    "initial": _aggregate_llamaguard(initial_harmful_results),
+                    "refined": _aggregate_llamaguard(refined_harmful_results) if refined_harmful_results is not None else None,
+                },
+                "harmless": {
+                    "initial": _aggregate_llamaguard(initial_harmless_results),
+                    "refined": _aggregate_llamaguard(refined_harmless_results) if refined_harmless_results is not None else None,
+                },
+            }
+            payload["llamaguard"] = llamaguard_block
+
+            # TensorBoard scalars (step=0)
+            def _log_lg(prefix: str, stats: dict | None):
+                if not stats:
+                    return
+                if stats.get("mean_score") is not None:
+                    eval_writer.add_scalar(f"eval/llamaguard/{prefix}_mean_score", stats["mean_score"], 0)
+                if stats.get("pct_unsafe") is not None:
+                    eval_writer.add_scalar(f"eval/llamaguard/{prefix}_pct_unsafe", stats["pct_unsafe"], 0)
+
+            _log_lg("harmful_initial", llamaguard_block["harmful"]["initial"])
+            _log_lg("harmful_refined", llamaguard_block["harmful"]["refined"])
+            _log_lg("harmless_initial", llamaguard_block["harmless"]["initial"])
+            _log_lg("harmless_refined", llamaguard_block["harmless"]["refined"])
+
+            unload_llamaguard_evaluator()
+
+        # --- MMLU ---
+        if args.eval_mmlu:
+            normalized = mmlu_eval.normalize_mmlu_config(mmlu_cfg)
+            prepared = mmlu_eval.prepare_mmlu_data(normalized)
+            entries = prepared["entries"]
+
+            prompts = [e["prompt"] for e in entries]
+            chat_prompts = apply_chat_template(model.tokenizer, prompts)
+
+            initial_resp = _generate_nnsight(model, chat_prompts, max_new_tokens=normalized["max_new_tokens"], batch_size=eval_batch_size)
+            initial_pred = [mmlu_eval.parse_choice_letter(r) for r in initial_resp]
+
+            refined_pred = None
+            if refined_artifact is not None:
+                if direction_mode == "activation_rot":
+                    step_fn = _make_activation_rotation_step_fn(refined_artifact)
+                else:
+                    step_fn = _make_ablation_step_fn(refined_artifact)
+                refined_resp = _generate_nnsight(model, chat_prompts, max_new_tokens=normalized["max_new_tokens"], batch_size=eval_batch_size, intervene_step_fn=step_fn)
+                refined_pred = [mmlu_eval.parse_choice_letter(r) for r in refined_resp]
+
+            initial_rows = []
+            refined_rows = []
+            for e, p in zip(entries, initial_pred):
+                initial_rows.append({
+                    "index": e["index"],
+                    "subject": e["subject"],
+                    "question": e["question"],
+                    "correct_letter": e["correct_letter"],
+                    "predicted_letter": p,
+                    "is_correct": p == e["correct_letter"],
+                    "raw_response": None,
+                })
+            if refined_pred is not None:
+                for e, p in zip(entries, refined_pred):
+                    refined_rows.append({
+                        "index": e["index"],
+                        "subject": e["subject"],
+                        "question": e["question"],
+                        "correct_letter": e["correct_letter"],
+                        "predicted_letter": p,
+                        "is_correct": p == e["correct_letter"],
+                        "raw_response": None,
+                    })
+
+            initial_summary = mmlu_eval.summarize_mmlu_predictions(initial_rows, prepared["config_snapshot"])
+            refined_summary = mmlu_eval.summarize_mmlu_predictions(refined_rows, prepared["config_snapshot"]) if refined_rows else None
+
+            mmlu_block = {
+                "config": mmlu_eval.get_mmlu_config_snapshot(normalized),
+                "initial": initial_summary,
+                "refined": refined_summary,
+                "delta_accuracy": (refined_summary["accuracy"] - initial_summary["accuracy"]) if refined_summary else None,
+                "preview": {
+                    "initial": initial_rows[: mmlu_eval.PREDICTION_PREVIEW_LIMIT],
+                    "refined": refined_rows[: mmlu_eval.PREDICTION_PREVIEW_LIMIT] if refined_rows else None,
+                }
+            }
+            payload["mmlu"] = mmlu_block
+
+            eval_writer.add_scalar("eval/mmlu/initial_accuracy", initial_summary["accuracy"], 0)
+            if refined_summary is not None:
+                eval_writer.add_scalar("eval/mmlu/refined_accuracy", refined_summary["accuracy"], 0)
+                eval_writer.add_scalar("eval/mmlu/delta_accuracy", refined_summary["accuracy"] - initial_summary["accuracy"], 0)
+
+        out_path = os.path.join(tb_run_dir, f"eval_metrics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+        _safe_json_dump(out_path, payload)
+        print(f"Saved eval metrics: {out_path}")
+    finally:
+        eval_writer.close()
 
 # Conditional training based on command line arguments
 if args.train_direction:
