@@ -129,6 +129,7 @@ rpds-py==0.30.0
 rsa==4.9.1
 safetensors==0.7.0
 seaborn==0.13.2
+nnsight==0.3.7
 sentry-sdk==2.53.0
 six==1.17.0
 smart_open==7.5.1
@@ -158,3 +159,4 @@ wrapt==2.1.1
 xxhash==3.6.0
 yarl==1.22.0
 zipp==3.23.0
+jaxtyping
