@@ -1611,6 +1611,33 @@ def _evaluate_llamaguard_and_mmlu(
         if args.eval_llamaguard:
             harmful = _load_eval_split_json(splits_name, "harmful", eval_split)
             harmless = _load_eval_split_json(splits_name, "harmless", eval_split)
+
+            # Keep evaluation bounded for quick iterations.
+            # Tiny preset expectation: RDO_MAX_HARMFUL_PER_CATEGORY=2 across ~10 categories (~20 total),
+            # and RDO_MAX_HARMLESS_TOTAL=20.
+            max_harmful_per_category = int(os.getenv("RDO_MAX_HARMFUL_PER_CATEGORY", "0") or "0")
+            max_harmless_total = int(os.getenv("RDO_MAX_HARMLESS_TOTAL", "0") or "0")
+
+            if max_harmful_per_category > 0:
+                per_cat_counts: dict[str, int] = {}
+                capped: list[dict] = []
+                for item in harmful:
+                    cat = str(item.get("category") or "unknown")
+                    cur = per_cat_counts.get(cat, 0)
+                    if cur >= max_harmful_per_category:
+                        continue
+                    per_cat_counts[cat] = cur + 1
+                    capped.append(item)
+                harmful = capped
+                print(
+                    f"[eval] capped harmful to {len(harmful)} "
+                    f"({max_harmful_per_category} per category across {len(per_cat_counts)} categories)"
+                )
+
+            if max_harmless_total > 0:
+                harmless = harmless[:max_harmless_total]
+                print(f"[eval] capped harmless to {len(harmless)} total")
+
             harmful_q = [d["instruction"] for d in harmful]
             harmless_q = [d["instruction"] for d in harmless]
 
