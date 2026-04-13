@@ -1,10 +1,11 @@
 #!/bin/bash
 
 # ---- GPU ----
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=2
 
 # ---- Model ----
-export MODEL_NAME="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+# export MODEL_NAME="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+export MODEL_NAME="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 
 # ---- Grid-search hyperparameters (comma-separated lists) ----
 
