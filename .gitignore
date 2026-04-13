@@ -35,3 +35,7 @@ results/
 
 .wandb/
 wandb/
+
+# Python cache
+*.pyc
+__pycache__/
