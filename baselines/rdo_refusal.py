@@ -114,6 +114,7 @@ DEFAULT_CONFIG = {
     
     # Optimization parameters
     'epochs': 1,                      # Number of training epochs
+    'max_iters': 20,                 # Maximum number of iterations to train for
     'lr': 3e-4,                       # Learning rate for optimization
     'batch_size': 1,                  # Batch size for training
     'effective_batch_size': 16,       # Effective batch size (uses gradient accumulation)
@@ -187,9 +188,9 @@ def parse_args():
                     help='Train a direction orthogonal to the DIM direction')
     parser.add_argument('--train_cone', action='store_true', 
                     help='Train a refusal cone (multiple basis vectors)')
-    parser.add_argument('--train_independent_direction', action='store_true', 
+    parser.add_argument('--train_independent_direction', action='store_true',
                     help='Train a direction that is independent of the DIM direction')
-    
+
     # Optimization parameters
     parser.add_argument('--epochs', type=int, default=DEFAULT_CONFIG['epochs'],
                     help='Number of training epochs')
@@ -204,7 +205,7 @@ def parse_args():
     parser.add_argument('--n_lr_reduce', type=int, default=DEFAULT_CONFIG['n_lr_reduce'],
                     help='Number of learning rate reductions before stopping')
     parser.add_argument('--direction_mode', type=str, default=DEFAULT_CONFIG['direction_mode'],
-                    choices=['baseline', 'rotation', 'activation_rot'],
+                    choices=['baseline', 'rotation', 'activation_rot', 'shtiefel_rot'],
                     help='baseline: original RefusalCone. rotation: learn orthogonal M (Cayley), r=M@r0; requires cone_dim=1')
 
     # Cone parameters
@@ -899,6 +900,128 @@ class RefusalDirectionActivationRotation(nn.Module):
         return [self.cayley_param]
 
 
+class RefusalShtiefelRotation(nn.Module):
+    """
+    Rotate activations directly with an orthogonal matrix M, optimized in Euclidean
+    space and retracted back to the orthogonal group after each optimizer step via
+    Stiefel (QR) orthogonalization.
+
+    Drop-in compatible with the existing `refusal_cone_optimization` loop:
+    - exposes a non-empty `fn_vectors` (dummy) so metric loops run at least once
+    - implements `__call__(direction)` and `add(direction, alpha, layer_idx)` but
+      ignores the passed direction and rotates activations instead
+    - keeps a `cayley_param` attribute name for training-loop compatibility
+    """
+
+    def __init__(self, module: Envoy, dim: int, init_vectors: torch.Tensor | None = None) -> None:
+        super().__init__()
+        self.module = module
+        self.dim = dim
+
+        n_layers = len(self.module.layers)
+        self.cayley_param = nn.Parameter(
+            torch.randn(n_layers, dim, dim, dtype=torch.float32, device="cuda") * 1e-3
+        )
+
+        if init_vectors is not None and len(init_vectors) > 0:
+            r0 = init_vectors[0].detach().float().cuda().clone()
+        else:
+            r0 = torch.randn(dim, dtype=torch.float32, device="cuda")
+        r0 = r0 / r0.norm()
+        self.register_buffer("r0", r0)
+
+        self._dummy_fn = nn.Parameter(
+            torch.zeros(dim, dtype=torch.float32, device="cuda"),
+            requires_grad=False,
+        )
+
+        # Start from an orthogonal matrix per layer.
+        self.orthogonalize()
+
+    @property
+    def fn_vectors(self):
+        return [self._dummy_fn]
+
+    def matrix(self, layer_idx: int) -> torch.Tensor:
+        return self.cayley_param[layer_idx]
+
+    def stack_directions_for_log(self) -> torch.Tensor:
+        return self.r0.detach().unsqueeze(0).cpu()
+
+    def _rotate(self, x, layer_idx: int):
+        # Mirror RefusalDirectionActivationRotation's tuple/proxy-safe behavior.
+        if isinstance(x, tuple):
+            if len(x) == 0:
+                return x
+            return (self._rotate(x[0], layer_idx),) + x[1:]
+
+        if not hasattr(x, "dtype") and hasattr(x, "__getitem__"):
+            try:
+                first = x[0]
+                rest = x[1:]
+                return (self._rotate(first, layer_idx),) + tuple(rest)
+            except Exception:
+                return x
+
+        M = self.matrix(layer_idx)  # (dim, dim) on cuda, float32
+        # Under nnsight, `x` can be a proxy where touching `x.device` / `x.dtype`
+        # may fail during tracing; prefer `M.to(x)` which matches both in one call.
+        try:
+            M = M.to(x)
+        except Exception:
+            try:
+                M = M.to(device=x.device, dtype=x.dtype)
+            except Exception:
+                # Last resort: match the model dtype if available.
+                try:
+                    M = M.to(dtype=model.dtype)
+                except Exception:
+                    pass
+        return x @ M.T
+
+    def __call__(self, direction):
+        del direction
+        for layer_idx, layer in enumerate(self.module.layers):
+            layer.input = self._rotate(layer.input, layer_idx)
+
+    def add(self, direction, alpha, layer_idx):
+        del direction, alpha
+        layer = self.module.layers[layer_idx]
+        layer.input = self._rotate(layer.input, layer_idx)
+
+    # def orthogonalize(self):
+    #     with torch.no_grad():
+    #         for layer_idx in range(self.cayley_param.shape[0]):
+    #             W = self.cayley_param[layer_idx]
+    #             Q, R = torch.linalg.qr(W)
+    #             d = torch.diagonal(R)
+    #             s = torch.sign(d)
+    #             s = torch.where(s == 0, torch.ones_like(s), s)
+    #             Q = Q @ torch.diag(s)
+    #             self.cayley_param[layer_idx].copy_(Q)
+
+    def orthogonalize(self):
+        with torch.no_grad():
+            for layer_idx in range(self.cayley_param.shape[0]):
+                W = self.cayley_param[layer_idx]  # (dim, dim)
+
+                # Polar projection via SVD: Q = U @ Vh
+                U, _, Vh = torch.linalg.svd(W, full_matrices=False)
+                Q = U @ Vh
+
+                # Optional: enforce det(Q)=+1 (SO(n)) to avoid reflections
+                # if torch.linalg.det(Q) < 0:
+                #     U[:, -1] *= -1
+                #     Q = U @ Vh
+
+                self.cayley_param[layer_idx].copy_(Q)
+
+    def normalize(self):
+        return
+
+    def parameters(self):
+        return [self.cayley_param]
+
 
 class RefusalDirectionRotation(nn.Module):
     """
@@ -1057,6 +1180,8 @@ def refusal_cone_optimization(model, train_dataset,
         operation = RefusalDirectionRotation(model.model, model.config.hidden_size, init_vectors=init_vectors, orthogonal_vectors=orthogonal_vectors)
     elif direction_mode == "activation_rot":
         operation = RefusalDirectionActivationRotation(model.model, model.config.hidden_size, init_vectors=init_vectors)
+    elif direction_mode == "shtiefel_rot":
+        operation = RefusalShtiefelRotation(model.model, model.config.hidden_size, init_vectors=init_vectors)
     else:
         ValueError(f"Invalid direction_mode: {direction_mode}")
     
@@ -1101,9 +1226,19 @@ def refusal_cone_optimization(model, train_dataset,
             fixed_sample_vectors = sample_prob_vectors(fixed_samples, cone_dim)
         fixed_sample_vectors = [fixed_sample_vectors[i] for i in range(fixed_samples)]
 
+    max_iters = DEFAULT_CONFIG['max_iters']
+    num_iters = 0
+
     for epoch in range(epochs):
         print('Epoch', epoch)
         for _, batch in enumerate(train_dataloader):
+
+            num_iters += 1
+            if num_iters >= max_iters:
+                print(f'Reached max number of iterations: {max_iters}')
+                stopped = True
+                break
+
             ablation_prompt = batch['ablation_prompt']
             ablation_labels = batch['ablation_labels']
             addition_prompt = batch['addition_prompt']

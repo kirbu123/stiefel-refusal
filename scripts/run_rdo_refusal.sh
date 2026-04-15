@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=0,1,2
+export CUDA_VISIBLE_DEVICES=1,2,3
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -24,11 +24,11 @@ export RDO_MAX_HARMLESS_TOTAL="${RDO_MAX_HARMLESS_TOTAL:-20}"
 python -m baselines.rdo_refusal \
   --train_direction \
   --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
-  --direction_mode activation_rot \
+  --direction_mode shtiefel_rot \
   --lr 3e-4 \
   --eval_llamaguard \
-  --eval_mmlu \
-  --mmlu_store_predictions \
+  # --eval_mmlu \
+  # --mmlu_store_predictions \
   
 
 # ---- Optional eval flags ----
