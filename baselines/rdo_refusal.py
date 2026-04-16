@@ -1639,7 +1639,7 @@ def _extract_refined_artifact(training_results: dict, direction_mode: str):
     """
     if training_results is None:
         return None
-    if direction_mode == "activation_rot":
+    if direction_mode != "baseline":
         return training_results.get("lowest_loss_cayley_param")
 
     vec = training_results.get("lowest_loss_vector")
@@ -1821,7 +1821,7 @@ def _evaluate_llamaguard_and_mmlu(
                 refined_harmful = None
                 refined_harmless = None
                 if refined_artifact is not None:
-                    if direction_mode == "activation_rot":
+                    if direction_mode != "baseline":
                         step_fn = _make_activation_rotation_step_fn(refined_artifact)
                     else:
                         step_fn = _make_ablation_step_fn(refined_artifact)
@@ -1885,7 +1885,7 @@ def _evaluate_llamaguard_and_mmlu(
 
             refined_pred = None
             if refined_artifact is not None:
-                if direction_mode == "activation_rot":
+                if direction_mode != "baseline":
                     step_fn = _make_activation_rotation_step_fn(refined_artifact)
                 else:
                     step_fn = _make_ablation_step_fn(refined_artifact)
