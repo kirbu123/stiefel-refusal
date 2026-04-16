@@ -4,21 +4,23 @@ set -euo pipefail
 # Run from repo root
 cd "$(dirname "$0")/.."
 
+direction_mode="baseline" # "shtiefel_rot"
+
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=1,2,3
+export CUDA_VISIBLE_DEVICES=3
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
 export MMLU_SAMPLE_SIZE="${MMLU_SAMPLE_SIZE:-20}"
-export MMLU_MAX_NEW_TOKENS="${MMLU_MAX_NEW_TOKENS:-16}"
+export MMLU_MAX_NEW_TOKENS="${MMLU_MAX_NEW_TOKENS:-32}"
 export MMLU_STORE_PREDICTIONS="${MMLU_STORE_PREDICTIONS:-false}"
 
 # LlamaGuard: we only need the first generated token to compute P(unsafe).
-export LLAMAGUARD_MAX_NEW_TOKENS="${LLAMAGUARD_MAX_NEW_TOKENS:-1}"
+export LLAMAGUARD_MAX_NEW_TOKENS="${LLAMAGUARD_MAX_NEW_TOKENS:-32}"
 
 # Dataset caps for eval split JSONs.
-export RDO_MAX_HARMFUL_PER_CATEGORY="${RDO_MAX_HARMFUL_PER_CATEGORY:-2}"
-export RDO_MAX_HARMLESS_TOTAL="${RDO_MAX_HARMLESS_TOTAL:-20}"
+export RDO_MAX_HARMFUL_PER_CATEGORY="${RDO_MAX_HARMFUL_PER_CATEGORY:-200}"
+export RDO_MAX_HARMLESS_TOTAL="${RDO_MAX_HARMLESS_TOTAL:-200}"
 
 export HF_TOKEN="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"
 
@@ -26,7 +28,7 @@ export HF_TOKEN="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"
 python -m baselines.rdo_refusal \
   --train_direction \
   --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
-  --direction_mode shtiefel_rot \
+  --direction_mode "${direction_mode}" \
   --lr 3e-4 \
   --eval_llamaguard \
   # --eval_mmlu \

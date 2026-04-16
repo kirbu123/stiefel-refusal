@@ -114,7 +114,7 @@ DEFAULT_CONFIG = {
     
     # Optimization parameters
     'epochs': 1,                      # Number of training epochs
-    'max_iters': 20,                 # Maximum number of iterations to train for
+    'max_iters': 100000,              # Maximum number of iterations to train for
     'lr': 3e-4,                       # Learning rate for optimization
     'batch_size': 1,                  # Batch size for training
     'effective_batch_size': 16,       # Effective batch size (uses gradient accumulation)
@@ -699,8 +699,22 @@ class RefusalCone(nn.Module):
         normalized_direction = normalized_direction.to(model.dtype)
         for layer in self.module.layers:
             self.ablate_input(layer, normalized_direction)
-            self.ablate_output(layer.self_attn, normalized_direction, 3)
+            self.ablate_output(layer.self_attn, normalized_direction, 2)
             self.ablate_output(layer.mlp, normalized_direction, 1)
+
+    # def ablate_output(self, layer, direction, tuple_length=1):
+    #     if tuple_length > 1:
+    #         activation = layer.output[0][:]
+    #     else:
+    #         activation = layer.output
+    #     projection = projection_einops(activation, direction)
+    #     new_activation = activation - projection
+    #     if tuple_length == 2:
+    #         layer.output = (new_activation, layer.output[1])
+    #     elif tuple_length == 3:
+    #         layer.output = (new_activation, layer.output[1], layer.output[2])
+    #     elif tuple_length == 1:
+    #         layer.output = new_activation
 
     def ablate_output(self, layer, direction, tuple_length=1):
         if tuple_length > 1:
@@ -713,7 +727,7 @@ class RefusalCone(nn.Module):
             layer.output = (new_activation, layer.output[1])
         elif tuple_length == 3:
             layer.output = (new_activation, layer.output[1], layer.output[2])
-        elif tuple_length == 1:
+        else:
             layer.output = new_activation
 
     def ablate_input(self, layer, direction):
@@ -900,6 +914,36 @@ class RefusalDirectionActivationRotation(nn.Module):
         return [self.cayley_param]
 
 
+class OrthogonalProjection(torch.autograd.Function):
+    """Project onto orthogonal group with correct gradients."""
+
+    @staticmethod
+    def forward(ctx, W):
+        # Forward: project to the nearest orthogonal matrix via SVD.
+        U, S, Vh = torch.linalg.svd(W, full_matrices=False)
+        Q = U @ Vh
+        ctx.save_for_backward(U, Vh, S)
+        return Q
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """
+        Gradient of the orthogonal projection.
+
+        For Q = U @ Vh, use the tangent-space projection:
+        grad_W = grad_Q - Q @ sym(Q^T @ grad_Q)
+        where sym(M) = (M + M^T) / 2.
+        """
+        U, Vh, S = ctx.saved_tensors
+        del S
+
+        grad_Q = grad_output
+        Q = U @ Vh
+        sym_part = (Q.T @ grad_Q + grad_Q.T @ Q) / 2
+        grad_W = grad_Q - Q @ sym_part
+        return grad_W
+
+
 class RefusalShtiefelRotation(nn.Module):
     """
     Rotate activations directly with an orthogonal matrix M, optimized in Euclidean
@@ -936,14 +980,18 @@ class RefusalShtiefelRotation(nn.Module):
         )
 
         # Start from an orthogonal matrix per layer.
-        self.orthogonalize()
+        with torch.no_grad():
+            self.orthogonalize()
 
     @property
     def fn_vectors(self):
         return [self._dummy_fn]
 
     def matrix(self, layer_idx: int) -> torch.Tensor:
-        return self.cayley_param[layer_idx]
+        """Apply orthogonal projection with correct gradients."""
+        W = self.cayley_param[layer_idx]
+        Q = OrthogonalProjection.apply(W)
+        return Q
 
     def stack_directions_for_log(self) -> torch.Tensor:
         return self.r0.detach().unsqueeze(0).cpu()
@@ -989,32 +1037,18 @@ class RefusalShtiefelRotation(nn.Module):
         layer = self.module.layers[layer_idx]
         layer.input = self._rotate(layer.input, layer_idx)
 
-    # def orthogonalize(self):
-    #     with torch.no_grad():
-    #         for layer_idx in range(self.cayley_param.shape[0]):
-    #             W = self.cayley_param[layer_idx]
-    #             Q, R = torch.linalg.qr(W)
-    #             d = torch.diagonal(R)
-    #             s = torch.sign(d)
-    #             s = torch.where(s == 0, torch.ones_like(s), s)
-    #             Q = Q @ torch.diag(s)
-    #             self.cayley_param[layer_idx].copy_(Q)
-
     def orthogonalize(self):
+        """Initialize/force orthogonality without gradients."""
         with torch.no_grad():
             for layer_idx in range(self.cayley_param.shape[0]):
-                W = self.cayley_param[layer_idx]  # (dim, dim)
-
-                # Polar projection via SVD: Q = U @ Vh
+                W = self.cayley_param[layer_idx]
                 U, _, Vh = torch.linalg.svd(W, full_matrices=False)
                 Q = U @ Vh
-
-                # Optional: enforce det(Q)=+1 (SO(n)) to avoid reflections
-                # if torch.linalg.det(Q) < 0:
-                #     U[:, -1] *= -1
-                #     Q = U @ Vh
-
                 self.cayley_param[layer_idx].copy_(Q)
+
+    def skew(self, M: torch.Tensor) -> torch.Tensor:
+        """Extract the skew-symmetric part of a matrix."""
+        return (M - M.T) / 2
 
     def normalize(self):
         return
@@ -1072,7 +1106,7 @@ class RefusalDirectionRotation(nn.Module):
         normalized_direction = normalized_direction.to(model.dtype)
         for layer in self.module.layers:
             self.ablate_input(layer, normalized_direction)
-            self.ablate_output(layer.self_attn, normalized_direction, 3)
+            self.ablate_output(layer.self_attn, normalized_direction, 2)
             self.ablate_output(layer.mlp, normalized_direction, 1)
 
     def ablate_output(self, layer, direction, tuple_length=1):
@@ -2023,9 +2057,9 @@ class DirectionalAblation(nn.Module):
         direction = direction.to(model.dtype)
         for layer in self.module.layers:
             self.ablate_input(layer, direction)
-            self.ablate_output(layer.self_attn, direction, 3)
+            self.ablate_output(layer.self_attn, direction, 2)
             self.ablate_output(layer.mlp, direction, 1)
-    
+
     def ablate_output(self, layer, direction, tuple_length=1):
         if tuple_length > 1:
             activation = layer.output[0][:]
