@@ -1744,87 +1744,98 @@ def _evaluate_llamaguard_and_mmlu(
 
         # --- LlamaGuard ---
         if args.eval_llamaguard:
-            harmful = _load_eval_split_json(splits_name, "harmful", eval_split)
-            harmless = _load_eval_split_json(splits_name, "harmless", eval_split)
+            strict = str(os.getenv("RDO_LLAMAGUARD_STRICT", "0")).lower() in ("1", "true", "yes", "y")
+            try:
+                harmful = _load_eval_split_json(splits_name, "harmful", eval_split)
+                harmless = _load_eval_split_json(splits_name, "harmless", eval_split)
 
-            # Keep evaluation bounded for quick iterations.
-            # Tiny preset expectation: RDO_MAX_HARMFUL_PER_CATEGORY=2 across ~10 categories (~20 total),
-            # and RDO_MAX_HARMLESS_TOTAL=20.
-            max_harmful_per_category = int(os.getenv("RDO_MAX_HARMFUL_PER_CATEGORY", "0") or "0")
-            max_harmless_total = int(os.getenv("RDO_MAX_HARMLESS_TOTAL", "0") or "0")
+                # Keep evaluation bounded for quick iterations.
+                # Tiny preset expectation: RDO_MAX_HARMFUL_PER_CATEGORY=2 across ~10 categories (~20 total),
+                # and RDO_MAX_HARMLESS_TOTAL=20.
+                max_harmful_per_category = int(os.getenv("RDO_MAX_HARMFUL_PER_CATEGORY", "0") or "0")
+                max_harmless_total = int(os.getenv("RDO_MAX_HARMLESS_TOTAL", "0") or "0")
 
-            if max_harmful_per_category > 0:
-                per_cat_counts: dict[str, int] = {}
-                capped: list[dict] = []
-                for item in harmful:
-                    cat = str(item.get("category") or "unknown")
-                    cur = per_cat_counts.get(cat, 0)
-                    if cur >= max_harmful_per_category:
-                        continue
-                    per_cat_counts[cat] = cur + 1
-                    capped.append(item)
-                harmful = capped
-                print(
-                    f"[eval] capped harmful to {len(harmful)} "
-                    f"({max_harmful_per_category} per category across {len(per_cat_counts)} categories)"
-                )
+                if max_harmful_per_category > 0:
+                    per_cat_counts: dict[str, int] = {}
+                    capped: list[dict] = []
+                    for item in harmful:
+                        cat = str(item.get("category") or "unknown")
+                        cur = per_cat_counts.get(cat, 0)
+                        if cur >= max_harmful_per_category:
+                            continue
+                        per_cat_counts[cat] = cur + 1
+                        capped.append(item)
+                    harmful = capped
+                    print(
+                        f"[eval] capped harmful to {len(harmful)} "
+                        f"({max_harmful_per_category} per category across {len(per_cat_counts)} categories)"
+                    )
 
-            if max_harmless_total > 0:
-                harmless = harmless[:max_harmless_total]
-                print(f"[eval] capped harmless to {len(harmless)} total")
+                if max_harmless_total > 0:
+                    harmless = harmless[:max_harmless_total]
+                    print(f"[eval] capped harmless to {len(harmless)} total")
 
-            harmful_q = [d["instruction"] for d in harmful]
-            harmless_q = [d["instruction"] for d in harmless]
+                harmful_q = [d["instruction"] for d in harmful]
+                harmless_q = [d["instruction"] for d in harmless]
 
-            harmful_prompts = apply_chat_template(model.tokenizer, harmful_q)
-            harmless_prompts = apply_chat_template(model.tokenizer, harmless_q)
+                harmful_prompts = apply_chat_template(model.tokenizer, harmful_q)
+                harmless_prompts = apply_chat_template(model.tokenizer, harmless_q)
 
-            initial_harmful = _generate_nnsight(model, harmful_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size)
-            initial_harmless = _generate_nnsight(model, harmless_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size)
+                initial_harmful = _generate_nnsight(model, harmful_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size)
+                initial_harmless = _generate_nnsight(model, harmless_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size)
 
-            refined_harmful = None
-            refined_harmless = None
-            if refined_artifact is not None:
-                if direction_mode == "activation_rot":
-                    step_fn = _make_activation_rotation_step_fn(refined_artifact)
-                else:
-                    step_fn = _make_ablation_step_fn(refined_artifact)
-                refined_harmful = _generate_nnsight(model, harmful_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size, intervene_step_fn=step_fn)
-                refined_harmless = _generate_nnsight(model, harmless_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size, intervene_step_fn=step_fn)
+                refined_harmful = None
+                refined_harmless = None
+                if refined_artifact is not None:
+                    if direction_mode == "activation_rot":
+                        step_fn = _make_activation_rotation_step_fn(refined_artifact)
+                    else:
+                        step_fn = _make_ablation_step_fn(refined_artifact)
+                    refined_harmful = _generate_nnsight(model, harmful_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size, intervene_step_fn=step_fn)
+                    refined_harmless = _generate_nnsight(model, harmless_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size, intervene_step_fn=step_fn)
 
-            evaluator = get_llamaguard_evaluator()
-            initial_harmful_results = evaluator.evaluate_batch(list(zip(harmful_q, initial_harmful)), progress_every=20)
-            initial_harmless_results = evaluator.evaluate_batch(list(zip(harmless_q, initial_harmless)), progress_every=20)
-            refined_harmful_results = evaluator.evaluate_batch(list(zip(harmful_q, refined_harmful)), progress_every=20) if refined_harmful is not None else None
-            refined_harmless_results = evaluator.evaluate_batch(list(zip(harmless_q, refined_harmless)), progress_every=20) if refined_harmless is not None else None
+                evaluator = get_llamaguard_evaluator()
+                initial_harmful_results = evaluator.evaluate_batch(list(zip(harmful_q, initial_harmful)), progress_every=20)
+                initial_harmless_results = evaluator.evaluate_batch(list(zip(harmless_q, initial_harmless)), progress_every=20)
+                refined_harmful_results = evaluator.evaluate_batch(list(zip(harmful_q, refined_harmful)), progress_every=20) if refined_harmful is not None else None
+                refined_harmless_results = evaluator.evaluate_batch(list(zip(harmless_q, refined_harmless)), progress_every=20) if refined_harmless is not None else None
 
-            llamaguard_block = {
-                "harmful": {
-                    "initial": _aggregate_llamaguard(initial_harmful_results),
-                    "refined": _aggregate_llamaguard(refined_harmful_results) if refined_harmful_results is not None else None,
-                },
-                "harmless": {
-                    "initial": _aggregate_llamaguard(initial_harmless_results),
-                    "refined": _aggregate_llamaguard(refined_harmless_results) if refined_harmless_results is not None else None,
-                },
-            }
-            payload["llamaguard"] = llamaguard_block
+                llamaguard_block = {
+                    "harmful": {
+                        "initial": _aggregate_llamaguard(initial_harmful_results),
+                        "refined": _aggregate_llamaguard(refined_harmful_results) if refined_harmful_results is not None else None,
+                    },
+                    "harmless": {
+                        "initial": _aggregate_llamaguard(initial_harmless_results),
+                        "refined": _aggregate_llamaguard(refined_harmless_results) if refined_harmless_results is not None else None,
+                    },
+                }
+                payload["llamaguard"] = llamaguard_block
 
-            # TensorBoard scalars (step=0)
-            def _log_lg(prefix: str, stats: dict | None):
-                if not stats:
-                    return
-                if stats.get("mean_score") is not None:
-                    eval_writer.add_scalar(f"eval/llamaguard/{prefix}_mean_score", stats["mean_score"], 0)
-                if stats.get("pct_unsafe") is not None:
-                    eval_writer.add_scalar(f"eval/llamaguard/{prefix}_pct_unsafe", stats["pct_unsafe"], 0)
+                # TensorBoard scalars (step=0)
+                def _log_lg(prefix: str, stats: dict | None):
+                    if not stats:
+                        return
+                    if stats.get("mean_score") is not None:
+                        eval_writer.add_scalar(f"eval/llamaguard/{prefix}_mean_score", stats["mean_score"], 0)
+                    if stats.get("pct_unsafe") is not None:
+                        eval_writer.add_scalar(f"eval/llamaguard/{prefix}_pct_unsafe", stats["pct_unsafe"], 0)
 
-            _log_lg("harmful_initial", llamaguard_block["harmful"]["initial"])
-            _log_lg("harmful_refined", llamaguard_block["harmful"]["refined"])
-            _log_lg("harmless_initial", llamaguard_block["harmless"]["initial"])
-            _log_lg("harmless_refined", llamaguard_block["harmless"]["refined"])
-
-            unload_llamaguard_evaluator()
+                _log_lg("harmful_initial", llamaguard_block["harmful"]["initial"])
+                _log_lg("harmful_refined", llamaguard_block["harmful"]["refined"])
+                _log_lg("harmless_initial", llamaguard_block["harmless"]["initial"])
+                _log_lg("harmless_refined", llamaguard_block["harmless"]["refined"])
+            except Exception as e:
+                payload["llamaguard"] = None
+                payload["llamaguard_error"] = {"type": type(e).__name__, "message": str(e)}
+                print(f"[eval] LlamaGuard failed, skipping ({type(e).__name__}): {e}")
+                if strict:
+                    raise
+            finally:
+                try:
+                    unload_llamaguard_evaluator()
+                except Exception:
+                    pass
 
         # --- MMLU ---
         if args.eval_mmlu:
