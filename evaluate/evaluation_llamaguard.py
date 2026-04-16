@@ -111,8 +111,11 @@ class LlamaGuardEvaluator:
         # Authenticate with HuggingFace for gated model access
         token = HF_TOKEN if HF_TOKEN != "YOUR_HF_TOKEN_HERE" else None
         if token:
-            login(token=token)
-            print("  HuggingFace authentication successful")
+            try:
+                login(token=token)
+                print("  HuggingFace authentication successful")
+            except Exception as e:
+                print(f"  Warning: login() failed, continuing with token in from_pretrained: {e}")
         else:
             print("  Warning: HF_TOKEN is not set. Set it via the HF_TOKEN "
                   "environment variable.")
