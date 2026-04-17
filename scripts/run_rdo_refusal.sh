@@ -4,7 +4,8 @@ set -euo pipefail
 # Run from repo root
 cd "$(dirname "$0")/.."
 
-direction_mode="baseline" # "shtiefel_rot"
+direction_mode="activation_rot" # "shtiefel_rot", "activation_rot", "baseline"
+lr=1e-5
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
 export CUDA_VISIBLE_DEVICES=3
@@ -29,10 +30,10 @@ python -m baselines.rdo_refusal \
   --train_direction \
   --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
   --direction_mode "${direction_mode}" \
-  --lr 3e-4 \
+  --lr "${lr}" \
   --eval_llamaguard \
-  # --eval_mmlu \
-  # --mmlu_store_predictions \
+  --eval_mmlu \
+  --mmlu_store_predictions \
   
 
 # ---- Optional eval flags ----
