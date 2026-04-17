@@ -114,7 +114,7 @@ DEFAULT_CONFIG = {
     
     # Optimization parameters
     'epochs': 1,                      # Number of training epochs
-    'max_iters': 100000,              # Maximum number of iterations to train for
+    'max_iters': 1000,              # Maximum number of iterations to train for
     'lr': 3e-4,                       # Learning rate for optimization
     'batch_size': 1,                  # Batch size for training
     'effective_batch_size': 16,       # Effective batch size (uses gradient accumulation)
@@ -1662,6 +1662,28 @@ def _cayley_from_param(param_2d: torch.Tensor) -> torch.Tensor:
     return (I - A) @ torch.linalg.inv(I + A)
 
 
+def set_matrix(cayley_param: torch.Tensor, rotation_model: nn.Module) -> None:
+    """
+    Copy a learned Cayley parameter tensor into a rotation model in-place.
+
+    This lets us reuse the rotation model's own logic (e.g. RefusalShtiefelRotation
+    or RefusalDirectionActivationRotation) during evaluation instead of
+    re-implementing the math here.
+    """
+    if not hasattr(rotation_model, "cayley_param"):
+        raise ValueError("rotation_model must expose a 'cayley_param' attribute")
+
+    with torch.no_grad():
+        target = rotation_model.cayley_param
+        src = cayley_param.to(device=target.device, dtype=target.dtype)
+        if target.shape != src.shape:
+            raise ValueError(
+                f"Shape mismatch in set_matrix: rotation_model.cayley_param.shape="
+                f"{tuple(target.shape)} vs cayley_param.shape={tuple(src.shape)}"
+            )
+        target.copy_(src)
+
+
 def _generate_nnsight(
     model: LanguageModel,
     prompts: list[str],
@@ -1710,10 +1732,38 @@ def _make_ablation_step_fn(fn_vector: torch.Tensor):
     return step_fn
 
 
-def _make_activation_rotation_step_fn(cayley_param: torch.Tensor):
-    # cayley_param: (n_layers, d, d) on cpu; move to cuda/float32 once.
+def _make_activation_rotation_step_fn(
+    cayley_param: torch.Tensor,
+    rotation_model: nn.Module | None = None,
+):
+    """
+    Build a per-step intervention for activation-rotation style methods.
+
+    If `rotation_model` is provided (e.g. a RefusalShtiefelRotation or
+    RefusalDirectionActivationRotation instance), we first call `set_matrix`
+    to load `cayley_param` into that module and then delegate the actual
+    rotation to its internal `__call__` implementation.
+
+    If `rotation_model` is None, we fall back to the previous behavior of
+    constructing explicit Cayley matrices and rotating `layer.input` directly.
+    """
+    if rotation_model is not None:
+        # Reuse the trained rotation module for evaluation.
+        set_matrix(cayley_param, rotation_model)
+
+        def step_fn(model: LanguageModel):
+            # Make sure the rotation module points at the live model's layers.
+            if hasattr(rotation_model, "module"):
+                rotation_model.module = model.model
+            # rotation_model.__call__ typically ignores the direction argument
+            # and applies its own Cayley-based rotation.
+            rotation_model(direction=None)
+
+        return step_fn
+
+    # Backwards-compatible path: explicit Cayley matrices per layer.
     cayley_param = cayley_param.to(device="cuda", dtype=torch.float32)
-    Ms = []
+    Ms: list[torch.Tensor] = []
     for layer_idx in range(cayley_param.shape[0]):
         M = _cayley_from_param(cayley_param[layer_idx])
         Ms.append(M)
