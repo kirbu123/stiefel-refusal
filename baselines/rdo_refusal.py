@@ -247,6 +247,16 @@ def parse_args():
                     help='Evaluate initial and refined generations with LlamaGuard on harmful/harmless eval split')
     parser.add_argument('--eval_mmlu', action='store_true',
                     help='Evaluate initial and refined generations on MMLU (generate-mode by default)')
+    parser.add_argument(
+        '--result_path',
+        type=str,
+        default=None,
+        help=(
+            'Reuse an existing TensorBoard run directory (e.g. results/rdo_refusal/tensorboard/<run>). '
+            'If set, load refined artifacts from <result_path>/checkpoints and skip training; '
+            'evaluation outputs (eval_metrics_*.json) are written into the same directory.'
+        ),
+    )
     parser.add_argument('--eval_split', type=str, default=DEFAULT_CONFIG['eval_split'],
                     choices=['train', 'val', 'test'],
                     help='Which split jsons to use for LlamaGuard eval: data/{splits}_splits/*_{eval_split}.json')
@@ -805,6 +815,7 @@ class RefusalDirectionActivationRotation(nn.Module):
         super().__init__()
         self.module = module
         self.dim = dim
+        self._cached_matrices: list[torch.Tensor] | None = None
 
         # Learn a separate orthogonal transform per layer via Cayley parameterization.
         n_layers = len(self.module.layers)
@@ -837,10 +848,17 @@ class RefusalDirectionActivationRotation(nn.Module):
         return U - U.T
 
     def cayley_matrix(self, layer_idx: int) -> torch.Tensor:
+        if self._cached_matrices is not None:
+            return self._cached_matrices[layer_idx]
         A = self._skew(layer_idx)
         d = A.shape[0]
         I = torch.eye(d, device=A.device, dtype=A.dtype)
         return (I - A) @ torch.linalg.inv(I + A)
+
+    def set_cached_matrices(self, matrices: list[torch.Tensor] | None) -> None:
+        # Store per-layer orthogonal matrices to avoid recomputing Cayley inverses
+        # inside traced generation (can cause nnsight graph blow-up / OOM).
+        self._cached_matrices = matrices
     
     def stack_directions_for_log(self) -> torch.Tensor:
         return self.r0.detach().unsqueeze(0).cpu()
@@ -969,6 +987,7 @@ class RefusalShtiefelRotation(nn.Module):
         super().__init__()
         self.module = module
         self.dim = dim
+        self._cached_matrices: list[torch.Tensor] | None = None
 
         n_layers = len(self.module.layers)
         self.cayley_param = nn.Parameter(
@@ -997,9 +1016,14 @@ class RefusalShtiefelRotation(nn.Module):
 
     def matrix(self, layer_idx: int) -> torch.Tensor:
         """Apply orthogonal projection with correct gradients."""
+        if self._cached_matrices is not None:
+            return self._cached_matrices[layer_idx]
         W = self.cayley_param[layer_idx]
         Q = OrthogonalProjection.apply(W)
         return Q
+
+    def set_cached_matrices(self, matrices: list[torch.Tensor] | None) -> None:
+        self._cached_matrices = matrices
 
     def stack_directions_for_log(self) -> torch.Tensor:
         return self.r0.detach().unsqueeze(0).cpu()
@@ -1226,7 +1250,7 @@ def refusal_cone_optimization(model, train_dataset,
         operation = RefusalShtiefelRotation(model.model, model.config.hidden_size, init_vectors=init_vectors)
     else:
         ValueError(f"Invalid direction_mode: {direction_mode}")
-    
+
     optimizer = torch.optim.AdamW(operation.parameters(), lr=lr, betas=(.9,.98), weight_decay=0.0, amsgrad=True)
 
     print("Cone dim", cone_dim)
@@ -1584,26 +1608,53 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
     run_config.pop('train_orthogonal_direction', None)
     run_config.pop('train_independent_direction', None)
 
-    run_id = uuid.uuid4().hex[:12]
-    save_root = os.getenv("SAVE_DIR", "results")
-    subdir = f"{group_name}_{model_id}_{run_name}" if run_name else f"{group_name}_{model_id}_{run_id}"
-    tb_run_dir = os.path.join(save_root, "tensorboard", subdir)
-    os.makedirs(tb_run_dir, exist_ok=True)
-    save_run_hparams(tb_run_dir, run_config)
+    results = None
+    if args.result_path is not None:
+        tb_run_dir = os.path.abspath(os.path.expanduser(args.result_path))
+        print(f"[run] Using existing result_path (skip training): {tb_run_dir}")
 
-    tb_writer = SummaryWriter(log_dir=tb_run_dir)
-    tb_checkpoint_dir = os.path.join(tb_run_dir, "checkpoints")
-    try:
-        results = refusal_cone_optimization(
-            model=model,
-            train_dataset=train_dataset,
-            tb_writer=tb_writer,
-            tb_checkpoint_dir=tb_checkpoint_dir,
-            **train_kwargs
+        # Clean prior eval outputs so this run produces a single fresh eval_metrics file.
+        try:
+            removed = 0
+            for fname in os.listdir(tb_run_dir):
+                if fname.startswith("eval_metrics_") and fname.endswith(".json"):
+                    try:
+                        os.remove(os.path.join(tb_run_dir, fname))
+                        removed += 1
+                    except Exception:
+                        pass
+            if removed:
+                print(f"[run] Removed {removed} existing eval_metrics_*.json from result_path")
+        except Exception:
+            pass
+
+        results = _load_training_results_from_result_path(tb_run_dir, args.direction_mode)
+        print(
+            "[run] Loaded artifacts from checkpoints: "
+            f"lowest_loss_vector={'ok' if results.get('lowest_loss_vector') is not None else 'missing'}, "
+            f"lowest_loss_cayley_param={'ok' if results.get('lowest_loss_cayley_param') is not None else 'n/a'}"
         )
-    finally:
-        tb_writer.close()
-    print(f"TensorBoard log dir: {tb_run_dir}")
+    else:
+        run_id = uuid.uuid4().hex[:12]
+        save_root = os.getenv("SAVE_DIR", "results")
+        subdir = f"{group_name}_{model_id}_{run_name}" if run_name else f"{group_name}_{model_id}_{run_id}"
+        tb_run_dir = os.path.join(save_root, "tensorboard", subdir)
+        os.makedirs(tb_run_dir, exist_ok=True)
+        save_run_hparams(tb_run_dir, run_config)
+
+        tb_writer = SummaryWriter(log_dir=tb_run_dir)
+        tb_checkpoint_dir = os.path.join(tb_run_dir, "checkpoints")
+        try:
+            results = refusal_cone_optimization(
+                model=model,
+                train_dataset=train_dataset,
+                tb_writer=tb_writer,
+                tb_checkpoint_dir=tb_checkpoint_dir,
+                **train_kwargs
+            )
+        finally:
+            tb_writer.close()
+        print(f"TensorBoard log dir: {tb_run_dir}")
     if args.eval_llamaguard or args.eval_mmlu:
         refined = _extract_refined_artifact(results, args.direction_mode)
         mmlu_cfg = {
@@ -1637,6 +1688,65 @@ def _safe_json_dump(path: str, payload: dict) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+def _load_training_results_from_result_path(result_path: str, direction_mode: str) -> dict:
+    """
+    Load previously-saved artifacts from an existing run directory.
+
+    Expected layout:
+      <result_path>/
+        checkpoints/
+          lowest_loss_vector.pt
+          lowest_loss_cayley_param.pt      (required when direction_mode != "baseline")
+
+    Returns a dict shaped like the `refusal_cone_optimization` return so downstream
+    helpers (e.g. `_extract_refined_artifact`) can be reused.
+    """
+    if result_path is None or not str(result_path).strip():
+        raise ValueError("result_path must be a non-empty string")
+
+    tb_run_dir = os.path.abspath(os.path.expanduser(result_path))
+    if not os.path.isdir(tb_run_dir):
+        raise FileNotFoundError(f"--result_path does not exist or is not a directory: {tb_run_dir}")
+
+    ckpt_dir = os.path.join(tb_run_dir, "checkpoints")
+    if not os.path.isdir(ckpt_dir):
+        raise FileNotFoundError(
+            f"Missing checkpoints dir under --result_path. Expected: {ckpt_dir}"
+        )
+
+    def _req(path: str, what: str) -> str:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Missing {what}. Expected file: {path}")
+        return path
+
+    lowest_vec_path = _req(os.path.join(ckpt_dir, "lowest_loss_vector.pt"), "lowest_loss_vector.pt")
+    lowest_vec = torch.load(lowest_vec_path, map_location="cpu")
+
+    lowest_cayley = None
+    if direction_mode != "baseline":
+        lowest_cayley_path = _req(
+            os.path.join(ckpt_dir, "lowest_loss_cayley_param.pt"),
+            "lowest_loss_cayley_param.pt (required for non-baseline direction_mode)",
+        )
+        lowest_cayley = torch.load(lowest_cayley_path, map_location="cpu")
+
+    results = {
+        # Minimal fields consumed by `_extract_refined_artifact` and logging.
+        "lowest_loss_vector": lowest_vec,
+        "lowest_loss_cayley_param": lowest_cayley,
+    }
+
+    # Optional: keep compatibility with any downstream that expects these keys.
+    vectors_path = os.path.join(ckpt_dir, "vectors.pt")
+    if os.path.exists(vectors_path):
+        results["vectors"] = torch.load(vectors_path, map_location="cpu")
+    cayley_params_path = os.path.join(ckpt_dir, "cayley_params.pt")
+    if os.path.exists(cayley_params_path):
+        results["cayley_params"] = torch.load(cayley_params_path, map_location="cpu")
+
+    return results
 
 
 def _extract_refined_artifact(training_results: dict, direction_mode: str):
@@ -1759,6 +1869,28 @@ def _make_activation_rotation_step_fn(
         # Reuse the trained rotation module for evaluation.
         set_matrix(cayley_param, rotation_model)
 
+        # Precompute and cache per-layer orthogonal matrices once (outside tracing)
+        # so the module's original __call__ doesn't rebuild linalg_inv/SVD nodes
+        # during nnsight generation (which can lead to OOM).
+        with torch.no_grad():
+            Ms: list[torch.Tensor] = []
+            n_layers = cayley_param.shape[0]
+            for layer_idx in range(n_layers):
+                if hasattr(rotation_model, "cayley_matrix"):
+                    M = rotation_model.cayley_matrix(layer_idx)
+                elif hasattr(rotation_model, "matrix"):
+                    M = rotation_model.matrix(layer_idx)
+                else:
+                    cp = rotation_model.cayley_param[layer_idx]
+                    M = _cayley_from_param(cp)
+                Ms.append(M.detach())
+
+            if hasattr(rotation_model, "set_cached_matrices"):
+                try:
+                    rotation_model.set_cached_matrices(Ms)
+                except Exception:
+                    pass
+
         def step_fn(model: LanguageModel):
             # Make sure the rotation module points at the live model's layers.
             if hasattr(rotation_model, "module"):
@@ -1834,6 +1966,29 @@ def _evaluate_llamaguard_and_mmlu(
             "eval_split": eval_split,
         }
 
+        def _make_refined_step_fn(refined_artifact):
+            if refined_artifact is None:
+                return None
+            if direction_mode == "baseline":
+                return _make_ablation_step_fn(refined_artifact)
+
+            # For activation-rotation style modes, reuse the operation modules' own
+            # proxy-safe rotation logic (avoids bf16/float32 matmul mismatches).
+            rotation_model = None
+            if direction_mode == "activation_rot":
+                rotation_model = RefusalDirectionActivationRotation(
+                    model.model, model.config.hidden_size, init_vectors=[]
+                )
+            elif direction_mode == "shtiefel_rot":
+                rotation_model = RefusalShtiefelRotation(
+                    model.model, model.config.hidden_size, init_vectors=[]
+                )
+
+            return _make_activation_rotation_step_fn(
+                refined_artifact,
+                rotation_model=rotation_model,
+            )
+
         # --- LlamaGuard ---
         if args.eval_llamaguard:
             strict = str(os.getenv("RDO_LLAMAGUARD_STRICT", "0")).lower() in ("1", "true", "yes", "y")
@@ -1879,10 +2034,7 @@ def _evaluate_llamaguard_and_mmlu(
                 refined_harmful = None
                 refined_harmless = None
                 if refined_artifact is not None:
-                    if direction_mode != "baseline":
-                        step_fn = _make_activation_rotation_step_fn(refined_artifact)
-                    else:
-                        step_fn = _make_ablation_step_fn(refined_artifact)
+                    step_fn = _make_refined_step_fn(refined_artifact)
                     refined_harmful = _generate_nnsight(model, harmful_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size, intervene_step_fn=step_fn)
                     refined_harmless = _generate_nnsight(model, harmless_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size, intervene_step_fn=step_fn)
 
@@ -1965,10 +2117,7 @@ def _evaluate_llamaguard_and_mmlu(
 
             refined_pred = None
             if refined_artifact is not None:
-                if direction_mode != "baseline":
-                    step_fn = _make_activation_rotation_step_fn(refined_artifact)
-                else:
-                    step_fn = _make_ablation_step_fn(refined_artifact)
+                step_fn = _make_refined_step_fn(refined_artifact)
                 refined_resp = _generate_nnsight(model, chat_prompts, max_new_tokens=normalized["max_new_tokens"], batch_size=eval_batch_size, intervene_step_fn=step_fn)
                 refined_pred = [mmlu_eval.parse_choice_letter(r) for r in refined_resp]
 
