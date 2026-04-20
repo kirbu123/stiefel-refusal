@@ -10,6 +10,7 @@ import dotenv
 import torch
 import torch.nn as nn
 import numpy as np
+import traceback
 from nnsight import LanguageModel
 from nnsight.envoy import Envoy
 from torch.utils.data import DataLoader
@@ -114,7 +115,7 @@ DEFAULT_CONFIG = {
     
     # Optimization parameters
     'epochs': 1,                      # Number of training epochs
-    'max_iters': 1000,              # Maximum number of iterations to train for
+    'max_iters': int(os.getenv("MAX_ITERS")),              # Maximum number of iterations to train for
     'lr': 3e-4,                       # Learning rate for optimization
     'batch_size': 1,                  # Batch size for training
     'effective_batch_size': 16,       # Effective batch size (uses gradient accumulation)
@@ -878,10 +879,17 @@ class RefusalDirectionActivationRotation(nn.Module):
         # For tensor-like activations, match dtype/device to avoid matmul dtype errors.
         M = self.cayley_matrix(layer_idx)  # (dim, dim) on cuda, float32
         try:
-            # Safe here because tuple-like cases are handled above.
-            M = M.to(device=x.device, dtype=x.dtype)
+            # Prefer `to(x)` to match both dtype+device without separately touching
+            # `x.device`/`x.dtype` (can be fragile under nnsight proxies).
+            M = M.to(x)
         except Exception:
-            pass
+            try:
+                # Fallback for tensor-like objects where `.to(x)` is unsupported.
+                M = M.to(device=x.device, dtype=x.dtype)
+            except Exception:
+                # Last resort: keep M as-is; matmul may still fail, but avoid crashing
+                # due to attribute access on exotic proxy objects.
+                pass
         return x @ M.T
 
     def __call__(self, direction):
@@ -1911,8 +1919,30 @@ def _evaluate_llamaguard_and_mmlu(
                 _log_lg("harmless_refined", llamaguard_block["harmless"]["refined"])
             except Exception as e:
                 payload["llamaguard"] = None
-                payload["llamaguard_error"] = {"type": type(e).__name__, "message": str(e)}
-                print(f"[eval] LlamaGuard failed, skipping ({type(e).__name__}): {e}")
+                # nnsight often wraps the real error; capture full traceback and cause chain.
+                tb = traceback.format_exc()
+                chain = []
+                cur = e
+                seen = set()
+                while cur is not None and id(cur) not in seen:
+                    seen.add(id(cur))
+                    chain.append({"type": type(cur).__name__, "message": str(cur)})
+                    cur = cur.__cause__ or cur.__context__
+
+                payload["llamaguard_error"] = {
+                    "type": type(e).__name__,
+                    "message": str(e),
+                    "traceback": tb,
+                    "cause_chain": chain,
+                }
+
+                root = chain[-1] if chain else {"type": type(e).__name__, "message": str(e)}
+                print(
+                    "[eval] LlamaGuard failed, skipping "
+                    f"({type(e).__name__}): {e}\n"
+                    f"[eval] Root cause: {root.get('type')}: {root.get('message')}\n"
+                    f"{tb}"
+                )
                 if strict:
                     raise
             finally:
