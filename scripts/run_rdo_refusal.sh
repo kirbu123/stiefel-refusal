@@ -5,9 +5,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # variables
-direction_mode="activation_rot" # "shtiefel_rot", "activation_rot", "baseline"
+direction_mode="baseline" # "shtiefel_rot", "activation_rot", "baseline"
 lr=1e-5
 max_iters=20
+result_path="/home/buka2004/work/LLM-MOTIONS/LLM-Attack-Defense/results/rdo_refusal/tensorboard/basic_rdo_DeepSeek-R1-Distill-Qwen-1.5B_baseline" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
 
 export MAX_ITERS="${max_iters}"
 
@@ -24,21 +25,30 @@ export MMLU_STORE_PREDICTIONS="${MMLU_STORE_PREDICTIONS:-false}"
 export LLAMAGUARD_MAX_NEW_TOKENS="${LLAMAGUARD_MAX_NEW_TOKENS:-32}"
 
 # Dataset caps for eval split JSONs.
-export RDO_MAX_HARMFUL_PER_CATEGORY="${RDO_MAX_HARMFUL_PER_CATEGORY:-200}"
-export RDO_MAX_HARMLESS_TOTAL="${RDO_MAX_HARMLESS_TOTAL:-200}"
+export RDO_MAX_HARMFUL_PER_CATEGORY="${RDO_MAX_HARMFUL_PER_CATEGORY:-200}" # 200
+export RDO_MAX_HARMLESS_TOTAL="${RDO_MAX_HARMLESS_TOTAL:-200}" # 200
 
 export HF_TOKEN="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"
 
 # ---- Default command ----
-python -m baselines.rdo_refusal \
+cmd=(python -m baselines.rdo_refusal \
   --train_direction \
   --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
   --direction_mode "${direction_mode}" \
   --lr "${lr}" \
-  --eval_llamaguard \
-  # --eval_mmlu \
-  # --mmlu_store_predictions \
-  
+  --eval_llamaguard
+)
+
+# Reuse an existing run dir (skip training) if provided.
+if [[ -n "${result_path}" ]]; then
+  cmd+=(--result_path "${result_path}")
+fi
+
+# Optional eval flags:
+# cmd+=(--eval_mmlu)
+# cmd+=(--mmlu_store_predictions)
+
+"${cmd[@]}"
 
 # ---- Optional eval flags ----
 # Add these if you want metrics after training:
