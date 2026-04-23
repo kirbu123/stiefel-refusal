@@ -5,15 +5,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # variables
-direction_mode="baseline" # "shtiefel_rot", "activation_rot", "baseline"
+direction_mode="shtiefel_rot" # "shtiefel_rot", "activation_rot", "baseline"
 lr=1e-5
-max_iters=20
-result_path="/home/buka2004/work/LLM-MOTIONS/LLM-Attack-Defense/results/rdo_refusal/tensorboard/basic_rdo_DeepSeek-R1-Distill-Qwen-1.5B_baseline" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
+max_iters=100000
+result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
 
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=1
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
