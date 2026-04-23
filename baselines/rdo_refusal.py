@@ -161,7 +161,8 @@ DEFAULT_CONFIG = {
     'mmlu_store_predictions': False,
 
     # Optimization parameters
-    'opt_step_interval': 5,
+    'opt_step_interval': 10,
+    'freeze_order_layers': False,
 }
 
 def parse_args():
@@ -211,6 +212,11 @@ def parse_args():
     parser.add_argument('--direction_mode', type=str, default=DEFAULT_CONFIG['direction_mode'],
                     choices=['baseline', 'rotation', 'activation_rot', 'shtiefel_rot'],
                     help='baseline: original RefusalCone. rotation: learn orthogonal M (Cayley), r=M@r0; requires cone_dim=1')
+    parser.add_argument(
+        '--freeze_order_layers',
+        action='store_true',
+        help='(shtiefel_rot) If set, do not optimize or apply rotation to the first and last transformer layers.',
+    )
 
     # Cone parameters
     parser.add_argument('--min_cone_dim', type=int, default=DEFAULT_CONFIG['min_cone_dim'],
@@ -986,13 +992,21 @@ class RefusalShtiefelRotation(nn.Module):
     - keeps a `cayley_param` attribute name for training-loop compatibility
     """
 
-    def __init__(self, module: Envoy, dim: int, init_vectors: torch.Tensor | None = None) -> None:
+    def __init__(
+        self,
+        module: Envoy,
+        dim: int,
+        init_vectors: torch.Tensor | None = None,
+        freeze_order_layers: bool = False,
+    ) -> None:
         super().__init__()
         self.module = module
         self.dim = dim
         self._cached_matrices: list[torch.Tensor] | None = None
+        self.freeze_order_layers = bool(freeze_order_layers)
 
         n_layers = len(self.module.layers)
+        self._frozen_layer_idxs = {0, n_layers - 1} if (self.freeze_order_layers and n_layers >= 2) else set()
         self.cayley_param = nn.Parameter(
             torch.randn(n_layers, dim, dim, dtype=torch.float32, device="cuda") * 1e-3
         )
@@ -1019,6 +1033,9 @@ class RefusalShtiefelRotation(nn.Module):
 
     def matrix(self, layer_idx: int) -> torch.Tensor:
         """Apply orthogonal projection with correct gradients."""
+        if layer_idx in self._frozen_layer_idxs:
+            W = self.cayley_param[layer_idx]
+            return torch.eye(self.dim, device=W.device, dtype=W.dtype)
         if self._cached_matrices is not None:
             return self._cached_matrices[layer_idx]
         W = self.cayley_param[layer_idx]
@@ -1065,10 +1082,14 @@ class RefusalShtiefelRotation(nn.Module):
     def __call__(self, direction):
         del direction
         for layer_idx, layer in enumerate(self.module.layers):
+            if layer_idx in self._frozen_layer_idxs:
+                continue
             layer.input = self._rotate(layer.input, layer_idx)
 
     def add(self, direction, alpha, layer_idx):
         del direction, alpha
+        if layer_idx in self._frozen_layer_idxs:
+            return
         layer = self.module.layers[layer_idx]
         layer.input = self._rotate(layer.input, layer_idx)
 
@@ -1077,6 +1098,9 @@ class RefusalShtiefelRotation(nn.Module):
         with torch.no_grad():
             for layer_idx in range(self.cayley_param.shape[0]):
                 W = self.cayley_param[layer_idx]
+                if layer_idx in self._frozen_layer_idxs:
+                    self.cayley_param[layer_idx].copy_(torch.eye(self.dim, device=W.device, dtype=W.dtype))
+                    continue
 
                 # Polar projection via SVD: Q = U @ Vh  
                 # U, _, Vh = torch.linalg.svd(W, full_matrices=False)
@@ -1238,6 +1262,7 @@ def refusal_cone_optimization(model, train_dataset,
                               init_vectors=[], 
                               n_lr_reduce=DEFAULT_CONFIG['n_lr_reduce'], 
                               orthogonal_vectors=[],
+                              freeze_order_layers: bool = DEFAULT_CONFIG.get('freeze_order_layers', False),
                               tb_writer=None,
                               tb_checkpoint_dir=None,
                               direction_mode=DEFAULT_CONFIG['direction_mode']):
@@ -1259,7 +1284,12 @@ def refusal_cone_optimization(model, train_dataset,
     elif direction_mode == "activation_rot":
         operation = RefusalDirectionActivationRotation(model.model, model.config.hidden_size, init_vectors=init_vectors)
     elif direction_mode == "shtiefel_rot":
-        operation = RefusalShtiefelRotation(model.model, model.config.hidden_size, init_vectors=init_vectors)
+        operation = RefusalShtiefelRotation(
+            model.model,
+            model.config.hidden_size,
+            init_vectors=init_vectors,
+            freeze_order_layers=freeze_order_layers,
+        )
     else:
         ValueError(f"Invalid direction_mode: {direction_mode}")
 
@@ -1492,6 +1522,12 @@ def refusal_cone_optimization(model, train_dataset,
                         p0 = operation.cayley_param
                         if p0.grad is not None:
                             p0.grad.div_(accumulation_steps)
+
+                            # Potential danger
+                            if direction_mode == "shtiefel_rot" and freeze_order_layers and p0.grad.ndim >= 3 and p0.grad.shape[0] >= 2:
+                                p0.grad[0].zero_()
+                                p0.grad[-1].zero_()
+
                     torch.nn.utils.clip_grad_norm_(operation.parameters(), 10.0)
                     if direction_mode == "baseline":
                         grad_norm = operation.fn_vectors[-1].grad.norm().item()
@@ -1657,6 +1693,7 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
         "cone_dim": 1,  # Specific override for single direction training
         "orthogonal_vectors": orthogonal_vectors,
         "direction_mode": args.direction_mode,
+        "freeze_order_layers": getattr(args, "freeze_order_layers", False),
     }
     train_kwargs.update(kwargs) # Apply any user-provided overrides
 

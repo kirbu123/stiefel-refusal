@@ -13,7 +13,7 @@ result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave 
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=0
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -36,7 +36,8 @@ cmd=(python -m baselines.rdo_refusal \
   --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
   --direction_mode "${direction_mode}" \
   --lr "${lr}" \
-  --eval_llamaguard
+  --eval_llamaguard \
+  --freeze_order_layers \
 )
 
 # Reuse an existing run dir (skip training) if provided.
