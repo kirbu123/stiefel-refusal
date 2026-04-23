@@ -1253,6 +1253,17 @@ def refusal_cone_optimization(model, train_dataset,
 
     optimizer = torch.optim.AdamW(operation.parameters(), lr=lr, betas=(.9,.98), weight_decay=0.0, amsgrad=True)
 
+    def _log_scalar(x):
+        """
+        Log a scalar from either an nnsight traced value (has .save())
+        or a regular torch tensor / Python number.
+        """
+        if hasattr(x, "save"):
+            return x.save()
+        if torch.is_tensor(x):
+            return x.detach().item()
+        return float(x)
+
     def _zero_loss_with_grad() -> torch.Tensor:
         """
         Return a scalar 0 that still participates in autograd w.r.t. `operation`.
@@ -1261,7 +1272,20 @@ def refusal_cone_optimization(model, train_dataset,
         CE/KL objectives but still allow `(lambda * loss).backward()` to run as a no-op
         gradient step without detaching from the parameter graph.
         """
-        p0 = next(operation.parameters())
+        params = operation.parameters()
+        if isinstance(params, (list, tuple)):
+            if len(params) == 0:
+                # Anchor to traced graph if available, otherwise plain tensor.
+                if hasattr(model.lm_head, "output") and hasattr(model.lm_head.output, "reshape"):
+                    return model.lm_head.output.reshape(-1)[0] * 0.0
+                return torch.zeros((), device=model.model.device)
+            p0 = params[0]
+        else:
+            p0 = next(iter(params))
+        # Important: in nnsight tracing, logging expects a traced value that supports `.save()`.
+        # Anchor the "zero" to a traced tensor (lm_head.output) while still depending on params.
+        if hasattr(model.lm_head, "output") and hasattr(model.lm_head.output, "reshape"):
+            return (model.lm_head.output.reshape(-1)[0] * 0.0) + (p0.reshape(-1)[0] * 0.0)
         return p0.reshape(-1)[0] * 0.0
 
     print("Cone dim", cone_dim)
@@ -1341,7 +1365,7 @@ def refusal_cone_optimization(model, train_dataset,
                                     sample_ablation_loss = compute_ce_loss(logits, ablation_labels) / n_sample
                                 else:
                                     sample_ablation_loss = _zero_loss_with_grad()
-                                log = sample_ablation_loss.detach().item().save()
+                                log = _log_scalar(sample_ablation_loss)
                             (ablation_lambda * sample_ablation_loss).backward()
                     batch_sample_ablation_loss += log
                     if addition_lambda > 0:
@@ -1351,7 +1375,7 @@ def refusal_cone_optimization(model, train_dataset,
                                 operation.add(direction, alpha, add_layer)
                                 logits = model.lm_head.output[:, :-1]
                                 sample_addition_loss = compute_ce_loss(logits, addition_labels) / n_sample
-                                log = sample_addition_loss.detach().item().save()
+                                log = _log_scalar(sample_addition_loss)
                             (addition_lambda * sample_addition_loss).backward()
                         batch_sample_addition_loss += log
                     if retain_lambda > 0:
@@ -1366,7 +1390,7 @@ def refusal_cone_optimization(model, train_dataset,
                                     sample_retain_loss = kl_div_fn(baseline_retain_logits, sample_retain_logits).mean() / n_sample
                                 else:
                                     sample_retain_loss = _zero_loss_with_grad()
-                                log = sample_retain_loss.detach().item().save()
+                                log = _log_scalar(sample_retain_loss)
                             (retain_lambda * sample_retain_loss).backward()
                         batch_sample_retain_loss += log
                 
@@ -1377,8 +1401,11 @@ def refusal_cone_optimization(model, train_dataset,
                             with tracer.invoke(ablation_prompt):
                                 operation(fn_vector)
                                 logits = model.lm_head.output[:, :-1]
-                                basis_ablation_loss = compute_ce_loss(logits, ablation_labels) / cone_dim
-                                log = basis_ablation_loss.detach().item().save()
+                                if direction_mode == "baseline":
+                                    basis_ablation_loss = compute_ce_loss(logits, ablation_labels) / cone_dim
+                                else:
+                                    basis_ablation_loss = _zero_loss_with_grad()
+                                log = _log_scalar(basis_ablation_loss)
                             (ablation_lambda * basis_ablation_loss).backward()
                         batch_basis_ablation_loss += log
 
@@ -1388,7 +1415,7 @@ def refusal_cone_optimization(model, train_dataset,
                                 operation.add(fn_vector, alpha, add_layer)
                                 logits = model.lm_head.output[:, :-1]
                                 basis_addition_loss = compute_ce_loss(logits, addition_labels) / cone_dim
-                                log = basis_addition_loss.detach().item().save()
+                                log = _log_scalar(basis_addition_loss)
                             (addition_lambda * basis_addition_loss).backward()
                         batch_basis_addition_loss += log
 
@@ -1399,8 +1426,11 @@ def refusal_cone_optimization(model, train_dataset,
                             with tracer.invoke(retain_prompt):
                                 operation(fn_vector)
                                 retain_logits = model.lm_head.output[:, -num_target_tokens:]
-                                basis_retain_loss = kl_div_fn(baseline_retain_logits, retain_logits).mean() / cone_dim
-                                log = basis_retain_loss.detach().item().save()
+                                if direction_mode == "baseline":
+                                    basis_retain_loss = kl_div_fn(baseline_retain_logits, retain_logits).mean() / cone_dim
+                                else:
+                                    basis_retain_loss = _zero_loss_with_grad()
+                                log = _log_scalar(basis_retain_loss)
                             (retain_lambda * basis_retain_loss).backward()
                         batch_basis_retain_loss += log
                 
@@ -1410,7 +1440,7 @@ def refusal_cone_optimization(model, train_dataset,
                         with tracer.invoke(harmful_prompt):
                             operation(fn_vector)
                             last_token_logits = model.lm_head.output[:, -1]
-                            bypass_score = refusal_metric(last_token_logits, refusal_tokens).detach().item().save()
+                            bypass_score = _log_scalar(refusal_metric(last_token_logits, refusal_tokens))
                         batch_basis_bypass_scores.append(bypass_score)
 
                 with model.trace() as tracer:
@@ -1418,7 +1448,7 @@ def refusal_cone_optimization(model, train_dataset,
                         with tracer.invoke(harmless_prompt):
                             operation.add(fn_vector, alpha, add_layer)
                             last_token_logits = model.lm_head.output[:, -1]
-                            induce_score = refusal_metric(last_token_logits, refusal_tokens).detach().item().save()
+                            induce_score = _log_scalar(refusal_metric(last_token_logits, refusal_tokens))
                         batch_basis_induce_scores.append(induce_score)
                 if n_sample > 0:
                     with model.trace() as tracer:
@@ -1427,7 +1457,7 @@ def refusal_cone_optimization(model, train_dataset,
                                 direction = operation.transform(fixed_sample_vector)
                                 operation(direction)
                                 sample_last_token_logits = model.lm_head.output[:, -1]
-                                sample_bypass_score = refusal_metric(sample_last_token_logits, refusal_tokens).detach().item().save()
+                                sample_bypass_score = _log_scalar(refusal_metric(sample_last_token_logits, refusal_tokens))
                                 batch_sample_bypass_scores.append(sample_bypass_score)
                     with model.trace() as tracer:
                         for fixed_sample_vector in fixed_sample_vectors:
@@ -1435,7 +1465,7 @@ def refusal_cone_optimization(model, train_dataset,
                                 direction = operation.transform(fixed_sample_vector)
                                 operation.add(direction, alpha, add_layer)
                                 sample_last_token_logits = model.lm_head.output[:, -1]
-                                sample_induce_score = refusal_metric(sample_last_token_logits, refusal_tokens).detach().item().save()
+                                sample_induce_score = _log_scalar(refusal_metric(sample_last_token_logits, refusal_tokens))
                                 batch_sample_induce_scores.append(sample_induce_score)
 
                 step_counter += 1
