@@ -1253,6 +1253,17 @@ def refusal_cone_optimization(model, train_dataset,
 
     optimizer = torch.optim.AdamW(operation.parameters(), lr=lr, betas=(.9,.98), weight_decay=0.0, amsgrad=True)
 
+    def _zero_loss_with_grad() -> torch.Tensor:
+        """
+        Return a scalar 0 that still participates in autograd w.r.t. `operation`.
+
+        This is useful for non-baseline modes where we want to skip sample ablation/retain
+        CE/KL objectives but still allow `(lambda * loss).backward()` to run as a no-op
+        gradient step without detaching from the parameter graph.
+        """
+        p0 = next(operation.parameters())
+        return p0.reshape(-1)[0] * 0.0
+
     print("Cone dim", cone_dim)
     if cone_dim == 1:
         n_sample = 0
@@ -1326,7 +1337,10 @@ def refusal_cone_optimization(model, train_dataset,
                                 direction = operation.transform(sample_vector)
                                 operation(direction)
                                 logits = model.lm_head.output[:, :-1]
-                                sample_ablation_loss = compute_ce_loss(logits, ablation_labels) / n_sample
+                                if direction_mode == "baseline":
+                                    sample_ablation_loss = compute_ce_loss(logits, ablation_labels) / n_sample
+                                else:
+                                    sample_ablation_loss = _zero_loss_with_grad()
                                 log = sample_ablation_loss.detach().item().save()
                             (ablation_lambda * sample_ablation_loss).backward()
                     batch_sample_ablation_loss += log
@@ -1348,7 +1362,10 @@ def refusal_cone_optimization(model, train_dataset,
                                 direction = operation.transform(sample_vector)
                                 operation(direction)
                                 sample_retain_logits = model.lm_head.output[:, -num_target_tokens:]
-                                sample_retain_loss = kl_div_fn(baseline_retain_logits, sample_retain_logits).mean() / n_sample
+                                if direction_mode == "baseline":
+                                    sample_retain_loss = kl_div_fn(baseline_retain_logits, sample_retain_logits).mean() / n_sample
+                                else:
+                                    sample_retain_loss = _zero_loss_with_grad()
                                 log = sample_retain_loss.detach().item().save()
                             (retain_lambda * sample_retain_loss).backward()
                         batch_sample_retain_loss += log
