@@ -159,6 +159,9 @@ DEFAULT_CONFIG = {
     'mmlu_sample_seed': 42,
     'mmlu_max_new_tokens': 8,
     'mmlu_store_predictions': False,
+
+    # Optimization parameters
+    'opt_step_interval': 5,
 }
 
 def parse_args():
@@ -1074,8 +1077,17 @@ class RefusalShtiefelRotation(nn.Module):
         with torch.no_grad():
             for layer_idx in range(self.cayley_param.shape[0]):
                 W = self.cayley_param[layer_idx]
-                U, _, Vh = torch.linalg.svd(W, full_matrices=False)
-                Q = U @ Vh
+
+                # Polar projection via SVD: Q = U @ Vh  
+                # U, _, Vh = torch.linalg.svd(W, full_matrices=False)
+                # Q = U @ Vh
+
+                # QR-based Stiefel retraction (much faster than per-layer SVD).
+                # Sign-fix via R's diagonal to make Q continuous-ish.
+                Q, R = torch.linalg.qr(W, mode="reduced")
+                d = torch.sign(torch.diag(R))
+                d[d == 0] = 1.0
+                Q = Q @ torch.diag(d)
                 self.cayley_param[layer_idx].copy_(Q)
 
     def skew(self, M: torch.Tensor) -> torch.Tensor:
@@ -1306,6 +1318,7 @@ def refusal_cone_optimization(model, train_dataset,
     print("Starting training")
 
     step_counter = 0
+    opt_step_counter = 0
     batch_sample_ablation_loss = 0.0
     batch_sample_addition_loss = 0.0
     batch_sample_retain_loss = 0.0
@@ -1485,12 +1498,17 @@ def refusal_cone_optimization(model, train_dataset,
                     else:
                         grad_norm = operation.cayley_param.grad.norm().item()
                     optimizer.step()
+                    opt_step_counter += 1
                     optimizer.zero_grad()
                     if len(fixed_basis_vectors) > 0:
                         for i, fixed_basis_vector in enumerate(fixed_basis_vectors):
                             fixed_basis_vector = fixed_basis_vector / fixed_basis_vector.norm()
                             operation.fn_vectors[i].data.copy_(fixed_basis_vector.data)
-                    operation.orthogonalize()
+                    if direction_mode == "shtiefel_rot":
+                        if opt_step_counter % DEFAULT_CONFIG['opt_step_interval'] == 0:
+                            operation.orthogonalize()
+                    else:
+                        operation.orthogonalize()
 
                     batch_sample_ablation_loss /= accumulation_steps
                     batch_sample_addition_loss /= accumulation_steps
