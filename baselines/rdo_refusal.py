@@ -130,7 +130,8 @@ DEFAULT_CONFIG = {
     'fixed_samples': 8,               # Number of fixed samples for evaluation
     'sampling_method': "hypersphere", # Method for sampling vectors ('hypersphere' or 'interpolation')
     'optimize_basis': True,           # Whether to optimize the basis vectors directly
-    
+    'init_mode': "diag_permutation",  # Method for initializing the rotation matrices
+
     # Loss weights
     'ablation_lambda': 1,             # Weight for the ablation loss
     'addition_lambda': 0.2,           # Weight for the addition loss
@@ -979,7 +980,7 @@ class OrthogonalProjection(torch.autograd.Function):
         return grad_W
 
 
-class RefusalShtiefelRotation(nn.Module):
+class RefusalStiefelRotation(nn.Module):
     """
     Rotate activations directly with an orthogonal matrix M, optimized in Euclidean
     space and retracted back to the orthogonal group after each optimizer step via
@@ -998,6 +999,7 @@ class RefusalShtiefelRotation(nn.Module):
         dim: int,
         init_vectors: torch.Tensor | None = None,
         freeze_order_layers: bool = False,
+        init_mode: str = "diag_permutation",
     ) -> None:
         super().__init__()
         self.module = module
@@ -1007,9 +1009,24 @@ class RefusalShtiefelRotation(nn.Module):
 
         n_layers = len(self.module.layers)
         self._frozen_layer_idxs = {0, n_layers - 1} if (self.freeze_order_layers and n_layers >= 2) else set()
-        self.cayley_param = nn.Parameter(
-            torch.randn(n_layers, dim, dim, dtype=torch.float32, device="cuda") * 1e-3
-        )
+
+        if init_mode == "random":
+            self.cayley_param = nn.Parameter(
+                torch.randn(n_layers, dim, dim, dtype=torch.float32, device="cuda") * 1e-3
+            )
+        elif init_mode == "diag_permutation":
+            # Near-identity init: I + small Gaussian noise on the diagonal (QR in orthogonalize retracts).
+            matrices = []
+            diag_noise_scale = 1e-3
+            for _ in range(n_layers):
+                eye = torch.eye(dim, dtype=torch.float32, device="cuda")
+                eye.diagonal().add_(
+                    torch.randn(dim, dtype=torch.float32, device="cuda") * diag_noise_scale
+                )
+                matrices.append(eye)
+            self.cayley_param = nn.Parameter(torch.stack(matrices, dim=0))
+        else:
+            raise ValueError(f"Invalid init_mode: {init_mode}")
 
         if init_vectors is not None and len(init_vectors) > 0:
             r0 = init_vectors[0].detach().float().cuda().clone()
@@ -1284,11 +1301,12 @@ def refusal_cone_optimization(model, train_dataset,
     elif direction_mode == "activation_rot":
         operation = RefusalDirectionActivationRotation(model.model, model.config.hidden_size, init_vectors=init_vectors)
     elif direction_mode == "shtiefel_rot":
-        operation = RefusalShtiefelRotation(
+        operation = RefusalStiefelRotation(
             model.model,
             model.config.hidden_size,
             init_vectors=init_vectors,
             freeze_order_layers=freeze_order_layers,
+            init_mode=DEFAULT_CONFIG['init_mode']
         )
     else:
         ValueError(f"Invalid direction_mode: {direction_mode}")
@@ -1427,12 +1445,12 @@ def refusal_cone_optimization(model, train_dataset,
                                 baseline_retain_logits = model.lm_head.output[:, -num_target_tokens:]
                             with tracer.invoke(retain_prompt):
                                 direction = operation.transform(sample_vector)
-                                operation(direction)
-                                sample_retain_logits = model.lm_head.output[:, -num_target_tokens:]
                                 if direction_mode == "baseline":
-                                    sample_retain_loss = kl_div_fn(baseline_retain_logits, sample_retain_logits).mean() / n_sample
+                                    operation(direction)
                                 else:
-                                    sample_retain_loss = _zero_loss_with_grad()
+                                    operation.add(direction, alpha, add_layer)
+                                sample_retain_logits = model.lm_head.output[:, -num_target_tokens:]
+                                sample_retain_loss = kl_div_fn(baseline_retain_logits, sample_retain_logits).mean() / n_sample
                                 log = _log_scalar(sample_retain_loss)
                             (retain_lambda * sample_retain_loss).backward()
                         batch_sample_retain_loss += log
@@ -1467,12 +1485,12 @@ def refusal_cone_optimization(model, train_dataset,
                             with tracer.invoke(retain_prompt):
                                 baseline_retain_logits = model.lm_head.output[:, -num_target_tokens:]
                             with tracer.invoke(retain_prompt):
-                                operation(fn_vector)
-                                retain_logits = model.lm_head.output[:, -num_target_tokens:]
                                 if direction_mode == "baseline":
-                                    basis_retain_loss = kl_div_fn(baseline_retain_logits, retain_logits).mean() / cone_dim
+                                    operation(fn_vector)
                                 else:
-                                    basis_retain_loss = _zero_loss_with_grad()
+                                    operation.add(fn_vector, alpha, add_layer)
+                                retain_logits = model.lm_head.output[:, -num_target_tokens:]
+                                basis_retain_loss = kl_div_fn(baseline_retain_logits, retain_logits).mean() / cone_dim
                                 log = _log_scalar(basis_retain_loss)
                             (retain_lambda * basis_retain_loss).backward()
                         batch_basis_retain_loss += log
@@ -1886,7 +1904,7 @@ def set_matrix(cayley_param: torch.Tensor, rotation_model: nn.Module) -> None:
     """
     Copy a learned Cayley parameter tensor into a rotation model in-place.
 
-    This lets us reuse the rotation model's own logic (e.g. RefusalShtiefelRotation
+    This lets us reuse the rotation model's own logic (e.g. RefusalStiefelRotation
     or RefusalDirectionActivationRotation) during evaluation instead of
     re-implementing the math here.
     """
@@ -1959,7 +1977,7 @@ def _make_activation_rotation_step_fn(
     """
     Build a per-step intervention for activation-rotation style methods.
 
-    If `rotation_model` is provided (e.g. a RefusalShtiefelRotation or
+    If `rotation_model` is provided (e.g. a RefusalStiefelRotation or
     RefusalDirectionActivationRotation instance), we first call `set_matrix`
     to load `cayley_param` into that module and then delegate the actual
     rotation to its internal `__call__` implementation.
@@ -2082,8 +2100,8 @@ def _evaluate_llamaguard_and_mmlu(
                     model.model, model.config.hidden_size, init_vectors=[]
                 )
             elif direction_mode == "shtiefel_rot":
-                rotation_model = RefusalShtiefelRotation(
-                    model.model, model.config.hidden_size, init_vectors=[]
+                rotation_model = RefusalStiefelRotation(
+                    model.model, model.config.hidden_size, init_vectors=[], init_mode=DEFAULT_CONFIG['init_mode']
                 )
 
             return _make_activation_rotation_step_fn(
