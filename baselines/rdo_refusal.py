@@ -162,7 +162,6 @@ DEFAULT_CONFIG = {
     'mmlu_store_predictions': False,
 
     # Optimization parameters
-    'opt_step_interval': 10,
     'freeze_order_layers': False,
 }
 
@@ -211,12 +210,12 @@ def parse_args():
     parser.add_argument('--n_lr_reduce', type=int, default=DEFAULT_CONFIG['n_lr_reduce'],
                     help='Number of learning rate reductions before stopping')
     parser.add_argument('--direction_mode', type=str, default=DEFAULT_CONFIG['direction_mode'],
-                    choices=['baseline', 'rotation', 'activation_rot', 'shtiefel_rot'],
+                    choices=['baseline', 'rotation', 'activation_rot', 'shtiefel_rot', 'shtiefel_proj_rot'],
                     help='baseline: original RefusalCone. rotation: learn orthogonal M (Cayley), r=M@r0; requires cone_dim=1')
     parser.add_argument(
         '--freeze_order_layers',
         action='store_true',
-        help='(shtiefel_rot) If set, do not optimize or apply rotation to the first and last transformer layers.',
+        help='(shtiefel_rot, shtiefel_proj_rot) If set, do not optimize or apply rotation to the first and last transformer layers.',
     )
 
     # Cone parameters
@@ -1142,6 +1141,150 @@ class RefusalStiefelRotation(nn.Module):
         return [self.cayley_param]
 
 
+class RefusalStiefelProjRotation(RefusalStiefelRotation):
+    """
+    Low-rank Stiefel-style rotation: per layer M = QA @ QB with QA (dim × k),
+    QB (k × dim), k = dim // proj_reduce_ratio. Each factor is projected with
+    ``OrthogonalProjection`` in the forward (same autograd rule as RefusalStiefelRotation).
+
+    Reuses ``RefusalStiefelRotation`` for ``fn_vectors``, ``__call__``, ``add``, ``_rotate``,
+    ``set_cached_matrices``, ``stack_directions_for_log``, ``skew``, and ``normalize``.
+
+    Does not call ``RefusalStiefelRotation.__init__`` (that registers a full ``dim×dim``
+    ``cayley_param`` Parameter). Instead ``cayley_param`` is a buffer holding the composed
+    map for logging/checkpoints; ``import_cayley_checkpoint`` (via ``set_matrix``) loads eval
+    checkpoints. Training optimizes ``proj_A`` and ``proj_B``.
+    """
+
+    def __init__(
+        self,
+        module: Envoy,
+        dim: int,
+        init_vectors: torch.Tensor | None = None,
+        freeze_order_layers: bool = False,
+        init_mode: str = "diag_permutation",
+        proj_reduce_ratio: int = 10,
+    ) -> None:
+        nn.Module.__init__(self)
+        self.module = module
+        self.dim = dim
+        self._cached_matrices: list[torch.Tensor] | None = None
+        self.freeze_order_layers = bool(freeze_order_layers)
+
+        n_layers = len(self.module.layers)
+        self._frozen_layer_idxs = {0, n_layers - 1} if (self.freeze_order_layers and n_layers >= 2) else set()
+
+        r = int(proj_reduce_ratio)
+        if r < 1:
+            raise ValueError(f"proj_reduce_ratio must be >= 1, got {proj_reduce_ratio}")
+        k = dim // r
+        if k < 1:
+            raise ValueError(f"dim // proj_reduce_ratio must be >= 1; dim={dim}, ratio={r}")
+        self.proj_reduce_ratio = r
+        self.k = k
+
+        if init_mode == "random":
+            self.proj_A = nn.Parameter(torch.randn(n_layers, dim, k, dtype=torch.float32, device="cuda") * 1e-3)
+            self.proj_B = nn.Parameter(torch.randn(n_layers, k, dim, dtype=torch.float32, device="cuda") * 1e-3)
+        elif init_mode == "diag_permutation":
+            matrices_a = []
+            matrices_b = []
+            diag_noise_scale = 1e-3
+            for _ in range(n_layers):
+                a = torch.eye(dim, k, dtype=torch.float32, device="cuda")
+                d = min(dim, k)
+                a[:d, :d].diagonal().add_(
+                    torch.randn(d, dtype=torch.float32, device="cuda") * diag_noise_scale
+                )
+                matrices_a.append(a)
+                b = torch.eye(k, dim, dtype=torch.float32, device="cuda")
+                b[:d, :d].diagonal().add_(
+                    torch.randn(d, dtype=torch.float32, device="cuda") * diag_noise_scale
+                )
+                matrices_b.append(b)
+            self.proj_A = nn.Parameter(torch.stack(matrices_a, dim=0))
+            self.proj_B = nn.Parameter(torch.stack(matrices_b, dim=0))
+        else:
+            raise ValueError(f"Invalid init_mode: {init_mode}")
+
+        if init_vectors is not None and len(init_vectors) > 0:
+            r0 = init_vectors[0].detach().float().cuda().clone()
+        else:
+            r0 = torch.randn(dim, dtype=torch.float32, device="cuda")
+        r0 = r0 / r0.norm()
+        self.register_buffer("r0", r0)
+
+        self._dummy_fn = nn.Parameter(
+            torch.zeros(dim, dtype=torch.float32, device="cuda"),
+            requires_grad=False,
+        )
+
+        self.register_buffer("cayley_param", torch.zeros(n_layers, dim, dim, dtype=torch.float32, device="cuda"))
+        self._use_composed_cayley = False
+
+        with torch.no_grad():
+            self.orthogonalize()
+
+    def import_cayley_checkpoint(self, composed: torch.Tensor) -> None:
+        """Load per-layer composed maps (n_layers, dim, dim) for eval; use ``matrix`` from buffer."""
+        with torch.no_grad():
+            t = composed.to(device=self.cayley_param.device, dtype=self.cayley_param.dtype)
+            if t.shape != self.cayley_param.shape:
+                raise ValueError(
+                    f"import_cayley_checkpoint: expected shape {tuple(self.cayley_param.shape)}, got {tuple(t.shape)}"
+                )
+            self.cayley_param.copy_(t)
+        self._use_composed_cayley = True
+
+    def matrix(self, layer_idx: int) -> torch.Tensor:
+        if layer_idx in self._frozen_layer_idxs:
+            W = self.proj_A[layer_idx]
+            return torch.eye(self.dim, device=W.device, dtype=W.dtype)
+        if self._cached_matrices is not None:
+            return self._cached_matrices[layer_idx]
+        if self._use_composed_cayley:
+            return self.cayley_param[layer_idx]
+        A = self.proj_A[layer_idx]
+        B = self.proj_B[layer_idx]
+        QA = OrthogonalProjection.apply(A)
+        QB = OrthogonalProjection.apply(B)
+        return QA @ QB
+
+    def orthogonalize(self):
+        with torch.no_grad():
+            for layer_idx in range(self.proj_A.shape[0]):
+                if layer_idx in self._frozen_layer_idxs:
+                    self.proj_A[layer_idx].copy_(
+                        torch.eye(self.dim, self.k, device=self.proj_A.device, dtype=self.proj_A.dtype)
+                    )
+                    self.proj_B[layer_idx].copy_(
+                        torch.eye(self.k, self.dim, device=self.proj_B.device, dtype=self.proj_B.dtype)
+                    )
+                    self.cayley_param[layer_idx].copy_(torch.eye(self.dim, device=self.cayley_param.device, dtype=self.cayley_param.dtype))
+                    continue
+
+                Wa = self.proj_A[layer_idx]
+                Qa, Ra = torch.linalg.qr(Wa, mode="reduced")
+                da = torch.sign(torch.diag(Ra))
+                da[da == 0] = 1.0
+                Qa = Qa @ torch.diag(da)
+                self.proj_A[layer_idx].copy_(Qa)
+
+                # proj_B is (k, dim): orthonormal rows <=> QR on B.T for orthonormal columns.
+                Wb = self.proj_B[layer_idx]
+                Wbt = Wb.T
+                Qbt, Rbt = torch.linalg.qr(Wbt, mode="reduced")
+                db = torch.sign(torch.diag(Rbt))
+                db[db == 0] = 1.0
+                Qbt = Qbt @ torch.diag(db)
+                self.proj_B[layer_idx].copy_(Qbt.T)
+
+                self.cayley_param[layer_idx].copy_(self.proj_A[layer_idx] @ self.proj_B[layer_idx])
+
+    def parameters(self):
+        return [self.proj_A, self.proj_B]
+
+
 class RefusalDirectionRotation(nn.Module):
     """
     Single direction (cone_dim=1): intervention direction r = M @ r0 with M orthogonal (Cayley transform).
@@ -1308,8 +1451,16 @@ def refusal_cone_optimization(model, train_dataset,
             freeze_order_layers=freeze_order_layers,
             init_mode=DEFAULT_CONFIG['init_mode']
         )
+    elif direction_mode == "shtiefel_proj_rot":
+        operation = RefusalStiefelProjRotation(
+            model.model,
+            model.config.hidden_size,
+            init_vectors=init_vectors,
+            freeze_order_layers=freeze_order_layers,
+            init_mode=DEFAULT_CONFIG['init_mode'],
+        )
     else:
-        ValueError(f"Invalid direction_mode: {direction_mode}")
+        raise ValueError(f"Invalid direction_mode: {direction_mode}")
 
     optimizer = torch.optim.AdamW(operation.parameters(), lr=lr, betas=(.9,.98), weight_decay=0.0, amsgrad=True)
 
@@ -1541,14 +1692,17 @@ def refusal_cone_optimization(model, train_dataset,
                         if p0.grad is not None:
                             p0.grad.div_(accumulation_steps)
 
-                            # Potential danger
-                            if direction_mode == "shtiefel_rot" and freeze_order_layers and p0.grad.ndim >= 3 and p0.grad.shape[0] >= 2:
-                                p0.grad[0].zero_()
-                                p0.grad[-1].zero_()
-
                     torch.nn.utils.clip_grad_norm_(operation.parameters(), 10.0)
                     if direction_mode == "baseline":
                         grad_norm = operation.fn_vectors[-1].grad.norm().item()
+                    elif direction_mode == "shtiefel_proj_rot":
+                        grad_norm = float(
+                            sum(
+                                (p.grad.norm().item() ** 2 for p in operation.parameters() if p.grad is not None),
+                                start=0.0,
+                            )
+                            ** 0.5
+                        )
                     else:
                         grad_norm = operation.cayley_param.grad.norm().item()
                     optimizer.step()
@@ -1558,11 +1712,8 @@ def refusal_cone_optimization(model, train_dataset,
                         for i, fixed_basis_vector in enumerate(fixed_basis_vectors):
                             fixed_basis_vector = fixed_basis_vector / fixed_basis_vector.norm()
                             operation.fn_vectors[i].data.copy_(fixed_basis_vector.data)
-                    if direction_mode == "shtiefel_rot":
-                        if opt_step_counter % DEFAULT_CONFIG['opt_step_interval'] == 0:
-                            operation.orthogonalize()
-                    else:
-                        operation.orthogonalize()
+
+                    operation.orthogonalize()
 
                     batch_sample_ablation_loss /= accumulation_steps
                     batch_sample_addition_loss /= accumulation_steps
@@ -1757,7 +1908,12 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
     else:
         run_id = uuid.uuid4().hex[:12]
         save_root = os.getenv("SAVE_DIR", "results")
-        subdir = f"{group_name}_{model_id}_{run_name}" if run_name else f"{group_name}_{model_id}_{run_id}"
+        _dm = train_kwargs.get("direction_mode", DEFAULT_CONFIG["direction_mode"])
+        subdir = (
+            f"{group_name}_{model_id}_{_dm}_{run_name}"
+            if run_name
+            else f"{group_name}_{model_id}_{_dm}_{run_id}"
+        )
         tb_run_dir = os.path.join(save_root, "tensorboard", subdir)
         os.makedirs(tb_run_dir, exist_ok=True)
         save_run_hparams(tb_run_dir, run_config)
@@ -1908,6 +2064,10 @@ def set_matrix(cayley_param: torch.Tensor, rotation_model: nn.Module) -> None:
     or RefusalDirectionActivationRotation) during evaluation instead of
     re-implementing the math here.
     """
+    if hasattr(rotation_model, "import_cayley_checkpoint"):
+        rotation_model.import_cayley_checkpoint(cayley_param)
+        return
+
     if not hasattr(rotation_model, "cayley_param"):
         raise ValueError("rotation_model must expose a 'cayley_param' attribute")
 
@@ -2101,6 +2261,10 @@ def _evaluate_llamaguard_and_mmlu(
                 )
             elif direction_mode == "shtiefel_rot":
                 rotation_model = RefusalStiefelRotation(
+                    model.model, model.config.hidden_size, init_vectors=[], init_mode=DEFAULT_CONFIG['init_mode']
+                )
+            elif direction_mode == "shtiefel_proj_rot":
+                rotation_model = RefusalStiefelProjRotation(
                     model.model, model.config.hidden_size, init_vectors=[], init_mode=DEFAULT_CONFIG['init_mode']
                 )
 
@@ -2346,7 +2510,8 @@ def train_refusal_cone(group_name, run_name, init_vectors, **kwargs):
 
     run_id = uuid.uuid4().hex[:12]
     save_root = os.getenv("SAVE_DIR", "results")
-    subdir = f"{group_name}_{model_id}_{run_name}_{run_id}"
+    _dm = train_kwargs.get("direction_mode", getattr(args, "direction_mode", DEFAULT_CONFIG["direction_mode"]))
+    subdir = f"{group_name}_{model_id}_{_dm}_{run_name}_{run_id}"
     tb_run_dir = os.path.join(save_root, "tensorboard", subdir)
     os.makedirs(tb_run_dir, exist_ok=True)
     save_run_hparams(tb_run_dir, run_config)
@@ -2720,7 +2885,8 @@ def train_independent_vector(group_name=None, run_name=None, independent_vectors
 
     run_id = uuid.uuid4().hex[:12]
     save_root = os.getenv("SAVE_DIR", "results")
-    subdir = f"{group_name}_{model_id}_{run_name}_{run_id}"
+    _dm = train_kwargs.get("direction_mode", getattr(args, "direction_mode", DEFAULT_CONFIG["direction_mode"]))
+    subdir = f"{group_name}_{model_id}_{_dm}_{run_name}_{run_id}"
     tb_run_dir = os.path.join(save_root, "tensorboard", subdir)
     os.makedirs(tb_run_dir, exist_ok=True)
     save_run_hparams(tb_run_dir, run_config)
