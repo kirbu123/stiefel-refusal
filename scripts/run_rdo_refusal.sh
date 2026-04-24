@@ -13,7 +13,7 @@ result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave 
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=2
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -37,7 +37,9 @@ cmd=(python -m baselines.rdo_refusal \
   --direction_mode "${direction_mode}" \
   --lr "${lr}" \
   --eval_llamaguard \
-  --freeze_order_layers \
+  --eval_mmlu \
+  --mmlu_store_predictions \
+  # --freeze_order_layers \
 )
 
 # Reuse an existing run dir (skip training) if provided.
