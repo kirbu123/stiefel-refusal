@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # variables
-direction_mode="shtiefel_rot" # "shtiefel_rot", "activation_rot", "baseline"
+direction_mode="shtiefel_proj_rot" # "shtiefel_rot", "activation_rot", "baseline"
 lr=1e-5
 max_iters=100000
 result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
@@ -13,7 +13,7 @@ result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave 
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=2
+export CUDA_VISIBLE_DEVICES=0
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -39,7 +39,7 @@ cmd=(python -m baselines.rdo_refusal \
   --eval_llamaguard \
   --eval_mmlu \
   --mmlu_store_predictions \
-  # --freeze_order_layers \
+  --freeze_order_layers \
 )
 
 # Reuse an existing run dir (skip training) if provided.
