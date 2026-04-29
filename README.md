@@ -360,6 +360,66 @@ bash scripts/blocking/run_graph_average.sh
 
 Edit the `CUDA_VISIBLE_DEVICES` line inside each script to select the target GPU.
 
+### RDO Refusal Axis (`baselines/rdo_refusal.py`)
+
+This section explains how to run the RDO training/editing baseline using the companion geometry pipeline.
+
+1) Prepare `geometry-of-refusal` environment
+
+- Add the `.env` file expected by `geometry-of-refusal` (inside `LLM-Attack-Defense/geometry-of-refusal/`).
+
+like this example:
+
+```
+SAVE_DIR="./../results/rdo_refusal"
+DIM_DIR="dim"
+WANDB_ENTITY="refusal-representations"
+WANDB_PROJECT="refusal_directions"
+```
+
+2) Build the geometry artifacts (run the pipeline)
+
+From:
+`./geometry-of-refusal/refusal_direction/`
+
+run:
+```bash
+python -m pipeline.run_pipeline --model_path <model name>
+```
+
+3) Train/edit with RDO
+
+From the repo root for this baseline (`LLM-Attack-Defense/`), run:
+```bash
+./scripts/run_rdo_refusal.sh
+```
+
+What `./scripts/run_rdo_refusal.sh` does (script construction)
+
+The script is a thin wrapper that:
+
+- `cd "$(dirname "$0")/.."` to ensure it runs from `LLM-Attack-Defense/`
+- sets core hyperparameters in bash variables:
+  - `direction_mode` (default: `shtiefel_proj_rot`)
+  - `lr` (default: `1e-5`)
+  - `max_iters` (exported as `MAX_ITERS`)
+  - optional `result_path` (leave empty to train)
+- forces a default GPU via `export CUDA_VISIBLE_DEVICES=3` (you can override this when running)
+- sets fast evaluation defaults via environment variables:
+  - `MMLU_SAMPLE_SIZE`, `MMLU_MAX_NEW_TOKENS`, `MMLU_STORE_PREDICTIONS`
+  - `LLAMAGUARD_MAX_NEW_TOKENS`
+  - dataset caps: `RDO_MAX_HARMFUL_PER_CATEGORY`, `RDO_MAX_HARMLESS_TOTAL`
+- sets `HF_TOKEN` inside the script (needed for gated models / LlamaGuard download if applicable)
+- defines and executes a `cmd=(python -m baselines.rdo_refusal ...)` array including flags like:
+  - `--train_direction`
+  - `--direction_mode ${direction_mode}`
+  - `--eval_llamaguard --eval_mmlu --mmlu_store_predictions`
+  - `--freeze_order_layers`
+  - `--init_mode "random"` (can be changed to `diag_permutation`)
+  - `--retain_loss`
+- if `result_path` is set, it appends `--result_path "${result_path}"` to reuse an existing run directory
+- finally runs the command with `"${cmd[@]}"`
+
 ## Adding New Components
 
 **New method:** create `baselines/my_method.py` and import shared modules:
