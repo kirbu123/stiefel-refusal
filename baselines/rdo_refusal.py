@@ -130,7 +130,8 @@ DEFAULT_CONFIG = {
     'fixed_samples': 8,               # Number of fixed samples for evaluation
     'sampling_method': "hypersphere", # Method for sampling vectors ('hypersphere' or 'interpolation')
     'optimize_basis': True,           # Whether to optimize the basis vectors directly
-    'init_mode': "diag_permutation",  # Method for initializing the rotation matrices
+    'init_mode': "random", # "diag_permutation",  # Method for initializing the rotation matrices
+    'retain_loss': False, # Whether to use KL divergence for the retain loss
 
     # Loss weights
     'ablation_lambda': 1,             # Weight for the ablation loss
@@ -232,6 +233,11 @@ def parse_args():
                     help='Method for sampling vectors (hypersphere or interpolation)')
     parser.add_argument('--optimize_basis', type=bool, default=DEFAULT_CONFIG['optimize_basis'],
                     help='Whether to optimize the basis vectors directly')
+    parser.add_argument('--retain_loss', action='store_true',
+                    help='Whether to use KL divergence for the retain loss')
+    parser.add_argument('--init_mode', type=str, default=DEFAULT_CONFIG["init_mode"],
+                    choices=['random', 'diag_permutation'],
+                    help='Method for initializing the rotation matrices')
 
     # Loss weights
     parser.add_argument('--ablation_lambda', type=float, default=DEFAULT_CONFIG['ablation_lambda'],
@@ -1449,7 +1455,7 @@ def refusal_cone_optimization(model, train_dataset,
             model.config.hidden_size,
             init_vectors=init_vectors,
             freeze_order_layers=freeze_order_layers,
-            init_mode=DEFAULT_CONFIG['init_mode']
+            init_mode=args.init_mode
         )
     elif direction_mode == "shtiefel_proj_rot":
         operation = RefusalStiefelProjRotation(
@@ -1457,7 +1463,7 @@ def refusal_cone_optimization(model, train_dataset,
             model.config.hidden_size,
             init_vectors=init_vectors,
             freeze_order_layers=freeze_order_layers,
-            init_mode=DEFAULT_CONFIG['init_mode'],
+            init_mode=args.init_mode,
         )
     else:
         raise ValueError(f"Invalid direction_mode: {direction_mode}")
@@ -1601,7 +1607,10 @@ def refusal_cone_optimization(model, train_dataset,
                                 else:
                                     operation.add(direction, alpha, add_layer)
                                 sample_retain_logits = model.lm_head.output[:, -num_target_tokens:]
-                                sample_retain_loss = kl_div_fn(baseline_retain_logits, sample_retain_logits).mean() / n_sample
+                                if args.retain_loss:
+                                    sample_retain_loss = kl_div_fn(baseline_retain_logits, sample_retain_logits).mean() / n_sample
+                                else:
+                                    sample_retain_loss = _zero_loss_with_grad()
                                 log = _log_scalar(sample_retain_loss)
                             (retain_lambda * sample_retain_loss).backward()
                         batch_sample_retain_loss += log
@@ -1641,7 +1650,10 @@ def refusal_cone_optimization(model, train_dataset,
                                 else:
                                     operation.add(fn_vector, alpha, add_layer)
                                 retain_logits = model.lm_head.output[:, -num_target_tokens:]
-                                basis_retain_loss = kl_div_fn(baseline_retain_logits, retain_logits).mean() / cone_dim
+                                if args.retain_loss:
+                                    basis_retain_loss = kl_div_fn(baseline_retain_logits, retain_logits).mean() / cone_dim
+                                else:
+                                    basis_retain_loss = _zero_loss_with_grad()
                                 log = _log_scalar(basis_retain_loss)
                             (retain_lambda * basis_retain_loss).backward()
                         batch_basis_retain_loss += log
@@ -2261,11 +2273,11 @@ def _evaluate_llamaguard_and_mmlu(
                 )
             elif direction_mode == "shtiefel_rot":
                 rotation_model = RefusalStiefelRotation(
-                    model.model, model.config.hidden_size, init_vectors=[], init_mode=DEFAULT_CONFIG['init_mode']
+                    model.model, model.config.hidden_size, init_vectors=[], init_mode=args.init_mode
                 )
             elif direction_mode == "shtiefel_proj_rot":
                 rotation_model = RefusalStiefelProjRotation(
-                    model.model, model.config.hidden_size, init_vectors=[], init_mode=DEFAULT_CONFIG['init_mode']
+                    model.model, model.config.hidden_size, init_vectors=[], init_mode=args.init_mode
                 )
 
             return _make_activation_rotation_step_fn(
