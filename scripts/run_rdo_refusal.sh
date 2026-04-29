@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # variables
-direction_mode="shtiefel_proj_rot" # "shtiefel_rot", "activation_rot", "baseline"
+direction_mode="shtiefel_proj_rot" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot"
 lr=1e-5
 max_iters=100000
 result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
@@ -13,7 +13,7 @@ result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave 
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=3
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -33,14 +33,18 @@ export HF_TOKEN="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"
 # ---- Default command ----
 cmd=(python -m baselines.rdo_refusal \
   --train_direction \
-  --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
+  --model deepseek-ai/DeepSeek-R1-Distill-Qwen-7B \
   --direction_mode "${direction_mode}" \
   --lr "${lr}" \
   --eval_llamaguard \
   --eval_mmlu \
   --mmlu_store_predictions \
   --freeze_order_layers \
+  --init_mode "random" \
+  --retain_loss \
 )
+
+# --init_mode: "random" or "diag_permutation"
 
 # Reuse an existing run dir (skip training) if provided.
 if [[ -n "${result_path}" ]]; then
