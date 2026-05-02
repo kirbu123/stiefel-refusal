@@ -5,8 +5,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # variables
-direction_mode="baseline" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot"
-llamaguard_data="basic" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
+direction_mode="shtiefel_proj_rot" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot"
+freeze_step=2 # with --freeze_order_layers: freeze layers 0, freeze_step, 2*freeze_step, ...
+llamaguard_data="rdo" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
 lr=1e-5
 max_iters=100000
 result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
@@ -42,6 +43,7 @@ cmd=(python -m baselines.rdo_refusal \
   --eval_mmlu \
   --mmlu_store_predictions \
   --freeze_order_layers \
+  --freeze_step "${freeze_step}" \
   --init_mode "random" \
   --retain_loss \
 )
