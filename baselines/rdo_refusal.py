@@ -148,6 +148,7 @@ DEFAULT_CONFIG = {
     'eval_llamaguard': False,
     'eval_mmlu': False,
     'eval_split': "val",              # {train,val,test} -> data/{splits}_splits/*_{eval_split}.json
+    'llamaguard_data': "rdo",         # rdo -> split jsons, basic -> cached basic-refusal eval targets
     'eval_max_new_tokens': 256,
     'eval_batch_size': 8,
 
@@ -275,6 +276,9 @@ def parse_args():
     parser.add_argument('--eval_split', type=str, default=DEFAULT_CONFIG['eval_split'],
                     choices=['train', 'val', 'test'],
                     help='Which split jsons to use for LlamaGuard eval: data/{splits}_splits/*_{eval_split}.json')
+    parser.add_argument('--llamaguard_data', type=str, default=DEFAULT_CONFIG['llamaguard_data'],
+                    choices=['rdo', 'basic'],
+                    help='LlamaGuard eval data source: rdo uses data/{splits}_splits/*_{eval_split}.json, basic uses cached basic-refusal targets')
     parser.add_argument('--eval_max_new_tokens', type=int, default=DEFAULT_CONFIG['eval_max_new_tokens'],
                     help='Max new tokens for generation during LlamaGuard eval')
     parser.add_argument('--eval_batch_size', type=int, default=DEFAULT_CONFIG['eval_batch_size'],
@@ -1965,6 +1969,8 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
             direction_mode=args.direction_mode,
             splits_name=args.splits,
             eval_split=args.eval_split,
+            llamaguard_data_mode=args.llamaguard_data,
+            model_name=model_id,
             eval_max_new_tokens=args.eval_max_new_tokens,
             eval_batch_size=args.eval_batch_size,
             mmlu_cfg=mmlu_cfg,
@@ -2234,6 +2240,76 @@ def _load_eval_split_json(splits_name: str, kind: str, split: str) -> list[dict]
     return json.load(open(path, "r", encoding="utf-8"))
 
 
+def _basic_llamaguard_targets_paths(model_name: str) -> tuple[str, str]:
+    cache_dir = os.path.join(os.getenv("SAVE_DIR"), "rdo", model_name, "basic", "targets")
+    return (
+        os.path.join(cache_dir, "harmful_targets.json"),
+        os.path.join(cache_dir, "harmless_targets.json"),
+    )
+
+
+def _build_basic_llamaguard_targets_cache(model_name: str) -> tuple[list[dict], list[dict]]:
+    from config import HARMLESS_EVAL_DATASET
+    from data_utils import load_all_datasets_with_categories
+    from heretic.utils import load_prompts
+
+    harmful_path, harmless_path = _basic_llamaguard_targets_paths(model_name)
+    os.makedirs(os.path.dirname(harmful_path), exist_ok=True)
+
+    all_data = load_all_datasets_with_categories()
+    harmful = [
+        {
+            "instruction": item["instruction"],
+            "category": str(item.get("category") or "unknown"),
+        }
+        for item in all_data
+        if item.get("instruction")
+    ]
+
+    harmless_prompts = load_prompts(HARMLESS_EVAL_DATASET)
+    harmless = [
+        {
+            "instruction": prompt,
+            "category": "harmless",
+        }
+        for prompt in harmless_prompts
+        if prompt
+    ]
+
+    with open(harmful_path, "w", encoding="utf-8") as f:
+        json.dump(harmful, f, indent=2, ensure_ascii=False)
+    with open(harmless_path, "w", encoding="utf-8") as f:
+        json.dump(harmless, f, indent=2, ensure_ascii=False)
+
+    print(f"[eval] built basic LlamaGuard target cache under {os.path.dirname(harmful_path)}")
+    return harmful, harmless
+
+
+def _load_llamaguard_eval_sets(
+    splits_name: str,
+    eval_split: str,
+    mode: str,
+    model_name: str,
+) -> tuple[list[dict], list[dict]]:
+    if mode == "rdo":
+        harmful = _load_eval_split_json(splits_name, "harmful", eval_split)
+        harmless = _load_eval_split_json(splits_name, "harmless", eval_split)
+        return harmful, harmless
+
+    if mode == "basic":
+        harmful_path, harmless_path = _basic_llamaguard_targets_paths(model_name)
+        if not (os.path.exists(harmful_path) and os.path.exists(harmless_path)):
+            return _build_basic_llamaguard_targets_cache(model_name)
+
+        with open(harmful_path, "r", encoding="utf-8") as f:
+            harmful = json.load(f)
+        with open(harmless_path, "r", encoding="utf-8") as f:
+            harmless = json.load(f)
+        return harmful, harmless
+
+    raise ValueError(f"Unsupported llamaguard_data mode: {mode}")
+
+
 def _evaluate_llamaguard_and_mmlu(
     *,
     tb_run_dir: str,
@@ -2242,6 +2318,8 @@ def _evaluate_llamaguard_and_mmlu(
     direction_mode: str,
     splits_name: str,
     eval_split: str,
+    llamaguard_data_mode: str,
+    model_name: str,
     eval_max_new_tokens: int,
     eval_batch_size: int,
     mmlu_cfg: dict,
@@ -2256,6 +2334,7 @@ def _evaluate_llamaguard_and_mmlu(
             "saved_at": datetime.now().isoformat(),
             "direction_mode": direction_mode,
             "eval_split": eval_split,
+            "llamaguard_data_mode": llamaguard_data_mode,
         }
 
         def _make_refined_step_fn(refined_artifact):
@@ -2289,8 +2368,12 @@ def _evaluate_llamaguard_and_mmlu(
         if args.eval_llamaguard:
             strict = str(os.getenv("RDO_LLAMAGUARD_STRICT", "0")).lower() in ("1", "true", "yes", "y")
             try:
-                harmful = _load_eval_split_json(splits_name, "harmful", eval_split)
-                harmless = _load_eval_split_json(splits_name, "harmless", eval_split)
+                harmful, harmless = _load_llamaguard_eval_sets(
+                    splits_name=splits_name,
+                    eval_split=eval_split,
+                    mode=llamaguard_data_mode,
+                    model_name=model_name,
+                )
 
                 # Keep evaluation bounded for quick iterations.
                 # Tiny preset expectation: RDO_MAX_HARMFUL_PER_CATEGORY=2 across ~10 categories (~20 total),
