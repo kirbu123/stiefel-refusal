@@ -165,6 +165,7 @@ DEFAULT_CONFIG = {
 
     # Optimization parameters
     'freeze_order_layers': False,
+    'freeze_step': 2,
 }
 
 def parse_args():
@@ -217,7 +218,13 @@ def parse_args():
     parser.add_argument(
         '--freeze_order_layers',
         action='store_true',
-        help='(shtiefel_rot, shtiefel_proj_rot) If set, do not optimize or apply rotation to the first and last transformer layers.',
+        help='(shtiefel_rot, shtiefel_proj_rot) If set, freeze rotation at a stride of layer indices (see --freeze_step).',
+    )
+    parser.add_argument(
+        '--freeze_step',
+        type=int,
+        default=DEFAULT_CONFIG['freeze_step'],
+        help='(shtiefel_rot, shtiefel_proj_rot) With --freeze_order_layers, freeze layers at indices 0, freeze_step, 2*freeze_step, ... (must be >= 1).',
     )
 
     # Cone parameters
@@ -760,7 +767,7 @@ class RefusalCone(nn.Module):
         else:
             layer.output = new_activation
 
-    def ablate_input(self, layer, direction):
+    def ablate_input(self, layer, direction, best_layer: int = None):
         projection = projection_einops(layer.input, direction)
         new_activation = layer.input - projection
         layer.input = new_activation
@@ -939,7 +946,7 @@ class RefusalDirectionActivationRotation(nn.Module):
             # intervention plumbing may attempt to treat outputs as tensor-like.
             layer.input = self._rotate(layer.input, layer_idx)
 
-    def add(self, direction, alpha, layer_idx):
+    def add(self, direction, alpha, layer_idx, best_layer: int = None):
         # Keep signature compatible with baseline training loop.
         # For activation rotation, we rotate the specified layer with its own matrix.
         del direction, alpha
@@ -1009,6 +1016,7 @@ class RefusalStiefelRotation(nn.Module):
         init_vectors: torch.Tensor | None = None,
         freeze_order_layers: bool = False,
         init_mode: str = "diag_permutation",
+        freeze_step: int = 2,
     ) -> None:
         super().__init__()
         self.module = module
@@ -1017,7 +1025,13 @@ class RefusalStiefelRotation(nn.Module):
         self.freeze_order_layers = bool(freeze_order_layers)
 
         n_layers = len(self.module.layers)
-        self._frozen_layer_idxs = {0, n_layers - 1} if (self.freeze_order_layers and n_layers >= 2) else set()
+        if self.freeze_order_layers and n_layers >= 2:
+            step = max(1, int(freeze_step))
+            self._frozen_layer_idxs = set(range(0, n_layers, step))
+            self._frozen_layer_idxs.add(0)
+            self._frozen_layer_idxs.add(n_layers - 1)
+        else:
+            self._frozen_layer_idxs = set()
 
         if init_mode == "random":
             self.cayley_param = nn.Parameter(
@@ -1105,17 +1119,22 @@ class RefusalStiefelRotation(nn.Module):
                     pass
         return x @ M.T
 
-    def __call__(self, direction):
+    def __call__(self, direction, best_layer: int = None):
         del direction
         for layer_idx, layer in enumerate(self.module.layers):
-            if layer_idx in self._frozen_layer_idxs:
-                continue
-            layer.input = self._rotate(layer.input, layer_idx)
+            self._add(None, None, layer_idx, best_layer)
 
-    def add(self, direction, alpha, layer_idx):
-        del direction, alpha
+    def add(self, direction, alpha, layer_idx, best_layer: int = None):
+        self.__call__(direction, best_layer)
+
+    def _add(self, direction, alpha, layer_idx, best_layer: int = None):
+        if direction is not None:
+            del direction
+        if alpha is not None:
+            del alpha
         if layer_idx in self._frozen_layer_idxs:
-            return
+            if best_layer is not None and layer_idx != best_layer:
+                return
         layer = self.module.layers[layer_idx]
         layer.input = self._rotate(layer.input, layer_idx)
 
@@ -1174,6 +1193,7 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         freeze_order_layers: bool = False,
         init_mode: str = "diag_permutation",
         proj_reduce_ratio: int = 10,
+        freeze_step: int = 2,
     ) -> None:
         nn.Module.__init__(self)
         self.module = module
@@ -1182,7 +1202,13 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         self.freeze_order_layers = bool(freeze_order_layers)
 
         n_layers = len(self.module.layers)
-        self._frozen_layer_idxs = {0, n_layers - 1} if (self.freeze_order_layers and n_layers >= 2) else set()
+        if self.freeze_order_layers and n_layers >= 2:
+            step = max(1, int(freeze_step))
+            self._frozen_layer_idxs = set(range(0, n_layers, step))
+            self._frozen_layer_idxs.add(0)
+            self._frozen_layer_idxs.add(n_layers - 1)
+        else:
+            self._frozen_layer_idxs = set()
 
         r = int(proj_reduce_ratio)
         if r < 1:
@@ -1366,7 +1392,7 @@ class RefusalDirectionRotation(nn.Module):
         new_activation = layer.input - projection
         layer.input = new_activation
 
-    def add(self, direction, alpha, layer_idx):
+    def add(self, direction, alpha, layer_idx, best_layer: int = None):
         direction = self.current_direction()
         direction = direction / direction.norm()
         direction = direction.to(model.dtype)
@@ -1433,6 +1459,7 @@ def refusal_cone_optimization(model, train_dataset,
                               n_lr_reduce=DEFAULT_CONFIG['n_lr_reduce'], 
                               orthogonal_vectors=[],
                               freeze_order_layers: bool = DEFAULT_CONFIG.get('freeze_order_layers', False),
+                              freeze_step: int = DEFAULT_CONFIG.get('freeze_step', 2),
                               tb_writer=None,
                               tb_checkpoint_dir=None,
                               direction_mode=DEFAULT_CONFIG['direction_mode']):
@@ -1459,7 +1486,8 @@ def refusal_cone_optimization(model, train_dataset,
             model.config.hidden_size,
             init_vectors=init_vectors,
             freeze_order_layers=freeze_order_layers,
-            init_mode=args.init_mode
+            init_mode=args.init_mode,
+            freeze_step=freeze_step,
         )
     elif direction_mode == "shtiefel_proj_rot":
         operation = RefusalStiefelProjRotation(
@@ -1468,6 +1496,7 @@ def refusal_cone_optimization(model, train_dataset,
             init_vectors=init_vectors,
             freeze_order_layers=freeze_order_layers,
             init_mode=args.init_mode,
+            freeze_step=freeze_step,
         )
     else:
         raise ValueError(f"Invalid direction_mode: {direction_mode}")
@@ -1542,6 +1571,10 @@ def refusal_cone_optimization(model, train_dataset,
 
     add_layer = best_layer
 
+    n_layers = len(model.model.layers)
+    print("n_layers", n_layers)
+    print("add_layer", add_layer)
+
     if n_sample > 0:
         if sampling_method == "hypersphere":
             fixed_sample_vectors = sample_hypersphere_gaussian(fixed_samples, cone_dim)
@@ -1594,7 +1627,7 @@ def refusal_cone_optimization(model, train_dataset,
                         with model.trace() as tracer:
                             with tracer.invoke(addition_prompt):
                                 direction = operation.transform(sample_vector)
-                                operation.add(direction, alpha, add_layer)
+                                operation.add(direction, alpha, add_layer, best_layer)
                                 logits = model.lm_head.output[:, :-1]
                                 sample_addition_loss = compute_ce_loss(logits, addition_labels) / n_sample
                                 log = _log_scalar(sample_addition_loss)
@@ -1609,7 +1642,7 @@ def refusal_cone_optimization(model, train_dataset,
                                 if direction_mode == "baseline":
                                     operation(direction)
                                 else:
-                                    operation.add(direction, alpha, add_layer)
+                                    operation.add(direction, alpha, add_layer, best_layer)
                                 sample_retain_logits = model.lm_head.output[:, -num_target_tokens:]
                                 if args.retain_loss:
                                     sample_retain_loss = kl_div_fn(baseline_retain_logits, sample_retain_logits).mean() / n_sample
@@ -1637,7 +1670,7 @@ def refusal_cone_optimization(model, train_dataset,
                     if addition_lambda > 0:
                         with model.trace() as tracer:
                             with tracer.invoke(addition_prompt):
-                                operation.add(fn_vector, alpha, add_layer)
+                                operation.add(fn_vector, alpha, add_layer, best_layer)
                                 logits = model.lm_head.output[:, :-1]
                                 basis_addition_loss = compute_ce_loss(logits, addition_labels) / cone_dim
                                 log = _log_scalar(basis_addition_loss)
@@ -1652,7 +1685,7 @@ def refusal_cone_optimization(model, train_dataset,
                                 if direction_mode == "baseline":
                                     operation(fn_vector)
                                 else:
-                                    operation.add(fn_vector, alpha, add_layer)
+                                    operation.add(fn_vector, alpha, add_layer, best_layer)
                                 retain_logits = model.lm_head.output[:, -num_target_tokens:]
                                 if args.retain_loss:
                                     basis_retain_loss = kl_div_fn(baseline_retain_logits, retain_logits).mean() / cone_dim
@@ -1674,7 +1707,7 @@ def refusal_cone_optimization(model, train_dataset,
                 with model.trace() as tracer:
                     for fn_vector in operation.fn_vectors:
                         with tracer.invoke(harmless_prompt):
-                            operation.add(fn_vector, alpha, add_layer)
+                            operation.add(fn_vector, alpha, add_layer, best_layer)
                             last_token_logits = model.lm_head.output[:, -1]
                             induce_score = _log_scalar(refusal_metric(last_token_logits, refusal_tokens))
                         batch_basis_induce_scores.append(induce_score)
@@ -1691,7 +1724,7 @@ def refusal_cone_optimization(model, train_dataset,
                         for fixed_sample_vector in fixed_sample_vectors:
                             with tracer.invoke(harmless_prompt):
                                 direction = operation.transform(fixed_sample_vector)
-                                operation.add(direction, alpha, add_layer)
+                                operation.add(direction, alpha, add_layer, best_layer)
                                 sample_last_token_logits = model.lm_head.output[:, -1]
                                 sample_induce_score = _log_scalar(refusal_metric(sample_last_token_logits, refusal_tokens))
                                 batch_sample_induce_scores.append(sample_induce_score)
@@ -1879,6 +1912,7 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
         "orthogonal_vectors": orthogonal_vectors,
         "direction_mode": args.direction_mode,
         "freeze_order_layers": getattr(args, "freeze_order_layers", False),
+        "freeze_step": getattr(args, "freeze_step", DEFAULT_CONFIG.get("freeze_step", 2)),
     }
     train_kwargs.update(kwargs) # Apply any user-provided overrides
 
@@ -2352,11 +2386,21 @@ def _evaluate_llamaguard_and_mmlu(
                 )
             elif direction_mode == "shtiefel_rot":
                 rotation_model = RefusalStiefelRotation(
-                    model.model, model.config.hidden_size, init_vectors=[], init_mode=args.init_mode
+                    model.model,
+                    model.config.hidden_size,
+                    init_vectors=[],
+                    init_mode=args.init_mode,
+                    freeze_order_layers=getattr(args, "freeze_order_layers", False),
+                    freeze_step=getattr(args, "freeze_step", DEFAULT_CONFIG.get("freeze_step", 2)),
                 )
             elif direction_mode == "shtiefel_proj_rot":
                 rotation_model = RefusalStiefelProjRotation(
-                    model.model, model.config.hidden_size, init_vectors=[], init_mode=args.init_mode
+                    model.model,
+                    model.config.hidden_size,
+                    init_vectors=[],
+                    init_mode=args.init_mode,
+                    freeze_order_layers=getattr(args, "freeze_order_layers", False),
+                    freeze_step=getattr(args, "freeze_step", DEFAULT_CONFIG.get("freeze_step", 2)),
                 )
 
             return _make_activation_rotation_step_fn(
@@ -2846,7 +2890,7 @@ def repind_rdo(model,
                         addition_loss = torch.tensor(0.0, device=model.device, dtype=model.dtype)
                         with model.trace() as tracer:
                             with tracer.invoke(addition_prompt) as _:
-                                operation.add(operation.fn_vector)
+                                operation.add(operation.fn_vector, best_layer=best_layer)
                                 logits = model.lm_head.output[:, :-1]
                                 addition_loss += compute_ce_loss(logits, addition_labels)
                         addition_loss = addition_loss / accumulation_steps
@@ -2876,7 +2920,7 @@ def repind_rdo(model,
                                 batch_refusal_score.update(batch_refusal_score + refusal_score.detach().item())
                         with model.trace() as tracer:
                             with tracer.invoke(harmless_prompt) as _:
-                                operation.add(operation.fn_vector)
+                                operation.add(operation.fn_vector, best_layer=best_layer)
                                 last_token_logits = model.lm_head.output[:, -1]
                                 induce_score = refusal_metric(last_token_logits, refusal_tokens)
                                 induce_score = induce_score / accumulation_steps
