@@ -311,6 +311,15 @@ def parse_args():
 args = parse_args()
 MODEL_PATH = args.model
 
+
+def _tb_dir_frz_suffix(train_kwargs: dict | None = None) -> str:
+    """Short TensorBoard dirname segment: fl=freeze_order_layers (0/1), fs=freeze_step."""
+    k = train_kwargs or {}
+    fl = int(bool(k.get("freeze_order_layers", getattr(args, "freeze_order_layers", False))))
+    fs = int(k.get("freeze_step", getattr(args, "freeze_step", DEFAULT_CONFIG.get("freeze_step", 2))))
+    return f"fl{fl}_fs{fs}"
+
+
 # Apply configuration values
 target_generation_batch_size = args.target_generation_batch_size
 splits = args.splits
@@ -1959,10 +1968,11 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
         run_id = uuid.uuid4().hex[:12]
         save_root = os.getenv("SAVE_DIR", "results")
         _dm = train_kwargs.get("direction_mode", DEFAULT_CONFIG["direction_mode"])
+        _frz = _tb_dir_frz_suffix(train_kwargs)
         subdir = (
-            f"{group_name}_{model_id}_{_dm}_{run_name}"
+            f"{group_name}_{model_id}_{_dm}_{_frz}_{run_name}"
             if run_name
-            else f"{group_name}_{model_id}_{_dm}_{run_id}"
+            else f"{group_name}_{model_id}_{_dm}_{_frz}_{run_id}"
         )
         tb_run_dir = os.path.join(save_root, "tensorboard", subdir)
         os.makedirs(tb_run_dir, exist_ok=True)
@@ -2650,7 +2660,8 @@ def train_refusal_cone(group_name, run_name, init_vectors, **kwargs):
     run_id = uuid.uuid4().hex[:12]
     save_root = os.getenv("SAVE_DIR", "results")
     _dm = train_kwargs.get("direction_mode", getattr(args, "direction_mode", DEFAULT_CONFIG["direction_mode"]))
-    subdir = f"{group_name}_{model_id}_{_dm}_{run_name}_{run_id}"
+    _frz = _tb_dir_frz_suffix(train_kwargs)
+    subdir = f"{group_name}_{model_id}_{_dm}_{_frz}_{run_name}_{run_id}"
     tb_run_dir = os.path.join(save_root, "tensorboard", subdir)
     os.makedirs(tb_run_dir, exist_ok=True)
     save_run_hparams(tb_run_dir, run_config)
@@ -3025,7 +3036,8 @@ def train_independent_vector(group_name=None, run_name=None, independent_vectors
     run_id = uuid.uuid4().hex[:12]
     save_root = os.getenv("SAVE_DIR", "results")
     _dm = train_kwargs.get("direction_mode", getattr(args, "direction_mode", DEFAULT_CONFIG["direction_mode"]))
-    subdir = f"{group_name}_{model_id}_{_dm}_{run_name}_{run_id}"
+    _frz = _tb_dir_frz_suffix(train_kwargs)
+    subdir = f"{group_name}_{model_id}_{_dm}_{_frz}_{run_name}_{run_id}"
     tb_run_dir = os.path.join(save_root, "tensorboard", subdir)
     os.makedirs(tb_run_dir, exist_ok=True)
     save_run_hparams(tb_run_dir, run_config)
