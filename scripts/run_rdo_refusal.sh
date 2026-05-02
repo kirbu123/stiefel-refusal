@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 
 # variables
 direction_mode="shtiefel_proj_rot" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot"
-freeze_step=2 # with --freeze_order_layers: freeze layers 0, freeze_step, 2*freeze_step, ...
+freeze_step=20 # with --freeze_order_layers: freeze layers 0, freeze_step, 2*freeze_step, ...
 llamaguard_data="rdo" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
 lr=1e-5
 max_iters=100000
@@ -44,8 +44,7 @@ cmd=(python -m baselines.rdo_refusal \
   --mmlu_store_predictions \
   --freeze_order_layers \
   --freeze_step "${freeze_step}" \
-  --init_mode "random" \
-  --retain_loss \
+  --init_mode "diag_permutation" \
 )
 
 # --init_mode: "random" or "diag_permutation"
