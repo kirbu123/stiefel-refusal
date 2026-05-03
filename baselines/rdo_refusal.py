@@ -164,8 +164,7 @@ DEFAULT_CONFIG = {
     'mmlu_store_predictions': False,
 
     # Optimization parameters
-    'freeze_order_layers': False,
-    'freeze_step': 2,
+    'num_opt_layers': 8,
     # 0 = disabled. Save operation weights every N training iterations (dataloader steps; ``num_iters``)
     # to checkpoints/progress_checkpoints. Small values write large tensors often and can saturate disk I/O.
     'log_steps': 0,
@@ -229,15 +228,13 @@ def parse_args():
                     choices=['baseline', 'rotation', 'activation_rot', 'shtiefel_rot', 'shtiefel_proj_rot'],
                     help='baseline: original RefusalCone. rotation: learn orthogonal M (Cayley), r=M@r0; requires cone_dim=1')
     parser.add_argument(
-        '--freeze_order_layers',
-        action='store_true',
-        help='(shtiefel_rot, shtiefel_proj_rot) If set, freeze rotation at a stride of layer indices (see --freeze_step).',
-    )
-    parser.add_argument(
-        '--freeze_step',
+        '--num_opt_layers',
         type=int,
-        default=DEFAULT_CONFIG['freeze_step'],
-        help='(shtiefel_rot, shtiefel_proj_rot) With --freeze_order_layers, freeze layers at indices 0, freeze_step, 2*freeze_step, ... (must be >= 1).',
+        default=DEFAULT_CONFIG['num_opt_layers'],
+        help=(
+            '(shtiefel_rot, shtiefel_proj_rot) Number of middle layers to optimize '
+            '(layers 0 and last are always excluded from optimized indices).'
+        ),
     )
 
     # Cone parameters
@@ -326,11 +323,12 @@ MODEL_PATH = args.model
 
 
 def _tb_dir_frz_suffix(train_kwargs: dict | None = None) -> str:
-    """Short TensorBoard dirname segment: fl=freeze_order_layers (0/1), fs=freeze_step."""
+    """Short TensorBoard dirname segment: nol=num_opt_layers, im=init_mode."""
     k = train_kwargs or {}
-    fl = int(bool(k.get("freeze_order_layers", getattr(args, "freeze_order_layers", False))))
-    fs = int(k.get("freeze_step", getattr(args, "freeze_step", DEFAULT_CONFIG.get("freeze_step", 2))))
-    return f"fl{fl}_fs{fs}"
+    nol = int(k.get("num_opt_layers", getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8))))
+    im = k.get("init_mode", getattr(args, "init_mode", DEFAULT_CONFIG.get("init_mode", "random")))
+    im = str(im).replace(os.sep, "_").replace("/", "_").replace(" ", "_")
+    return f"nol={nol}_im={im}"
 
 
 # Apply configuration values
@@ -794,7 +792,7 @@ class RefusalCone(nn.Module):
         new_activation = layer.input - projection
         layer.input = new_activation
 
-    def add(self, direction, alpha, layer_idx):
+    def add(self, direction, alpha, layer_idx, best_layer: int = None):
         direction = direction / direction.norm()
         direction = direction.to(model.dtype)
         self.module.layers[layer_idx].input += alpha * direction
@@ -1018,6 +1016,21 @@ class OrthogonalProjection(torch.autograd.Function):
         return grad_W
 
 
+def _build_optimized_layer_idxs(n_layers: int, num_opt_layers: int) -> set[int]:
+    """Pick middle-layer indices to optimize; layer 0 and last are never included."""
+    if n_layers <= 2:
+        return set()
+    middle = list(range(1, n_layers - 1))
+    target = max(0, int(num_opt_layers))
+    if target >= len(middle):
+        return set(middle)
+    if target == 0:
+        return set()
+    # Evenly sample middle layers to avoid clustering on one side.
+    pos = np.linspace(0, len(middle) - 1, num=target, dtype=int)
+    return {middle[i] for i in pos.tolist()}
+
+
 class RefusalStiefelRotation(nn.Module):
     """
     Rotate activations directly with an orthogonal matrix M, optimized in Euclidean
@@ -1036,24 +1049,17 @@ class RefusalStiefelRotation(nn.Module):
         module: Envoy,
         dim: int,
         init_vectors: torch.Tensor | None = None,
-        freeze_order_layers: bool = False,
         init_mode: str = "diag_permutation",
-        freeze_step: int = 2,
+        num_opt_layers: int = 8,
     ) -> None:
         super().__init__()
         self.module = module
         self.dim = dim
         self._cached_matrices: list[torch.Tensor] | None = None
-        self.freeze_order_layers = bool(freeze_order_layers)
 
         n_layers = len(self.module.layers)
-        if self.freeze_order_layers and n_layers >= 2:
-            step = max(1, int(freeze_step))
-            self._frozen_layer_idxs = set(range(0, n_layers, step))
-            self._frozen_layer_idxs.add(0)
-            self._frozen_layer_idxs.add(n_layers - 1)
-        else:
-            self._frozen_layer_idxs = set()
+        self.num_opt_layers = int(max(0, num_opt_layers))
+        self._optimized_layer_idxs = _build_optimized_layer_idxs(n_layers, self.num_opt_layers)
 
         if init_mode == "random":
             self.cayley_param = nn.Parameter(
@@ -1095,7 +1101,7 @@ class RefusalStiefelRotation(nn.Module):
 
     def matrix(self, layer_idx: int) -> torch.Tensor:
         """Apply orthogonal projection with correct gradients."""
-        if layer_idx in self._frozen_layer_idxs:
+        if layer_idx not in self._optimized_layer_idxs:
             W = self.cayley_param[layer_idx]
             return torch.eye(self.dim, device=W.device, dtype=W.dtype)
         if self._cached_matrices is not None:
@@ -1154,9 +1160,10 @@ class RefusalStiefelRotation(nn.Module):
             del direction
         if alpha is not None:
             del alpha
-        if layer_idx in self._frozen_layer_idxs:
-            if best_layer is not None and layer_idx != best_layer:
-                return
+        if best_layer is not None and 0 < best_layer < len(self.module.layers) - 1:
+            self._optimized_layer_idxs.add(int(best_layer))
+        if layer_idx not in self._optimized_layer_idxs:
+            return
         layer = self.module.layers[layer_idx]
         layer.input = self._rotate(layer.input, layer_idx)
 
@@ -1165,7 +1172,7 @@ class RefusalStiefelRotation(nn.Module):
         with torch.no_grad():
             for layer_idx in range(self.cayley_param.shape[0]):
                 W = self.cayley_param[layer_idx]
-                if layer_idx in self._frozen_layer_idxs:
+                if layer_idx not in self._optimized_layer_idxs:
                     self.cayley_param[layer_idx].copy_(torch.eye(self.dim, device=W.device, dtype=W.dtype))
                     continue
 
@@ -1212,25 +1219,18 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         module: Envoy,
         dim: int,
         init_vectors: torch.Tensor | None = None,
-        freeze_order_layers: bool = False,
         init_mode: str = "diag_permutation",
         proj_reduce_ratio: int = 10,
-        freeze_step: int = 2,
+        num_opt_layers: int = 8,
     ) -> None:
         nn.Module.__init__(self)
         self.module = module
         self.dim = dim
         self._cached_matrices: list[torch.Tensor] | None = None
-        self.freeze_order_layers = bool(freeze_order_layers)
 
         n_layers = len(self.module.layers)
-        if self.freeze_order_layers and n_layers >= 2:
-            step = max(1, int(freeze_step))
-            self._frozen_layer_idxs = set(range(0, n_layers, step))
-            self._frozen_layer_idxs.add(0)
-            self._frozen_layer_idxs.add(n_layers - 1)
-        else:
-            self._frozen_layer_idxs = set()
+        self.num_opt_layers = int(max(0, num_opt_layers))
+        self._optimized_layer_idxs = _build_optimized_layer_idxs(n_layers, self.num_opt_layers)
 
         r = int(proj_reduce_ratio)
         if r < 1:
@@ -1295,7 +1295,7 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         self._use_composed_cayley = True
 
     def matrix(self, layer_idx: int) -> torch.Tensor:
-        if layer_idx in self._frozen_layer_idxs:
+        if layer_idx not in self._optimized_layer_idxs:
             W = self.proj_A[layer_idx]
             return torch.eye(self.dim, device=W.device, dtype=W.dtype)
         if self._cached_matrices is not None:
@@ -1311,7 +1311,7 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
     def orthogonalize(self):
         with torch.no_grad():
             for layer_idx in range(self.proj_A.shape[0]):
-                if layer_idx in self._frozen_layer_idxs:
+                if layer_idx not in self._optimized_layer_idxs:
                     self.proj_A[layer_idx].copy_(
                         torch.eye(self.dim, self.k, device=self.proj_A.device, dtype=self.proj_A.dtype)
                     )
@@ -1463,10 +1463,10 @@ class RefusalDirectionRotation(nn.Module):
 
 def _layer_index_sets(operation, n_layers: int) -> tuple[list[int], list[int] | None]:
     """Layers with non-identity trainable maps vs frozen (Stiefel); ``frozen`` is None if not applicable."""
-    if hasattr(operation, "_frozen_layer_idxs"):
-        frozen_set = operation._frozen_layer_idxs
-        frozen = sorted(frozen_set)
-        active = [i for i in range(n_layers) if i not in frozen_set]
+    if hasattr(operation, "_optimized_layer_idxs"):
+        active_set = operation._optimized_layer_idxs
+        active = sorted(active_set)
+        frozen = [i for i in range(n_layers) if i not in active_set]
         return active, frozen
     return list(range(n_layers)), None
 
@@ -1507,7 +1507,7 @@ def _write_tb_checkpoint_layer_artifacts(
     direction_mode: str,
     n_layers: int,
     best_layer: int,
-    freeze_step: int,
+    num_opt_layers: int,
 ) -> None:
     """``layer_training_info.txt`` + ``active_layers.pt`` under the TensorBoard ``checkpoints`` dir."""
     os.makedirs(tb_checkpoint_dir, exist_ok=True)
@@ -1519,9 +1519,13 @@ def _write_tb_checkpoint_layer_artifacts(
     ]
     if hasattr(operation, "freeze_order_layers"):
         info_lines.append(f"freeze_order_layers: {bool(operation.freeze_order_layers)}")
-        info_lines.append(f"freeze_step: {int(freeze_step)}")
+        info_lines.append(f"num_opt_layers: {int(num_opt_layers)}")
         if frozen is not None:
             info_lines.append("frozen_layer_indices: " + ", ".join(map(str, frozen)))
+    elif hasattr(operation, "num_opt_layers"):
+        info_lines.append(f"num_opt_layers: {int(operation.num_opt_layers)}")
+        if frozen is not None:
+            info_lines.append("non_optimized_layer_indices: " + ", ".join(map(str, frozen)))
     with open(os.path.join(tb_checkpoint_dir, "layer_training_info.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(info_lines) + "\n")
 
@@ -1566,8 +1570,7 @@ def refusal_cone_optimization(model, train_dataset,
                               init_vectors=[], 
                               n_lr_reduce=DEFAULT_CONFIG['n_lr_reduce'], 
                               orthogonal_vectors=[],
-                              freeze_order_layers: bool = DEFAULT_CONFIG.get('freeze_order_layers', False),
-                              freeze_step: int = DEFAULT_CONFIG.get('freeze_step', 2),
+                              num_opt_layers: int = DEFAULT_CONFIG.get('num_opt_layers', 8),
                               tb_writer=None,
                               tb_checkpoint_dir=None,
                               direction_mode=DEFAULT_CONFIG['direction_mode'],
@@ -1594,18 +1597,16 @@ def refusal_cone_optimization(model, train_dataset,
             model.model,
             model.config.hidden_size,
             init_vectors=init_vectors,
-            freeze_order_layers=freeze_order_layers,
             init_mode=args.init_mode,
-            freeze_step=freeze_step,
+            num_opt_layers=num_opt_layers,
         )
     elif direction_mode == "shtiefel_proj_rot":
         operation = RefusalStiefelProjRotation(
             model.model,
             model.config.hidden_size,
             init_vectors=init_vectors,
-            freeze_order_layers=freeze_order_layers,
             init_mode=args.init_mode,
-            freeze_step=freeze_step,
+            num_opt_layers=num_opt_layers,
         )
     else:
         raise ValueError(f"Invalid direction_mode: {direction_mode}")
@@ -2006,7 +2007,7 @@ def refusal_cone_optimization(model, train_dataset,
             direction_mode,
             n_layers,
             best_layer,
-            freeze_step,
+            num_opt_layers,
         )
         
 
@@ -2038,8 +2039,7 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
         "cone_dim": 1,  # Specific override for single direction training
         "orthogonal_vectors": orthogonal_vectors,
         "direction_mode": args.direction_mode,
-        "freeze_order_layers": getattr(args, "freeze_order_layers", False),
-        "freeze_step": getattr(args, "freeze_step", DEFAULT_CONFIG.get("freeze_step", 2)),
+        "num_opt_layers": getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8)),
         "log_steps": getattr(args, "log_steps", DEFAULT_CONFIG["log_steps"]),
     }
     train_kwargs.update(kwargs) # Apply any user-provided overrides
@@ -2519,8 +2519,7 @@ def _evaluate_llamaguard_and_mmlu(
                     model.config.hidden_size,
                     init_vectors=[],
                     init_mode=args.init_mode,
-                    freeze_order_layers=getattr(args, "freeze_order_layers", False),
-                    freeze_step=getattr(args, "freeze_step", DEFAULT_CONFIG.get("freeze_step", 2)),
+                    num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8)),
                 )
             elif direction_mode == "shtiefel_proj_rot":
                 rotation_model = RefusalStiefelProjRotation(
@@ -2528,8 +2527,7 @@ def _evaluate_llamaguard_and_mmlu(
                     model.config.hidden_size,
                     init_vectors=[],
                     init_mode=args.init_mode,
-                    freeze_order_layers=getattr(args, "freeze_order_layers", False),
-                    freeze_step=getattr(args, "freeze_step", DEFAULT_CONFIG.get("freeze_step", 2)),
+                    num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8)),
                 )
 
             return _make_activation_rotation_step_fn(
@@ -2762,6 +2760,10 @@ def train_refusal_cone(group_name, run_name, init_vectors, **kwargs):
         "init_vectors": init_vectors,
     }
     train_kwargs.update(kwargs)
+    train_kwargs.setdefault(
+        "num_opt_layers",
+        getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8)),
+    )
     train_kwargs.setdefault(
         "log_steps",
         getattr(args, "log_steps", DEFAULT_CONFIG["log_steps"]),
