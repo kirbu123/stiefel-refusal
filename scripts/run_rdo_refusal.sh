@@ -11,11 +11,12 @@ llamaguard_data="rdo" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "bas
 lr=1e-5
 max_iters=100000
 result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
+log_steps=100
 
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=7
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -45,6 +46,7 @@ cmd=(python -m baselines.rdo_refusal \
   --freeze_order_layers \
   --freeze_step "${freeze_step}" \
   --init_mode "diag_permutation" \
+  --log_steps "${log_steps}" \
 )
 
 # --init_mode: "random" or "diag_permutation"

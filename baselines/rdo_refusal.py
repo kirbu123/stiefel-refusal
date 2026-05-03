@@ -122,7 +122,7 @@ DEFAULT_CONFIG = {
     'patience': 5,                    # Patience for early stopping
     'n_lr_reduce': 2,                 # Number of learning rate reductions before stopping
     'direction_mode': 'baseline',    # 'baseline' (RefusalCone) | 'rotation' (Cayley orthogonal M @ r0; cone_dim must be 1)
-    
+
     # Cone parameters
     'min_cone_dim': 2,                # Minimum dimension of the refusal cone (number of basis vectors)
     'max_cone_dim': 3,               # Maximum dimension of the refusal cone (number of basis vectors)
@@ -166,6 +166,9 @@ DEFAULT_CONFIG = {
     # Optimization parameters
     'freeze_order_layers': False,
     'freeze_step': 2,
+    # 0 = disabled. Save operation weights every N training iterations (dataloader steps; ``num_iters``)
+    # to checkpoints/progress_checkpoints. Small values write large tensors often and can saturate disk I/O.
+    'log_steps': 0,
 }
 
 def parse_args():
@@ -212,6 +215,16 @@ def parse_args():
                     help='Patience for early stopping')
     parser.add_argument('--n_lr_reduce', type=int, default=DEFAULT_CONFIG['n_lr_reduce'],
                     help='Number of learning rate reductions before stopping')
+    parser.add_argument(
+        '--log_steps',
+        type=int,
+        default=DEFAULT_CONFIG['log_steps'],
+        help=(
+            'Save progressive operation checkpoints every N training iterations (``num_iters``, '
+            'one per dataloader batch, not per optimizer step); 0 disables. Small values imply '
+            'frequent saves of large tensors and heavy disk use.'
+        ),
+    )
     parser.add_argument('--direction_mode', type=str, default=DEFAULT_CONFIG['direction_mode'],
                     choices=['baseline', 'rotation', 'activation_rot', 'shtiefel_rot', 'shtiefel_proj_rot'],
                     help='baseline: original RefusalCone. rotation: learn orthogonal M (Cayley), r=M@r0; requires cone_dim=1')
@@ -1448,6 +1461,92 @@ class RefusalDirectionRotation(nn.Module):
             self.r0.div_(self.r0.norm())
 
 
+def _layer_index_sets(operation, n_layers: int) -> tuple[list[int], list[int] | None]:
+    """Layers with non-identity trainable maps vs frozen (Stiefel); ``frozen`` is None if not applicable."""
+    if hasattr(operation, "_frozen_layer_idxs"):
+        frozen_set = operation._frozen_layer_idxs
+        frozen = sorted(frozen_set)
+        active = [i for i in range(n_layers) if i not in frozen_set]
+        return active, frozen
+    return list(range(n_layers)), None
+
+
+def _save_progress_operation_checkpoint(
+    tb_checkpoint_dir: str,
+    iters_steps: int,
+    direction_mode: str,
+    operation,
+    n_layers: int,
+) -> None:
+    """Write one post-retraction checkpoint under ``checkpoints/progress_checkpoints``."""
+    
+    print(f"Saving progress operation checkpoint at iteration {iters_steps}")
+    progress_dir = os.path.join(tb_checkpoint_dir, "progress_checkpoints")
+    os.makedirs(progress_dir, exist_ok=True)
+    active, frozen = _layer_index_sets(operation, n_layers)
+    payload: dict = {
+        "iters_steps": iters_steps,
+        "direction_mode": direction_mode,
+        "active_layer_indices": active,
+    }
+    if frozen is not None:
+        payload["frozen_layer_indices"] = frozen
+    if direction_mode == "baseline":
+        payload["fn_vectors"] = torch.stack(operation.fn_vectors, dim=0).detach().cpu()
+    elif direction_mode == "shtiefel_proj_rot":
+        payload["proj_A"] = operation.proj_A.detach().cpu()
+        payload["proj_B"] = operation.proj_B.detach().cpu()
+    else:
+        payload["cayley_param"] = operation.cayley_param.detach().cpu()
+    torch.save(payload, os.path.join(progress_dir, f"iters_{iters_steps:08d}.pt"))
+
+
+def _write_tb_checkpoint_layer_artifacts(
+    tb_checkpoint_dir: str,
+    operation,
+    direction_mode: str,
+    n_layers: int,
+    best_layer: int,
+    freeze_step: int,
+) -> None:
+    """``layer_training_info.txt`` + ``active_layers.pt`` under the TensorBoard ``checkpoints`` dir."""
+    os.makedirs(tb_checkpoint_dir, exist_ok=True)
+    active, frozen = _layer_index_sets(operation, n_layers)
+    info_lines = [
+        f"best_layer: {int(best_layer)}",
+        f"n_layers: {int(n_layers)}",
+        "active_layer_indices: " + ", ".join(map(str, active)),
+    ]
+    if hasattr(operation, "freeze_order_layers"):
+        info_lines.append(f"freeze_order_layers: {bool(operation.freeze_order_layers)}")
+        info_lines.append(f"freeze_step: {int(freeze_step)}")
+        if frozen is not None:
+            info_lines.append("frozen_layer_indices: " + ", ".join(map(str, frozen)))
+    with open(os.path.join(tb_checkpoint_dir, "layer_training_info.txt"), "w", encoding="utf-8") as f:
+        f.write("\n".join(info_lines) + "\n")
+
+    state: dict = {
+        "direction_mode": direction_mode,
+        "active_layer_indices": active,
+    }
+    if frozen is not None:
+        state["frozen_layer_indices"] = frozen
+    if direction_mode == "shtiefel_proj_rot" and active:
+        idx = torch.tensor(active, dtype=torch.long, device=operation.proj_A.device)
+        state["proj_A"] = operation.proj_A.index_select(0, idx).detach().cpu()
+        state["proj_B"] = operation.proj_B.index_select(0, idx).detach().cpu()
+    elif direction_mode in ("shtiefel_rot", "activation_rot") and active:
+        cp = operation.cayley_param
+        if cp.dim() == 3:
+            idx = torch.tensor(active, dtype=torch.long, device=cp.device)
+            state["cayley_param"] = cp.index_select(0, idx).detach().cpu()
+    elif direction_mode == "rotation":
+        state["cayley_param"] = operation.cayley_param.detach().cpu()
+    elif direction_mode == "baseline":
+        state["fn_vectors"] = torch.stack(operation.fn_vectors, dim=0).detach().cpu()
+    torch.save(state, os.path.join(tb_checkpoint_dir, "active_layers.pt"))
+
+
 def refusal_cone_optimization(model, train_dataset, 
                               batch_size=DEFAULT_CONFIG['batch_size'], 
                               effective_batch_size=DEFAULT_CONFIG['effective_batch_size'], 
@@ -1471,7 +1570,8 @@ def refusal_cone_optimization(model, train_dataset,
                               freeze_step: int = DEFAULT_CONFIG.get('freeze_step', 2),
                               tb_writer=None,
                               tb_checkpoint_dir=None,
-                              direction_mode=DEFAULT_CONFIG['direction_mode']):
+                              direction_mode=DEFAULT_CONFIG['direction_mode'],
+                              log_steps: int = DEFAULT_CONFIG['log_steps']):
 
     if direction_mode == "rotation":
         if cone_dim != 1:
@@ -1597,6 +1697,15 @@ def refusal_cone_optimization(model, train_dataset,
     for epoch in range(epochs):
         print('Epoch', epoch)
         for _, batch in enumerate(train_dataloader):
+
+            if (num_iters) % log_steps == 0:
+                _save_progress_operation_checkpoint(
+                    tb_checkpoint_dir,
+                    num_iters,
+                    direction_mode,
+                    operation,
+                    n_layers,
+                )
 
             num_iters += 1
             if num_iters >= max_iters:
@@ -1891,6 +2000,15 @@ def refusal_cone_optimization(model, train_dataset,
         if direction_mode != "baseline" and lowest_loss_cayley_param is not None:
             torch.save(save_cayley_params, os.path.join(tb_checkpoint_dir, "cayley_params.pt"))
             torch.save(lowest_loss_cayley_param, os.path.join(tb_checkpoint_dir, "lowest_loss_cayley_param.pt"))
+        _write_tb_checkpoint_layer_artifacts(
+            tb_checkpoint_dir,
+            operation,
+            direction_mode,
+            n_layers,
+            best_layer,
+            freeze_step,
+        )
+        
 
     return {
         "vectors": vectors,
@@ -1922,6 +2040,7 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
         "direction_mode": args.direction_mode,
         "freeze_order_layers": getattr(args, "freeze_order_layers", False),
         "freeze_step": getattr(args, "freeze_step", DEFAULT_CONFIG.get("freeze_step", 2)),
+        "log_steps": getattr(args, "log_steps", DEFAULT_CONFIG["log_steps"]),
     }
     train_kwargs.update(kwargs) # Apply any user-provided overrides
 
@@ -2643,6 +2762,10 @@ def train_refusal_cone(group_name, run_name, init_vectors, **kwargs):
         "init_vectors": init_vectors,
     }
     train_kwargs.update(kwargs)
+    train_kwargs.setdefault(
+        "log_steps",
+        getattr(args, "log_steps", DEFAULT_CONFIG["log_steps"]),
+    )
 
     run_config = vars(args).copy()
     run_config.update({
