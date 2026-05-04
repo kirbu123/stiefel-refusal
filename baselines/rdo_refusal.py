@@ -131,6 +131,7 @@ DEFAULT_CONFIG = {
     'sampling_method': "hypersphere", # Method for sampling vectors ('hypersphere' or 'interpolation')
     'optimize_basis': True,           # Whether to optimize the basis vectors directly
     'init_mode': "random", # "diag_permutation",  # Method for initializing the rotation matrices
+    'orth_method': "svd",  # Orthogonalization method for Stiefel modes: "qr" or "svd"
     'retain_loss': False, # Whether to use KL divergence for the retain loss
 
     # Loss weights
@@ -254,8 +255,11 @@ def parse_args():
     parser.add_argument('--retain_loss', action='store_true',
                     help='Whether to use KL divergence for the retain loss')
     parser.add_argument('--init_mode', type=str, default=DEFAULT_CONFIG["init_mode"],
-                    choices=['random', 'diag_permutation'],
+                    choices=['random', 'diag_permutation', 'ones'],
                     help='Method for initializing the rotation matrices')
+    parser.add_argument('--orth_method', type=str, default=DEFAULT_CONFIG["orth_method"],
+                    choices=['qr', 'svd'],
+                    help='Orthogonalization method for Stiefel modes')
 
     # Loss weights
     parser.add_argument('--ablation_lambda', type=float, default=DEFAULT_CONFIG['ablation_lambda'],
@@ -323,12 +327,14 @@ MODEL_PATH = args.model
 
 
 def _tb_dir_frz_suffix(train_kwargs: dict | None = None) -> str:
-    """Short TensorBoard dirname segment: nol=num_opt_layers, im=init_mode."""
+    """Short TensorBoard dirname segment: nol=num_opt_layers, im=init_mode, om=orth_method."""
     k = train_kwargs or {}
     nol = int(k.get("num_opt_layers", getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8))))
     im = k.get("init_mode", getattr(args, "init_mode", DEFAULT_CONFIG.get("init_mode", "random")))
+    om = k.get("orth_method", getattr(args, "orth_method", DEFAULT_CONFIG.get("orth_method", "svd")))
     im = str(im).replace(os.sep, "_").replace("/", "_").replace(" ", "_")
-    return f"nol={nol}_im={im}"
+    om = str(om).replace(os.sep, "_").replace("/", "_").replace(" ", "_")
+    return f"nol={nol}_im={im}_om={om}"
 
 
 # Apply configuration values
@@ -1050,6 +1056,7 @@ class RefusalStiefelRotation(nn.Module):
         dim: int,
         init_vectors: torch.Tensor | None = None,
         init_mode: str = "diag_permutation",
+        orth_method: str = "svd",
         num_opt_layers: int = 8,
     ) -> None:
         super().__init__()
@@ -1060,6 +1067,9 @@ class RefusalStiefelRotation(nn.Module):
         n_layers = len(self.module.layers)
         self.num_opt_layers = int(max(0, num_opt_layers))
         self._optimized_layer_idxs = _build_optimized_layer_idxs(n_layers, self.num_opt_layers)
+        if orth_method not in ("qr", "svd"):
+            raise ValueError(f"Invalid orth_method: {orth_method}")
+        self.orth_method = orth_method
 
         if init_mode == "random":
             self.cayley_param = nn.Parameter(
@@ -1076,6 +1086,10 @@ class RefusalStiefelRotation(nn.Module):
                 )
                 matrices.append(eye)
             self.cayley_param = nn.Parameter(torch.stack(matrices, dim=0))
+        elif init_mode == "ones":
+            self.cayley_param = nn.Parameter(
+                torch.ones(n_layers, dim, dim, dtype=torch.float32, device="cuda") * 1e-3
+            )
         else:
             raise ValueError(f"Invalid init_mode: {init_mode}")
 
@@ -1176,16 +1190,17 @@ class RefusalStiefelRotation(nn.Module):
                     self.cayley_param[layer_idx].copy_(torch.eye(self.dim, device=W.device, dtype=W.dtype))
                     continue
 
-                # Polar projection via SVD: Q = U @ Vh  
-                # U, _, Vh = torch.linalg.svd(W, full_matrices=False)
-                # Q = U @ Vh
+                if self.orth_method == "svd":
+                    # Polar projection via SVD: Q = U @ Vh.
+                    U, _, Vh = torch.linalg.svd(W, full_matrices=False)
+                    Q = U @ Vh
+                else:
+                    # QR-based Stiefel retraction with sign-fix for continuity-ish behavior.
+                    Q, R = torch.linalg.qr(W, mode="reduced")
+                    d = torch.sign(torch.diag(R))
+                    d[d == 0] = 1.0
+                    Q = Q @ torch.diag(d)
 
-                # QR-based Stiefel retraction (much faster than per-layer SVD).
-                # Sign-fix via R's diagonal to make Q continuous-ish.
-                Q, R = torch.linalg.qr(W, mode="reduced")
-                d = torch.sign(torch.diag(R))
-                d[d == 0] = 1.0
-                Q = Q @ torch.diag(d)
                 self.cayley_param[layer_idx].copy_(Q)
 
     def skew(self, M: torch.Tensor) -> torch.Tensor:
@@ -1220,6 +1235,7 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         dim: int,
         init_vectors: torch.Tensor | None = None,
         init_mode: str = "diag_permutation",
+        orth_method: str = "svd",
         proj_reduce_ratio: int = 10,
         num_opt_layers: int = 8,
     ) -> None:
@@ -1231,6 +1247,9 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         n_layers = len(self.module.layers)
         self.num_opt_layers = int(max(0, num_opt_layers))
         self._optimized_layer_idxs = _build_optimized_layer_idxs(n_layers, self.num_opt_layers)
+        if orth_method not in ("qr", "svd"):
+            raise ValueError(f"Invalid orth_method: {orth_method}")
+        self.orth_method = orth_method
 
         r = int(proj_reduce_ratio)
         if r < 1:
@@ -1262,6 +1281,9 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
                 matrices_b.append(b)
             self.proj_A = nn.Parameter(torch.stack(matrices_a, dim=0))
             self.proj_B = nn.Parameter(torch.stack(matrices_b, dim=0))
+        elif init_mode == "ones":
+            self.proj_A = nn.Parameter(torch.ones(n_layers, dim, k, dtype=torch.float32, device="cuda") * 1e-3)
+            self.proj_B = nn.Parameter(torch.ones(n_layers, k, dim, dtype=torch.float32, device="cuda") * 1e-3)
         else:
             raise ValueError(f"Invalid init_mode: {init_mode}")
 
@@ -1322,20 +1344,30 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
                     continue
 
                 Wa = self.proj_A[layer_idx]
-                Qa, Ra = torch.linalg.qr(Wa, mode="reduced")
-                da = torch.sign(torch.diag(Ra))
-                da[da == 0] = 1.0
-                Qa = Qa @ torch.diag(da)
+                if self.orth_method == "svd":
+                    U, _, Vh = torch.linalg.svd(Wa, full_matrices=False)
+                    Qa = U @ Vh
+                else:
+                    Qa, Ra = torch.linalg.qr(Wa, mode="reduced")
+                    da = torch.sign(torch.diag(Ra))
+                    da[da == 0] = 1.0
+                    Qa = Qa @ torch.diag(da)
+
                 self.proj_A[layer_idx].copy_(Qa)
 
-                # proj_B is (k, dim): orthonormal rows <=> QR on B.T for orthonormal columns.
                 Wb = self.proj_B[layer_idx]
-                Wbt = Wb.T
-                Qbt, Rbt = torch.linalg.qr(Wbt, mode="reduced")
-                db = torch.sign(torch.diag(Rbt))
-                db[db == 0] = 1.0
-                Qbt = Qbt @ torch.diag(db)
-                self.proj_B[layer_idx].copy_(Qbt.T)
+                if self.orth_method == "svd":
+                    U, _, Vh = torch.linalg.svd(Wb, full_matrices=False)
+                    Qb = U @ Vh
+                    self.proj_B[layer_idx].copy_(Qb)
+                else:
+                    # proj_B is (k, dim): orthonormal rows <=> QR on B.T for orthonormal columns.
+                    Wbt = Wb.T
+                    Qbt, Rbt = torch.linalg.qr(Wbt, mode="reduced")
+                    db = torch.sign(torch.diag(Rbt))
+                    db[db == 0] = 1.0
+                    Qbt = Qbt @ torch.diag(db)
+                    self.proj_B[layer_idx].copy_(Qbt.T)
 
                 self.cayley_param[layer_idx].copy_(self.proj_A[layer_idx] @ self.proj_B[layer_idx])
 
@@ -1598,6 +1630,7 @@ def refusal_cone_optimization(model, train_dataset,
             model.config.hidden_size,
             init_vectors=init_vectors,
             init_mode=args.init_mode,
+            orth_method=args.orth_method,
             num_opt_layers=num_opt_layers,
         )
     elif direction_mode == "shtiefel_proj_rot":
@@ -1606,6 +1639,7 @@ def refusal_cone_optimization(model, train_dataset,
             model.config.hidden_size,
             init_vectors=init_vectors,
             init_mode=args.init_mode,
+            orth_method=args.orth_method,
             num_opt_layers=num_opt_layers,
         )
     else:
@@ -2519,6 +2553,7 @@ def _evaluate_llamaguard_and_mmlu(
                     model.config.hidden_size,
                     init_vectors=[],
                     init_mode=args.init_mode,
+                    orth_method=args.orth_method,
                     num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8)),
                 )
             elif direction_mode == "shtiefel_proj_rot":
@@ -2527,6 +2562,7 @@ def _evaluate_llamaguard_and_mmlu(
                     model.config.hidden_size,
                     init_vectors=[],
                     init_mode=args.init_mode,
+                    orth_method=args.orth_method,
                     num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8)),
                 )
 
