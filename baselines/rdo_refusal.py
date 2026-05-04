@@ -1058,6 +1058,7 @@ class RefusalStiefelRotation(nn.Module):
         init_mode: str = "diag_permutation",
         orth_method: str = "svd",
         num_opt_layers: int = 8,
+        best_layer: int = None,
     ) -> None:
         super().__init__()
         self.module = module
@@ -1067,6 +1068,8 @@ class RefusalStiefelRotation(nn.Module):
         n_layers = len(self.module.layers)
         self.num_opt_layers = int(max(0, num_opt_layers))
         self._optimized_layer_idxs = _build_optimized_layer_idxs(n_layers, self.num_opt_layers)
+        if best_layer is not None and 0 < best_layer < n_layers - 1:
+            self._optimized_layer_idxs.add(int(best_layer))
         if orth_method not in ("qr", "svd"):
             raise ValueError(f"Invalid orth_method: {orth_method}")
         self.orth_method = orth_method
@@ -1238,6 +1241,7 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         orth_method: str = "svd",
         proj_reduce_ratio: int = 10,
         num_opt_layers: int = 8,
+        best_layer: int = None,
     ) -> None:
         nn.Module.__init__(self)
         self.module = module
@@ -1247,6 +1251,8 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         n_layers = len(self.module.layers)
         self.num_opt_layers = int(max(0, num_opt_layers))
         self._optimized_layer_idxs = _build_optimized_layer_idxs(n_layers, self.num_opt_layers)
+        if best_layer is not None and 0 < best_layer < n_layers - 1:
+            self._optimized_layer_idxs.add(int(best_layer))
         if orth_method not in ("qr", "svd"):
             raise ValueError(f"Invalid orth_method: {orth_method}")
         self.orth_method = orth_method
@@ -1282,8 +1288,8 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
             self.proj_A = nn.Parameter(torch.stack(matrices_a, dim=0))
             self.proj_B = nn.Parameter(torch.stack(matrices_b, dim=0))
         elif init_mode == "ones":
-            self.proj_A = nn.Parameter(torch.ones(n_layers, dim, k, dtype=torch.float32, device="cuda") * 1e-3)
-            self.proj_B = nn.Parameter(torch.ones(n_layers, k, dim, dtype=torch.float32, device="cuda") * 1e-3)
+            self.proj_A = nn.Parameter(torch.zeros(n_layers, dim, k, dtype=torch.float32, device="cuda") * 1e-3)
+            self.proj_B = nn.Parameter(torch.zeros(n_layers, k, dim, dtype=torch.float32, device="cuda") * 1e-3)
         else:
             raise ValueError(f"Invalid init_mode: {init_mode}")
 
@@ -1632,6 +1638,7 @@ def refusal_cone_optimization(model, train_dataset,
             init_mode=args.init_mode,
             orth_method=args.orth_method,
             num_opt_layers=num_opt_layers,
+            best_layer=best_layer,
         )
     elif direction_mode == "shtiefel_proj_rot":
         operation = RefusalStiefelProjRotation(
@@ -1641,6 +1648,7 @@ def refusal_cone_optimization(model, train_dataset,
             init_mode=args.init_mode,
             orth_method=args.orth_method,
             num_opt_layers=num_opt_layers,
+            best_layer=best_layer,
         )
     else:
         raise ValueError(f"Invalid direction_mode: {direction_mode}")
@@ -2555,6 +2563,7 @@ def _evaluate_llamaguard_and_mmlu(
                     init_mode=args.init_mode,
                     orth_method=args.orth_method,
                     num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8)),
+                    best_layer=best_layer,
                 )
             elif direction_mode == "shtiefel_proj_rot":
                 rotation_model = RefusalStiefelProjRotation(
@@ -2564,6 +2573,7 @@ def _evaluate_llamaguard_and_mmlu(
                     init_mode=args.init_mode,
                     orth_method=args.orth_method,
                     num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8)),
+                    best_layer=best_layer,
                 )
 
             return _make_activation_rotation_step_fn(

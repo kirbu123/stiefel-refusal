@@ -5,13 +5,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # variables
-direction_mode="baseline" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot"
+direction_mode="shtiefel_proj_rot" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot"
 num_opt_layers=0 # optimize this many middle layers (plus best layer during intervention)
-llamaguard_data="rdo" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
+llamaguard_data="basic" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
 lr=1e-5
 max_iters=100000
 result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
-log_steps=1000
+log_steps=100
 init_mode="random" # "random" or "diag_permutation"
 orth_method="svd" # "qr" or "svd"
 
@@ -19,7 +19,7 @@ orth_method="svd" # "qr" or "svd"
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=7
+export CUDA_VISIBLE_DEVICES=6
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -50,7 +50,7 @@ cmd=(python -m baselines.rdo_refusal \
   --init_mode "${init_mode}" \
   --orth_method "${orth_method}" \
   --log_steps "${log_steps}" \
-  --retain_loss \
+  # --retain_loss \
 )
 
 # --init_mode: "random" or "diag_permutation"
