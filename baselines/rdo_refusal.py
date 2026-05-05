@@ -2530,12 +2530,15 @@ def _generate_nnsight(
     max_new_tokens: int,
     batch_size: int,
     intervene_step_fn=None,
+    intervene_before_first_step: bool = False,
 ) -> list[str]:
     """
     Generate decoded completions for each prompt.
 
     intervene_step_fn(model): called once per decoding step inside the generation loop
     (after invoke, before generator.next()).
+    intervene_before_first_step: when True, also apply intervention once before
+    the first generated token.
     """
     decoded: list[str] = []
     tokenizer = model.tokenizer
@@ -2547,6 +2550,8 @@ def _generate_nnsight(
 
         with model.generate(max_new_tokens=max_new_tokens, do_sample=False) as generator:
             with generator.invoke(batch):
+                if intervene_step_fn is not None and intervene_before_first_step:
+                    intervene_step_fn(model)
                 out = model.generator.output.save()
                 for _ in range(max_new_tokens - 1):
                     if intervene_step_fn is not None:
@@ -2829,32 +2834,17 @@ def _evaluate_llamaguard_and_mmlu(
                     mode=llamaguard_data_mode,
                     model_name=model_name,
                 )
-
-                # Keep evaluation bounded for quick iterations.
-                # Tiny preset expectation: RDO_MAX_HARMFUL_PER_CATEGORY=2 across ~10 categories (~20 total),
-                # and RDO_MAX_HARMLESS_TOTAL=20.
-                max_harmful_per_category = int(os.getenv("RDO_MAX_HARMFUL_PER_CATEGORY", "0") or "0")
-                max_harmless_total = int(os.getenv("RDO_MAX_HARMLESS_TOTAL", "0") or "0")
-
-                if max_harmful_per_category > 0:
-                    per_cat_counts: dict[str, int] = {}
-                    capped: list[dict] = []
-                    for item in harmful:
-                        cat = str(item.get("category") or "unknown")
-                        cur = per_cat_counts.get(cat, 0)
-                        if cur >= max_harmful_per_category:
-                            continue
-                        per_cat_counts[cat] = cur + 1
-                        capped.append(item)
-                    harmful = capped
-                    print(
-                        f"[eval] capped harmful to {len(harmful)} "
-                        f"({max_harmful_per_category} per category across {len(per_cat_counts)} categories)"
-                    )
-
-                if max_harmless_total > 0:
+                max_harmful_total = int(os.getenv("MAX_HARMFUL", "0") or "0")
+                max_harmless_total = int(os.getenv("MAX_HARMLESS", "0") or "0")
+                if max_harmful_total > 0 and len(harmful) > max_harmful_total:
+                    harmful = harmful[:max_harmful_total]
+                if max_harmless_total > 0 and len(harmless) > max_harmless_total:
                     harmless = harmless[:max_harmless_total]
-                    print(f"[eval] capped harmless to {len(harmless)} total")
+                print(
+                    f"[eval] using LlamaGuard dataset (mode={llamaguard_data_mode}): "
+                    f"harmful={len(harmful)} (MAX_HARMFUL={max_harmful_total}), "
+                    f"harmless={len(harmless)} (MAX_HARMLESS={max_harmless_total})"
+                )
 
                 harmful_q = [d["instruction"] for d in harmful]
                 harmless_q = [d["instruction"] for d in harmless]
@@ -2869,8 +2859,22 @@ def _evaluate_llamaguard_and_mmlu(
                 refined_harmless = None
                 if refined_artifact is not None:
                     step_fn = _make_refined_step_fn(refined_artifact)
-                    refined_harmful = _generate_nnsight(model, harmful_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size, intervene_step_fn=step_fn)
-                    refined_harmless = _generate_nnsight(model, harmless_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size, intervene_step_fn=step_fn)
+                    refined_harmful = _generate_nnsight(
+                        model,
+                        harmful_prompts,
+                        max_new_tokens=eval_max_new_tokens,
+                        batch_size=eval_batch_size,
+                        intervene_step_fn=step_fn,
+                        intervene_before_first_step=(direction_mode == "baseline"),
+                    )
+                    refined_harmless = _generate_nnsight(
+                        model,
+                        harmless_prompts,
+                        max_new_tokens=eval_max_new_tokens,
+                        batch_size=eval_batch_size,
+                        intervene_step_fn=step_fn,
+                        intervene_before_first_step=(direction_mode == "baseline"),
+                    )
 
                 evaluator = get_llamaguard_evaluator()
                 initial_harmful_results = evaluator.evaluate_batch(list(zip(harmful_q, initial_harmful)), progress_every=20)
@@ -2952,7 +2956,14 @@ def _evaluate_llamaguard_and_mmlu(
             refined_pred = None
             if refined_artifact is not None:
                 step_fn = _make_refined_step_fn(refined_artifact)
-                refined_resp = _generate_nnsight(model, chat_prompts, max_new_tokens=normalized["max_new_tokens"], batch_size=eval_batch_size, intervene_step_fn=step_fn)
+                refined_resp = _generate_nnsight(
+                    model,
+                    chat_prompts,
+                    max_new_tokens=normalized["max_new_tokens"],
+                    batch_size=eval_batch_size,
+                    intervene_step_fn=step_fn,
+                    intervene_before_first_step=(direction_mode == "baseline"),
+                )
                 refined_pred = [mmlu_eval.parse_choice_letter(r) for r in refined_resp]
 
             initial_rows = []

@@ -10,7 +10,7 @@ num_opt_layers=0 # optimize this many middle layers (plus best layer during inte
 llamaguard_data="basic" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
 lr=1e-5
 max_iters=100000
-result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
+result_path="/home/user1/buka2004/LLM-Attack-Defense/results/rdo_refusal/tensorboard/basic_rdo_DeepSeek-R1-Distill-Qwen-7B_householder_pseudo_rotation_nol=0_im=random_om=svd_c2fd4a3abbbc" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
 log_steps=1000
 init_mode="random" # "random" or "diag_permutation"
 orth_method="svd" # "qr" or "svd"
@@ -18,7 +18,7 @@ orth_method="svd" # "qr" or "svd"
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=3
+export CUDA_VISIBLE_DEVICES=1
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -29,9 +29,9 @@ export MMLU_STORE_PREDICTIONS="${MMLU_STORE_PREDICTIONS:-false}"
 # LlamaGuard: we only need the first generated token to compute P(unsafe).
 export LLAMAGUARD_MAX_NEW_TOKENS="${LLAMAGUARD_MAX_NEW_TOKENS:-100}"
 
-# Dataset caps for eval split JSONs.
-export RDO_MAX_HARMFUL_PER_CATEGORY="${RDO_MAX_HARMFUL_PER_CATEGORY:-200}" # 200
-export RDO_MAX_HARMLESS_TOTAL="${RDO_MAX_HARMLESS_TOTAL:-200}" # 200
+# LlamaGuard eval caps (total counts, not per-category).
+export MAX_HARMFUL="${MAX_HARMFUL:-500}"
+export MAX_HARMLESS="${MAX_HARMLESS:-500}"
 
 export HF_TOKEN="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"
 
