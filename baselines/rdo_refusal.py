@@ -1130,6 +1130,46 @@ class RefusalStiefelRotation(nn.Module):
     def set_cached_matrices(self, matrices: list[torch.Tensor] | None) -> None:
         self._cached_matrices = matrices
 
+    def _update_optimized_layer_idxs_from_checkpoint(
+        self,
+        checkpoint_matrices: torch.Tensor,
+        *,
+        atol: float = 1e-8,
+        rtol: float = 1e-5,
+    ) -> None:
+        """
+        Sync `_optimized_layer_idxs` with the loaded checkpoint.
+
+        LlamaGuard eval can instantiate rotation modules with runtime `num_opt_layers`
+        that differ from training. If we keep the runtime `_optimized_layer_idxs`, layers
+        that were trained but not currently "active" are treated as identity in `matrix()`.
+        We infer active layers from non-identity checkpoint matrices and union them into
+        `_optimized_layer_idxs`.
+        """
+        if checkpoint_matrices.ndim != 3:
+            return
+        n_layers = min(checkpoint_matrices.shape[0], len(self.module.layers))
+        active_from_ckpt: set[int] = set()
+        for layer_idx in range(n_layers):
+            W = checkpoint_matrices[layer_idx]
+            I = torch.eye(W.shape[0], device=W.device, dtype=W.dtype)
+            if not torch.allclose(W, I, atol=atol, rtol=rtol):
+                active_from_ckpt.add(layer_idx)
+        if active_from_ckpt:
+            self._optimized_layer_idxs.update(active_from_ckpt)
+
+    def import_cayley_checkpoint(self, cayley_param: torch.Tensor) -> None:
+        """Load per-layer checkpoint and align `_optimized_layer_idxs` for eval."""
+        with torch.no_grad():
+            target = self.cayley_param
+            src = cayley_param.to(device=target.device, dtype=target.dtype)
+            if target.shape != src.shape:
+                raise ValueError(
+                    f"import_cayley_checkpoint: expected shape {tuple(target.shape)}, got {tuple(src.shape)}"
+                )
+            target.copy_(src)
+        self._update_optimized_layer_idxs_from_checkpoint(self.cayley_param)
+
     def stack_directions_for_log(self) -> torch.Tensor:
         return self.r0.detach().unsqueeze(0).cpu()
 
@@ -1320,6 +1360,7 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
                     f"import_cayley_checkpoint: expected shape {tuple(self.cayley_param.shape)}, got {tuple(t.shape)}"
                 )
             self.cayley_param.copy_(t)
+        self._update_optimized_layer_idxs_from_checkpoint(self.cayley_param)
         self._use_composed_cayley = True
 
     def matrix(self, layer_idx: int) -> torch.Tensor:

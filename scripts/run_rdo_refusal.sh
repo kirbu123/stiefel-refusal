@@ -10,16 +10,15 @@ num_opt_layers=0 # optimize this many middle layers (plus best layer during inte
 llamaguard_data="basic" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
 lr=1e-5
 max_iters=100000
-result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
+result_path="/home/user1/buka2004/LLM-Attack-Defense/results/rdo_refusal/tensorboard/basic_rdo_DeepSeek-R1-Distill-Qwen-7B_shtiefel_proj_rot_nol=0_im=diag_permutation_om=svd_c2485fe404cf" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
 log_steps=100
-init_mode="random" # "random" or "diag_permutation"
+init_mode="diag_permutation" # "random" or "diag_permutation"
 orth_method="svd" # "qr" or "svd"
-
 
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=6
+export CUDA_VISIBLE_DEVICES=0
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -44,8 +43,8 @@ cmd=(python -m baselines.rdo_refusal \
   --llamaguard_data "${llamaguard_data}" \
   --lr "${lr}" \
   --eval_llamaguard \
-  --eval_mmlu \
-  --mmlu_store_predictions \
+  # --eval_mmlu \
+  # --mmlu_store_predictions \
   --num_opt_layers "${num_opt_layers}" \
   --init_mode "${init_mode}" \
   --orth_method "${orth_method}" \
