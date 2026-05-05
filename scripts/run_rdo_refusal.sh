@@ -5,20 +5,20 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # variables
-direction_mode="shtiefel_proj_rot" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot"
+direction_mode="householder_pseudo_rotation" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot", "angular_steering", "householder_pseudo_rotation"
 num_opt_layers=0 # optimize this many middle layers (plus best layer during intervention)
 llamaguard_data="basic" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
 lr=1e-5
 max_iters=100000
-result_path="/home/user1/buka2004/LLM-Attack-Defense/results/rdo_refusal/tensorboard/basic_rdo_DeepSeek-R1-Distill-Qwen-7B_shtiefel_proj_rot_nol=0_im=diag_permutation_om=svd_c2485fe404cf" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
-log_steps=100
-init_mode="diag_permutation" # "random" or "diag_permutation"
+result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
+log_steps=1000
+init_mode="random" # "random" or "diag_permutation"
 orth_method="svd" # "qr" or "svd"
 
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=3
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.

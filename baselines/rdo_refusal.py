@@ -121,7 +121,7 @@ DEFAULT_CONFIG = {
     'effective_batch_size': 16,       # Effective batch size (uses gradient accumulation)
     'patience': 5,                    # Patience for early stopping
     'n_lr_reduce': 2,                 # Number of learning rate reductions before stopping
-    'direction_mode': 'baseline',    # 'baseline' (RefusalCone) | 'rotation' (Cayley orthogonal M @ r0; cone_dim must be 1)
+    'direction_mode': 'baseline',    # 'baseline' (RefusalCone) | 'rotation' (Cayley orthogonal M @ r0; cone_dim must be 1) | 'angular_steering' (adaptive angular rotation) | 'householder_pseudo_rotation' (HPR-style norm-preserving edit)
 
     # Cone parameters
     'min_cone_dim': 2,                # Minimum dimension of the refusal cone (number of basis vectors)
@@ -226,14 +226,14 @@ def parse_args():
         ),
     )
     parser.add_argument('--direction_mode', type=str, default=DEFAULT_CONFIG['direction_mode'],
-                    choices=['baseline', 'rotation', 'activation_rot', 'shtiefel_rot', 'shtiefel_proj_rot'],
+                    choices=['baseline', 'rotation', 'activation_rot', 'shtiefel_rot', 'shtiefel_proj_rot', 'angular_steering', 'householder_pseudo_rotation'],
                     help='baseline: original RefusalCone. rotation: learn orthogonal M (Cayley), r=M@r0; requires cone_dim=1')
     parser.add_argument(
         '--num_opt_layers',
         type=int,
         default=DEFAULT_CONFIG['num_opt_layers'],
         help=(
-            '(shtiefel_rot, shtiefel_proj_rot) Number of middle layers to optimize '
+            '(shtiefel_rot, shtiefel_proj_rot, angular_steering, householder_pseudo_rotation) Number of middle layers to optimize '
             '(layers 0 and last are always excluded from optimized indices).'
         ),
     )
@@ -1422,6 +1422,163 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         return [self.proj_A, self.proj_B]
 
 
+class RefusalAngularSteeringRotation(RefusalStiefelRotation):
+    """
+    Adaptive Angular Steering on top of per-layer Stiefel rotations.
+
+    Keeps the same ``__call__`` / ``add`` flow as ``RefusalStiefelRotation`` and
+    only overrides how each layer input is transformed in ``_rotate``.
+    """
+
+    def __init__(
+        self,
+        module: Envoy,
+        dim: int,
+        init_vectors: torch.Tensor | None = None,
+        init_mode: str = "diag_permutation",
+        orth_method: str = "svd",
+        num_opt_layers: int = 8,
+        best_layer: int = None,
+        target_degree: float = 180.0,
+        adaptive_mode: int = 1,
+    ) -> None:
+        super().__init__(
+            module=module,
+            dim=dim,
+            init_vectors=init_vectors,
+            init_mode=init_mode,
+            orth_method=orth_method,
+            num_opt_layers=num_opt_layers,
+            best_layer=best_layer,
+        )
+        if int(adaptive_mode) != 1:
+            raise ValueError("RefusalAngularSteeringRotation currently supports adaptive_mode=1 only.")
+        self.adaptive_mode = 1
+        theta = float(target_degree) % 360.0
+        theta_rad = np.deg2rad(theta)
+        self.target_degree = theta
+        self._cos_theta = float(np.cos(theta_rad))
+        self._sin_theta = float(np.sin(theta_rad))
+
+        if init_vectors is not None and len(init_vectors) > 1:
+            second = init_vectors[1].detach().float().cuda().clone()
+        else:
+            second = torch.randn(dim, dtype=torch.float32, device="cuda")
+        second = second - torch.dot(second, self.r0) * self.r0
+        if second.norm() <= 1e-8:
+            second = torch.randn(dim, dtype=torch.float32, device="cuda")
+            second = second - torch.dot(second, self.r0) * self.r0
+        second = second / (second.norm() + 1e-12)
+        self.register_buffer("second_direction", second)
+
+    def _plane_basis(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        M = self.matrix(layer_idx)
+        b1 = M @ self.r0
+        b1 = b1 / (b1.norm() + 1e-12)
+        b2_rot = M @ self.second_direction
+        b2_rot = b2_rot - torch.dot(b2_rot, b1) * b1
+        b2_base = self.second_direction - torch.dot(self.second_direction, b1) * b1
+        # Keep this proxy-safe under nnsight tracing: avoid Python bool on Tensor/Proxy.
+        b2 = b2_rot + 1e-6 * b2_base
+        b2 = b2 / (torch.linalg.vector_norm(b2) + 1e-12)
+        return b1, b2
+
+    def _angular_rotate(self, x, layer_idx: int):
+        if isinstance(x, tuple):
+            if len(x) == 0:
+                return x
+            return (self._angular_rotate(x[0], layer_idx),) + x[1:]
+
+        if not hasattr(x, "dtype") and hasattr(x, "__getitem__"):
+            try:
+                first = x[0]
+                rest = x[1:]
+                return (self._angular_rotate(first, layer_idx),) + tuple(rest)
+            except Exception:
+                return x
+
+        b1, b2 = self._plane_basis(layer_idx)
+        try:
+            b1 = b1.to(x)
+            b2 = b2.to(x)
+        except Exception:
+            try:
+                b1 = b1.to(device=x.device, dtype=x.dtype)
+                b2 = b2.to(device=x.device, dtype=x.dtype)
+            except Exception:
+                try:
+                    b1 = b1.to(dtype=model.dtype)
+                    b2 = b2.to(dtype=model.dtype)
+                except Exception:
+                    pass
+
+        proj1 = x @ b1
+        proj2 = x @ b2
+        px = proj1.unsqueeze(-1) * b1 + proj2.unsqueeze(-1) * b2
+        scale = torch.linalg.vector_norm(px, dim=-1, keepdim=True)
+        v_theta = self._cos_theta * b1 + self._sin_theta * b2
+        alignment = x @ b1
+        mask = (alignment > 0).unsqueeze(-1)
+        update = scale * v_theta - px
+        return x + mask.to(dtype=x.dtype) * update
+
+    def _rotate(self, x, layer_idx: int):
+        return self._angular_rotate(x, layer_idx)
+
+
+class RefusalHouseholderPseudoRotation(RefusalStiefelRotation):
+    """
+    Householder Pseudo-Rotation (HPR)-style activation editing.
+
+    We keep the same Stiefel training interface (`__call__`, `add`, `_add`) and use
+    per-layer trainable matrices from `RefusalStiefelRotation` to define a target
+    direction `r = M @ r0`. Activations are transformed with a Householder map that
+    preserves norm and maps `r0` toward `r`.
+    """
+
+    def _householder_normal(self, layer_idx: int) -> torch.Tensor:
+        M = self.matrix(layer_idx)
+        r = M @ self.r0
+        r = r / (r.norm() + 1e-12)
+        # Householder reflection mapping r0 -> r uses n ∝ (r0 - r).
+        n = self.r0 - r
+        n = n / (torch.linalg.vector_norm(n) + 1e-12)
+        return n
+
+    def _householder_rotate(self, x, layer_idx: int):
+        if isinstance(x, tuple):
+            if len(x) == 0:
+                return x
+            return (self._householder_rotate(x[0], layer_idx),) + x[1:]
+
+        if not hasattr(x, "dtype") and hasattr(x, "__getitem__"):
+            try:
+                first = x[0]
+                rest = x[1:]
+                return (self._householder_rotate(first, layer_idx),) + tuple(rest)
+            except Exception:
+                return x
+
+        n = self._householder_normal(layer_idx)
+        try:
+            n = n.to(x)
+        except Exception:
+            try:
+                n = n.to(device=x.device, dtype=x.dtype)
+            except Exception:
+                try:
+                    n = n.to(dtype=model.dtype)
+                except Exception:
+                    pass
+
+        # Householder transform: x' = x - 2 <x, n> n (norm-preserving).
+        proj = (x @ n).unsqueeze(-1)
+        return x - 2.0 * proj * n
+
+    def _rotate(self, x, layer_idx: int):
+        return self._householder_rotate(x, layer_idx)
+
+
 class RefusalDirectionRotation(nn.Module):
     """
     Single direction (cone_dim=1): intervention direction r = M @ r0 with M orthogonal (Cayley transform).
@@ -1618,7 +1775,7 @@ def _write_tb_checkpoint_layer_artifacts(
         idx = torch.tensor(active, dtype=torch.long, device=operation.proj_A.device)
         state["proj_A"] = operation.proj_A.index_select(0, idx).detach().cpu()
         state["proj_B"] = operation.proj_B.index_select(0, idx).detach().cpu()
-    elif direction_mode in ("shtiefel_rot", "activation_rot") and active:
+    elif direction_mode in ("shtiefel_rot", "activation_rot", "angular_steering", "householder_pseudo_rotation") and active:
         cp = operation.cayley_param
         if cp.dim() == 3:
             idx = torch.tensor(active, dtype=torch.long, device=cp.device)
@@ -1673,6 +1830,26 @@ def refusal_cone_optimization(model, train_dataset,
         operation = RefusalDirectionActivationRotation(model.model, model.config.hidden_size, init_vectors=init_vectors)
     elif direction_mode == "shtiefel_rot":
         operation = RefusalStiefelRotation(
+            model.model,
+            model.config.hidden_size,
+            init_vectors=init_vectors,
+            init_mode=args.init_mode,
+            orth_method=args.orth_method,
+            num_opt_layers=num_opt_layers,
+            best_layer=best_layer,
+        )
+    elif direction_mode == "angular_steering":
+        operation = RefusalAngularSteeringRotation(
+            model.model,
+            model.config.hidden_size,
+            init_vectors=init_vectors,
+            init_mode=args.init_mode,
+            orth_method=args.orth_method,
+            num_opt_layers=num_opt_layers,
+            best_layer=best_layer,
+        )
+    elif direction_mode == "householder_pseudo_rotation":
+        operation = RefusalHouseholderPseudoRotation(
             model.model,
             model.config.hidden_size,
             init_vectors=init_vectors,
@@ -2293,7 +2470,7 @@ def _extract_refined_artifact(training_results: dict, direction_mode: str):
     """
     Return an object representing the learned "refined" intervention.
     - baseline/rotation: a vector direction (Tensor [d_model])
-    - activation_rot: per-layer cayley_param (Tensor [n_layers, d, d])
+    - activation_rot / shtiefel_rot / angular_steering / householder_pseudo_rotation: per-layer cayley_param (Tensor [n_layers, d, d])
     """
     if training_results is None:
         return None
@@ -2598,6 +2775,26 @@ def _evaluate_llamaguard_and_mmlu(
                 )
             elif direction_mode == "shtiefel_rot":
                 rotation_model = RefusalStiefelRotation(
+                    model.model,
+                    model.config.hidden_size,
+                    init_vectors=[],
+                    init_mode=args.init_mode,
+                    orth_method=args.orth_method,
+                    num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8)),
+                    best_layer=best_layer,
+                )
+            elif direction_mode == "angular_steering":
+                rotation_model = RefusalAngularSteeringRotation(
+                    model.model,
+                    model.config.hidden_size,
+                    init_vectors=[],
+                    init_mode=args.init_mode,
+                    orth_method=args.orth_method,
+                    num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8)),
+                    best_layer=best_layer,
+                )
+            elif direction_mode == "householder_pseudo_rotation":
+                rotation_model = RefusalHouseholderPseudoRotation(
                     model.model,
                     model.config.hidden_size,
                     init_vectors=[],
