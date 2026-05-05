@@ -103,7 +103,18 @@ def parse_choice_letter(text: str) -> str | None:
     if len(stripped) == 1 and stripped in CHOICE_LETTERS:
         return stripped[:1]
 
-    match = re.search(r"\b(?:ANSWER\s*:?\s*)?([ABCD])\b", stripped)
+    # Common explicit answer patterns.
+    match = re.search(r"\b(?:FINAL\s+ANSWER|ANSWER)\s*[:\-]?\s*\(?([ABCD])\)?\b", stripped)
+    if match:
+        return match.group(1)
+
+    # Leading single-letter style: "A", "(B)", "C.", "D)".
+    match = re.match(r"^\s*\(?([ABCD])\)?(?:[\.\):\-]|\s|$)", stripped)
+    if match:
+        return match.group(1)
+
+    # Generic fallback: first standalone letter token in the response.
+    match = re.search(r"\b([ABCD])\b", stripped)
     if match:
         return match.group(1)
 

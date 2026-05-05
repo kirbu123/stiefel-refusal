@@ -5,12 +5,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # variables
-direction_mode="householder_pseudo_rotation" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot", "angular_steering", "householder_pseudo_rotation"
+direction_mode="baseline" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot", "angular_steering", "householder_pseudo_rotation"
 num_opt_layers=0 # optimize this many middle layers (plus best layer during intervention)
 llamaguard_data="basic" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
 lr=1e-5
 max_iters=100000
-result_path="/home/user1/buka2004/LLM-Attack-Defense/results/rdo_refusal/tensorboard/basic_rdo_DeepSeek-R1-Distill-Qwen-7B_householder_pseudo_rotation_nol=0_im=random_om=svd_c2fd4a3abbbc" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
+result_path="/home/user1/buka2004/LLM-Attack-Defense/results/rdo_refusal/tensorboard/basic_rdo_DeepSeek-R1-Distill-Qwen-7B_baseline_nol=0_im=random_om=svd_581df489def0" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
 log_steps=1000
 init_mode="random" # "random" or "diag_permutation"
 orth_method="svd" # "qr" or "svd"
@@ -18,20 +18,20 @@ orth_method="svd" # "qr" or "svd"
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=0
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
 export MMLU_SAMPLE_SIZE="${MMLU_SAMPLE_SIZE:-20}"
-export MMLU_MAX_NEW_TOKENS="${MMLU_MAX_NEW_TOKENS:-32}"
+export MMLU_MAX_NEW_TOKENS="${MMLU_MAX_NEW_TOKENS:-100}"
 export MMLU_STORE_PREDICTIONS="${MMLU_STORE_PREDICTIONS:-false}"
 
 # LlamaGuard: we only need the first generated token to compute P(unsafe).
 export LLAMAGUARD_MAX_NEW_TOKENS="${LLAMAGUARD_MAX_NEW_TOKENS:-100}"
 
 # LlamaGuard eval caps (total counts, not per-category).
-export MAX_HARMFUL="${MAX_HARMFUL:-500}"
-export MAX_HARMLESS="${MAX_HARMLESS:-500}"
+export MAX_HARMFUL="${MAX_HARMFUL:-250}"
+export MAX_HARMLESS="${MAX_HARMLESS:-250}"
 
 export HF_TOKEN="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"
 
@@ -43,8 +43,8 @@ cmd=(python -m baselines.rdo_refusal \
   --llamaguard_data "${llamaguard_data}" \
   --lr "${lr}" \
   --eval_llamaguard \
-  # --eval_mmlu \
-  # --mmlu_store_predictions \
+  --eval_mmlu \
+  --mmlu_store_predictions \
   --num_opt_layers "${num_opt_layers}" \
   --init_mode "${init_mode}" \
   --orth_method "${orth_method}" \

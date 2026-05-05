@@ -2962,13 +2962,15 @@ def _evaluate_llamaguard_and_mmlu(
                     max_new_tokens=normalized["max_new_tokens"],
                     batch_size=eval_batch_size,
                     intervene_step_fn=step_fn,
-                    intervene_before_first_step=(direction_mode == "baseline"),
+                    # MMLU answers are often decided on the first generated token,
+                    # so apply intervention before first-token decoding for all modes.
+                    intervene_before_first_step=True,
                 )
                 refined_pred = [mmlu_eval.parse_choice_letter(r) for r in refined_resp]
 
             initial_rows = []
             refined_rows = []
-            for e, p in zip(entries, initial_pred):
+            for e, p, r in zip(entries, initial_pred, initial_resp):
                 initial_rows.append({
                     "index": e["index"],
                     "subject": e["subject"],
@@ -2976,10 +2978,10 @@ def _evaluate_llamaguard_and_mmlu(
                     "correct_letter": e["correct_letter"],
                     "predicted_letter": p,
                     "is_correct": p == e["correct_letter"],
-                    "raw_response": None,
+                    "raw_response": r,
                 })
             if refined_pred is not None:
-                for e, p in zip(entries, refined_pred):
+                for e, p, r in zip(entries, refined_pred, refined_resp):
                     refined_rows.append({
                         "index": e["index"],
                         "subject": e["subject"],
@@ -2987,7 +2989,7 @@ def _evaluate_llamaguard_and_mmlu(
                         "correct_letter": e["correct_letter"],
                         "predicted_letter": p,
                         "is_correct": p == e["correct_letter"],
-                        "raw_response": None,
+                        "raw_response": r,
                     })
 
             initial_summary = mmlu_eval.summarize_mmlu_predictions(initial_rows, prepared["config_snapshot"])
