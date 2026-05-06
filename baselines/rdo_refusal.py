@@ -2531,6 +2531,7 @@ def _generate_nnsight(
     batch_size: int,
     intervene_step_fn=None,
     intervene_before_first_step: bool = False,
+    intervene_every_step: bool = True,
 ) -> list[str]:
     """
     Generate decoded completions for each prompt.
@@ -2539,6 +2540,8 @@ def _generate_nnsight(
     (after invoke, before generator.next()).
     intervene_before_first_step: when True, also apply intervention once before
     the first generated token.
+    intervene_every_step: when True, apply intervention before each subsequent
+    decoding step. Set to False for one-shot interventions.
     """
     decoded: list[str] = []
     tokenizer = model.tokenizer
@@ -2554,7 +2557,7 @@ def _generate_nnsight(
                     intervene_step_fn(model)
                 out = model.generator.output.save()
                 for _ in range(max_new_tokens - 1):
-                    if intervene_step_fn is not None:
+                    if intervene_step_fn is not None and intervene_every_step:
                         intervene_step_fn(model)
                     generator.next()
 
@@ -2859,13 +2862,19 @@ def _evaluate_llamaguard_and_mmlu(
                 refined_harmless = None
                 if refined_artifact is not None:
                     step_fn = _make_refined_step_fn(refined_artifact)
+                    # Full-rank Stiefel rotations are strong; applying them on every
+                    # decoding step can over-amplify and force blanket refusals.
+                    # Keep `shtiefel_rot` as one-shot (pre-first-token) at eval time.
+                    intervene_every_step = direction_mode != "shtiefel_rot"
+                    intervene_before_first_step = (direction_mode == "baseline") or (direction_mode == "shtiefel_rot")
                     refined_harmful = _generate_nnsight(
                         model,
                         harmful_prompts,
                         max_new_tokens=eval_max_new_tokens,
                         batch_size=eval_batch_size,
                         intervene_step_fn=step_fn,
-                        intervene_before_first_step=(direction_mode == "baseline"),
+                        intervene_before_first_step=intervene_before_first_step,
+                        intervene_every_step=intervene_every_step,
                     )
                     refined_harmless = _generate_nnsight(
                         model,
@@ -2873,7 +2882,8 @@ def _evaluate_llamaguard_and_mmlu(
                         max_new_tokens=eval_max_new_tokens,
                         batch_size=eval_batch_size,
                         intervene_step_fn=step_fn,
-                        intervene_before_first_step=(direction_mode == "baseline"),
+                        intervene_before_first_step=intervene_before_first_step,
+                        intervene_every_step=intervene_every_step,
                     )
 
                 evaluator = get_llamaguard_evaluator()
@@ -2965,6 +2975,8 @@ def _evaluate_llamaguard_and_mmlu(
                     # MMLU answers are often decided on the first generated token,
                     # so apply intervention before first-token decoding for all modes.
                     intervene_before_first_step=True,
+                    # Keep behavior consistent with LlamaGuard eval for `shtiefel_rot`.
+                    intervene_every_step=(direction_mode != "shtiefel_rot"),
                 )
                 refined_pred = [mmlu_eval.parse_choice_letter(r) for r in refined_resp]
 
