@@ -130,7 +130,7 @@ DEFAULT_CONFIG = {
     'fixed_samples': 8,               # Number of fixed samples for evaluation
     'sampling_method': "hypersphere", # Method for sampling vectors ('hypersphere' or 'interpolation')
     'optimize_basis': True,           # Whether to optimize the basis vectors directly
-    'init_mode': "random", # "diag_permutation",  # Method for initializing the rotation matrices
+    'init_mode': "random", # "diag_permutation", "ab_orthogonal"  # Method for initializing the rotation matrices
     'orth_method': "svd",  # Orthogonalization method for Stiefel modes: "qr" or "svd"
     'retain_loss': False, # Whether to use KL divergence for the retain loss
 
@@ -255,7 +255,7 @@ def parse_args():
     parser.add_argument('--retain_loss', action='store_true',
                     help='Whether to use KL divergence for the retain loss')
     parser.add_argument('--init_mode', type=str, default=DEFAULT_CONFIG["init_mode"],
-                    choices=['random', 'diag_permutation', 'ones'],
+                    choices=['random', 'diag_permutation', 'ones', 'ab_orthogonal'],
                     help='Method for initializing the rotation matrices')
     parser.add_argument('--orth_method', type=str, default=DEFAULT_CONFIG["orth_method"],
                     choices=['qr', 'svd'],
@@ -1064,6 +1064,7 @@ class RefusalStiefelRotation(nn.Module):
         self.module = module
         self.dim = dim
         self._cached_matrices: list[torch.Tensor] | None = None
+        self._use_imported_cayley = False
 
         n_layers = len(self.module.layers)
         self.num_opt_layers = int(max(0, num_opt_layers))
@@ -1123,6 +1124,10 @@ class RefusalStiefelRotation(nn.Module):
             return torch.eye(self.dim, device=W.device, dtype=W.dtype)
         if self._cached_matrices is not None:
             return self._cached_matrices[layer_idx]
+        # During eval, checkpoints are already post-retraction orthogonal maps.
+        # Use them directly to avoid an extra SVD projection pass.
+        if self._use_imported_cayley:
+            return self.cayley_param[layer_idx]
         W = self.cayley_param[layer_idx]
         Q = OrthogonalProjection.apply(W)
         return Q
@@ -1168,6 +1173,7 @@ class RefusalStiefelRotation(nn.Module):
                     f"import_cayley_checkpoint: expected shape {tuple(target.shape)}, got {tuple(src.shape)}"
                 )
             target.copy_(src)
+        self._use_imported_cayley = True
         self._update_optimized_layer_idxs_from_checkpoint(self.cayley_param)
 
     def stack_directions_for_log(self) -> torch.Tensor:
@@ -1309,6 +1315,13 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         if init_mode == "random":
             self.proj_A = nn.Parameter(torch.randn(n_layers, dim, k, dtype=torch.float32, device="cuda") * 1e-3)
             self.proj_B = nn.Parameter(torch.randn(n_layers, k, dim, dtype=torch.float32, device="cuda") * 1e-3)
+        elif init_mode == "ab_orthogonal":
+            self.proj_A = nn.Parameter(torch.randn(n_layers, dim, k, dtype=torch.float32, device="cuda") * 1e-3)
+            self.proj_B = nn.Parameter(self.proj_A.transpose(-2, -1).clone().contiguous())
+            with torch.no_grad():
+                self.orthogonalize()
+            self.proj_B = nn.Parameter(self.proj_A.transpose(-2, -1).clone().contiguous())
+
         elif init_mode == "diag_permutation":
             matrices_a = []
             matrices_b = []
@@ -2530,7 +2543,7 @@ def _generate_nnsight(
     max_new_tokens: int,
     batch_size: int,
     intervene_step_fn=None,
-    intervene_before_first_step: bool = False,
+    intervene_before_first_step: bool = True,
     intervene_every_step: bool = True,
 ) -> list[str]:
     """
@@ -2553,11 +2566,13 @@ def _generate_nnsight(
 
         with model.generate(max_new_tokens=max_new_tokens, do_sample=False) as generator:
             with generator.invoke(batch):
-                if intervene_step_fn is not None and intervene_before_first_step:
+                # if intervene_step_fn is not None and intervene_before_first_step:
+                #     intervene_step_fn(model)
+                if intervene_step_fn is not None:
                     intervene_step_fn(model)
                 out = model.generator.output.save()
                 for _ in range(max_new_tokens - 1):
-                    if intervene_step_fn is not None and intervene_every_step:
+                    if intervene_step_fn is not None: # and intervene_every_step:
                         intervene_step_fn(model)
                     generator.next()
 
@@ -2855,6 +2870,14 @@ def _evaluate_llamaguard_and_mmlu(
                 harmful_prompts = apply_chat_template(model.tokenizer, harmful_q)
                 harmless_prompts = apply_chat_template(model.tokenizer, harmless_q)
 
+                # `shtiefel_rot` is optimized on next-token behavior; long free-form decoding
+                # can drift into blanket refusals and mask the intended intervention effect.
+                # Keep LlamaGuard generation aligned with the training-time decision point.
+
+                lg_max_new_tokens = 1 if direction_mode == "shtiefel_rot" else eval_max_new_tokens
+                print(f"eval_max_new_tokens: {eval_max_new_tokens}")
+                print(f"lg_max_new_tokens: {lg_max_new_tokens}")
+
                 initial_harmful = _generate_nnsight(model, harmful_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size)
                 initial_harmless = _generate_nnsight(model, harmless_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size)
 
@@ -2862,27 +2885,23 @@ def _evaluate_llamaguard_and_mmlu(
                 refined_harmless = None
                 if refined_artifact is not None:
                     step_fn = _make_refined_step_fn(refined_artifact)
-                    # Full-rank Stiefel rotations are strong; applying them on every
-                    # decoding step can over-amplify and force blanket refusals.
-                    # Keep `shtiefel_rot` as one-shot (pre-first-token) at eval time.
-                    intervene_every_step = direction_mode != "shtiefel_rot"
-                    intervene_before_first_step = (direction_mode == "baseline") or (direction_mode == "shtiefel_rot")
+                    # For single-token `shtiefel_rot` eval, intervention must happen before
+                    # the first decode step; otherwise no intervention is applied.
+                    intervene_every_step = True
                     refined_harmful = _generate_nnsight(
                         model,
                         harmful_prompts,
-                        max_new_tokens=eval_max_new_tokens,
+                        max_new_tokens=lg_max_new_tokens,
                         batch_size=eval_batch_size,
                         intervene_step_fn=step_fn,
-                        intervene_before_first_step=intervene_before_first_step,
                         intervene_every_step=intervene_every_step,
                     )
                     refined_harmless = _generate_nnsight(
                         model,
                         harmless_prompts,
-                        max_new_tokens=eval_max_new_tokens,
+                        max_new_tokens=lg_max_new_tokens,
                         batch_size=eval_batch_size,
                         intervene_step_fn=step_fn,
-                        intervene_before_first_step=intervene_before_first_step,
                         intervene_every_step=intervene_every_step,
                     )
 
@@ -2974,7 +2993,6 @@ def _evaluate_llamaguard_and_mmlu(
                     intervene_step_fn=step_fn,
                     # MMLU answers are often decided on the first generated token,
                     # so apply intervention before first-token decoding for all modes.
-                    intervene_before_first_step=True,
                     # Keep behavior consistent with LlamaGuard eval for `shtiefel_rot`.
                     intervene_every_step=(direction_mode != "shtiefel_rot"),
                 )

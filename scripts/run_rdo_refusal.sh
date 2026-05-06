@@ -11,14 +11,15 @@ llamaguard_data="basic" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "b
 lr=1e-5
 max_iters=100000
 result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
-log_steps=100
-init_mode="random" # "random" or "diag_permutation"
+log_steps=1000
+init_mode="ab_orthogonal" # "random", "diag_permutation", or "ab_orthogonal"
 orth_method="svd" # "qr" or "svd"
+eval_max_new_tokens=256 # inportant param for llama guard eval
 
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=0
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -30,8 +31,8 @@ export MMLU_STORE_PREDICTIONS="${MMLU_STORE_PREDICTIONS:-false}"
 export LLAMAGUARD_MAX_NEW_TOKENS="${LLAMAGUARD_MAX_NEW_TOKENS:-100}"
 
 # LlamaGuard eval caps (total counts, not per-category).
-export MAX_HARMFUL="${MAX_HARMFUL:-250}"
-export MAX_HARMLESS="${MAX_HARMLESS:-250}"
+export MAX_HARMFUL="${MAX_HARMFUL:-250}" # 250
+export MAX_HARMLESS="${MAX_HARMLESS:-250}" # 250
 
 export HF_TOKEN="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"
 
@@ -49,10 +50,11 @@ cmd=(python -m baselines.rdo_refusal \
   --init_mode "${init_mode}" \
   --orth_method "${orth_method}" \
   --log_steps "${log_steps}" \
+  --eval_max_new_tokens "${eval_max_new_tokens}" \
   # --retain_loss \
 )
 
-# --init_mode: "random" or "diag_permutation"
+# --init_mode: "random", "diag_permutation", or "ab_orthogonal"
 
 # Reuse an existing run dir (skip training) if provided.
 if [[ -n "${result_path}" ]]; then
