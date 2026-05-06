@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import traceback
+import time
 from nnsight import LanguageModel
 from nnsight.envoy import Envoy
 from torch.utils.data import DataLoader
@@ -132,6 +133,7 @@ DEFAULT_CONFIG = {
     'optimize_basis': True,           # Whether to optimize the basis vectors directly
     'init_mode': "random", # "diag_permutation", "ab_orthogonal"  # Method for initializing the rotation matrices
     'orth_method': "svd",  # Orthogonalization method for Stiefel modes: "qr" or "svd"
+    'proj_reduce_ratio': 10,  # Reduction ratio for shtiefel_proj_rot low-rank factors (k = dim // ratio)
     'retain_loss': False, # Whether to use KL divergence for the retain loss
 
     # Loss weights
@@ -260,6 +262,12 @@ def parse_args():
     parser.add_argument('--orth_method', type=str, default=DEFAULT_CONFIG["orth_method"],
                     choices=['qr', 'svd'],
                     help='Orthogonalization method for Stiefel modes')
+    parser.add_argument(
+        '--proj_reduce_ratio',
+        type=int,
+        default=DEFAULT_CONFIG["proj_reduce_ratio"],
+        help='(shtiefel_proj_rot) Low-rank reduction ratio, where k = hidden_size // proj_reduce_ratio',
+    )
 
     # Loss weights
     parser.add_argument('--ablation_lambda', type=float, default=DEFAULT_CONFIG['ablation_lambda'],
@@ -327,14 +335,15 @@ MODEL_PATH = args.model
 
 
 def _tb_dir_frz_suffix(train_kwargs: dict | None = None) -> str:
-    """Short TensorBoard dirname segment: nol=num_opt_layers, im=init_mode, om=orth_method."""
+    """Short TensorBoard dirname segment: nol=num_opt_layers, prr=proj_reduce_ratio, im=init_mode, om=orth_method."""
     k = train_kwargs or {}
     nol = int(k.get("num_opt_layers", getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8))))
+    prr = int(k.get("proj_reduce_ratio", getattr(args, "proj_reduce_ratio", DEFAULT_CONFIG.get("proj_reduce_ratio", 10))))
     im = k.get("init_mode", getattr(args, "init_mode", DEFAULT_CONFIG.get("init_mode", "random")))
     om = k.get("orth_method", getattr(args, "orth_method", DEFAULT_CONFIG.get("orth_method", "svd")))
     im = str(im).replace(os.sep, "_").replace("/", "_").replace(" ", "_")
     om = str(om).replace(os.sep, "_").replace("/", "_").replace(" ", "_")
-    return f"nol={nol}_im={im}_om={om}"
+    return f"nol={nol}_prr={prr}_im={im}_om={om}"
 
 
 # Apply configuration values
@@ -1356,6 +1365,8 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
 
         self.register_buffer("cayley_param", torch.zeros(n_layers, dim, dim, dtype=torch.float32, device="cuda"))
         self._use_composed_cayley = False
+        self._add_total_time_sec = 0.0
+        self._add_call_count = 0
 
         with torch.no_grad():
             self.orthogonalize()
@@ -1434,6 +1445,30 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
 
     def parameters(self):
         return [self.proj_A, self.proj_B]
+
+    def add(self, direction, alpha, layer_idx, best_layer: int = None):
+        start_t = time.perf_counter()
+        super().add(direction, alpha, layer_idx, best_layer)
+        self._add_total_time_sec += (time.perf_counter() - start_t)
+        self._add_call_count += 1
+
+    def resources_summary(self) -> dict:
+        proj_a_params = int(self.proj_A.numel())
+        proj_b_params = int(self.proj_B.numel())
+        total_proj_params = proj_a_params + proj_b_params
+        mean_add_time_sec = (
+            self._add_total_time_sec / self._add_call_count
+            if self._add_call_count > 0
+            else 0.0
+        )
+        return {
+            "proj_A_num_params": proj_a_params,
+            "proj_B_num_params": proj_b_params,
+            "proj_total_num_params": total_proj_params,
+            "add_call_count": int(self._add_call_count),
+            "add_total_time_sec": float(self._add_total_time_sec),
+            "add_mean_time_sec": float(mean_add_time_sec),
+        }
 
 
 class RefusalAngularSteeringRotation(RefusalStiefelRotation):
@@ -1801,6 +1836,22 @@ def _write_tb_checkpoint_layer_artifacts(
     torch.save(state, os.path.join(tb_checkpoint_dir, "active_layers.pt"))
 
 
+def _write_tb_checkpoint_resources(tb_checkpoint_dir: str, operation) -> None:
+    """Write resource metrics to checkpoint resources text file."""
+    if tb_checkpoint_dir is None:
+        return
+    if not hasattr(operation, "resources_summary"):
+        return
+    resources = operation.resources_summary()
+    lines = [
+        f"{k}: {v}"
+        for k, v in resources.items()
+    ]
+    out_path = os.path.join(tb_checkpoint_dir, "resoulres.txt")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def refusal_cone_optimization(model, train_dataset, 
                               batch_size=DEFAULT_CONFIG['batch_size'], 
                               effective_batch_size=DEFAULT_CONFIG['effective_batch_size'], 
@@ -1821,6 +1872,7 @@ def refusal_cone_optimization(model, train_dataset,
                               n_lr_reduce=DEFAULT_CONFIG['n_lr_reduce'], 
                               orthogonal_vectors=[],
                               num_opt_layers: int = DEFAULT_CONFIG.get('num_opt_layers', 8),
+                              proj_reduce_ratio: int = DEFAULT_CONFIG.get('proj_reduce_ratio', 10),
                               tb_writer=None,
                               tb_checkpoint_dir=None,
                               direction_mode=DEFAULT_CONFIG['direction_mode'],
@@ -1879,6 +1931,7 @@ def refusal_cone_optimization(model, train_dataset,
             init_vectors=init_vectors,
             init_mode=args.init_mode,
             orth_method=args.orth_method,
+            proj_reduce_ratio=proj_reduce_ratio,
             num_opt_layers=num_opt_layers,
             best_layer=best_layer,
         )
@@ -2283,6 +2336,7 @@ def refusal_cone_optimization(model, train_dataset,
             best_layer,
             num_opt_layers,
         )
+        _write_tb_checkpoint_resources(tb_checkpoint_dir, operation)
         
 
     return {
@@ -2314,6 +2368,7 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
         "orthogonal_vectors": orthogonal_vectors,
         "direction_mode": args.direction_mode,
         "num_opt_layers": getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8)),
+        "proj_reduce_ratio": getattr(args, "proj_reduce_ratio", DEFAULT_CONFIG.get("proj_reduce_ratio", 10)),
         "log_steps": getattr(args, "log_steps", DEFAULT_CONFIG["log_steps"]),
     }
     train_kwargs.update(kwargs) # Apply any user-provided overrides
@@ -2834,6 +2889,7 @@ def _evaluate_llamaguard_and_mmlu(
                     init_vectors=[],
                     init_mode=args.init_mode,
                     orth_method=args.orth_method,
+                    proj_reduce_ratio=getattr(args, "proj_reduce_ratio", DEFAULT_CONFIG.get("proj_reduce_ratio", 10)),
                     num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8)),
                     best_layer=best_layer,
                 )
@@ -3091,6 +3147,10 @@ def train_refusal_cone(group_name, run_name, init_vectors, **kwargs):
     train_kwargs.setdefault(
         "num_opt_layers",
         getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8)),
+    )
+    train_kwargs.setdefault(
+        "proj_reduce_ratio",
+        getattr(args, "proj_reduce_ratio", DEFAULT_CONFIG.get("proj_reduce_ratio", 10)),
     )
     train_kwargs.setdefault(
         "log_steps",

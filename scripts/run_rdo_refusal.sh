@@ -12,14 +12,15 @@ lr=1e-5
 max_iters=100000
 result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
 log_steps=1000
-init_mode="ab_orthogonal" # "random", "diag_permutation", or "ab_orthogonal"
+init_mode="diag_permutation" # "random", "diag_permutation", or "ab_orthogonal"
 orth_method="svd" # "qr" or "svd"
+proj_reduce_ratio=1000 # used when direction_mode="shtiefel_proj_rot" (k = hidden_size / ratio)
 eval_max_new_tokens=256 # inportant param for llama guard eval
 
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=3
+export CUDA_VISIBLE_DEVICES=7
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -47,6 +48,7 @@ cmd=(python -m baselines.rdo_refusal \
   --eval_mmlu \
   --mmlu_store_predictions \
   --num_opt_layers "${num_opt_layers}" \
+  --proj_reduce_ratio "${proj_reduce_ratio}" \
   --init_mode "${init_mode}" \
   --orth_method "${orth_method}" \
   --log_steps "${log_steps}" \
