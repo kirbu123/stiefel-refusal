@@ -1318,10 +1318,6 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         elif init_mode == "ab_orthogonal":
             self.proj_A = nn.Parameter(torch.randn(n_layers, dim, k, dtype=torch.float32, device="cuda") * 1e-3)
             self.proj_B = nn.Parameter(self.proj_A.transpose(-2, -1).clone().contiguous())
-            with torch.no_grad():
-                self.orthogonalize()
-            self.proj_B = nn.Parameter(self.proj_A.transpose(-2, -1).clone().contiguous())
-
         elif init_mode == "diag_permutation":
             matrices_a = []
             matrices_b = []
@@ -1363,6 +1359,11 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
 
         with torch.no_grad():
             self.orthogonalize()
+            if init_mode == "ab_orthogonal":
+                # Keep B independent, but initialize it from orthogonalized A^T.
+                for layer_idx in self._optimized_layer_idxs:
+                    self.proj_B[layer_idx].copy_(self.proj_A[layer_idx].transpose(-2, -1).contiguous())
+                    self.cayley_param[layer_idx].copy_(self.proj_A[layer_idx] @ self.proj_B[layer_idx])
 
     def import_cayley_checkpoint(self, composed: torch.Tensor) -> None:
         """Load per-layer composed maps (n_layers, dim, dim) for eval; use ``matrix`` from buffer."""

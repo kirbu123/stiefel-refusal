@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 
 # variables
 direction_mode="shtiefel_proj_rot" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot", "angular_steering", "householder_pseudo_rotation"
-num_opt_layers=0 # optimize this many middle layers (plus best layer during intervention)
+num_opt_layers=5 # optimize this many middle layers (plus best layer during intervention)
 llamaguard_data="basic" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
 lr=1e-5
 max_iters=100000
@@ -19,7 +19,7 @@ eval_max_new_tokens=256 # inportant param for llama guard eval
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=3
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
