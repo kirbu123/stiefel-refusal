@@ -8,33 +8,51 @@ cd "$(dirname "$0")/.."
 direction_mode="shtiefel_proj_rot" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot", "angular_steering", "householder_pseudo_rotation"
 num_opt_layers=1 # optimize this many middle layers (plus best layer during intervention)
 llamaguard_data="basic" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
+eval_guard_backends=("llamaguard" "qwen3guard" "wildguard") # any subset of: "llamaguard" "qwen3guard" "wildguard"
 lr=1e-5
 optimizer="SGD" # "Adam", "AdamW", "SGD"
-max_iters=100000
-result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
+max_iters=1000
+result_path="/home/user1/buka2004/LLM-Attack-Defense/results/rdo_refusal/tensorboard/basic_rdo_DeepSeek-R1-Distill-Qwen-7B_shtiefel_proj_rot_nol=1_prr=10_im=diag_permutation_om=svd_b63bb4c7bbc0" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
 log_steps=1000
 init_mode="diag_permutation" # "random", "diag_permutation", or "ab_orthogonal"
 orth_method="svd" # "qr" or "svd"
 proj_reduce_ratio=10 # used when direction_mode="shtiefel_proj_rot" (k = hidden_size / ratio)
+
+# LlamaGuard eval config
 eval_max_new_tokens=256 # inportant param for llama guard eval
+MAX_HARMFUL=100
+MAX_HARMLESS=100
+
+# MMLU eval config
+enable_mmlu_eval=true
+mmlu_dataset="cais/mmlu"
+mmlu_subset="all"
+mmlu_split="test" # train|val|test
+mmlu_mode="zero_shot" # zero_shot|few_shot
+mmlu_answer_mode="logits" # generate|logits
+mmlu_n_shots=5
+mmlu_sample_size=100
+mmlu_sample_seed=42
+mmlu_max_new_tokens=8
+mmlu_store_predictions=false
 
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=4,5
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
-export MMLU_SAMPLE_SIZE="${MMLU_SAMPLE_SIZE:-250}"
-export MMLU_MAX_NEW_TOKENS="${MMLU_MAX_NEW_TOKENS:-100}"
-export MMLU_STORE_PREDICTIONS="${MMLU_STORE_PREDICTIONS:-false}"
+export MMLU_SAMPLE_SIZE="${MMLU_SAMPLE_SIZE:-$mmlu_sample_size}"
+export MMLU_MAX_NEW_TOKENS="${MMLU_MAX_NEW_TOKENS:-$mmlu_max_new_tokens}"
+export MMLU_STORE_PREDICTIONS="${MMLU_STORE_PREDICTIONS:-$mmlu_store_predictions}"
 
 # LlamaGuard: we only need the first generated token to compute P(unsafe).
 export LLAMAGUARD_MAX_NEW_TOKENS="${LLAMAGUARD_MAX_NEW_TOKENS:-100}"
 
 # LlamaGuard eval caps (total counts, not per-category).
-export MAX_HARMFUL="${MAX_HARMFUL:-250}" # 250
-export MAX_HARMLESS="${MAX_HARMLESS:-250}" # 250
+export MAX_HARMFUL="${MAX_HARMFUL}" # 250
+export MAX_HARMLESS="${MAX_HARMLESS}" # 250
 
 export HF_TOKEN="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"
 
@@ -47,14 +65,21 @@ cmd=(python -m baselines.rdo_refusal \
   --lr "${lr}" \
   --optimizer "${optimizer}" \
   --eval_llamaguard \
-  # --eval_mmlu \
-  # --mmlu_store_predictions \
   --num_opt_layers "${num_opt_layers}" \
   --proj_reduce_ratio "${proj_reduce_ratio}" \
   --init_mode "${init_mode}" \
   --orth_method "${orth_method}" \
   --log_steps "${log_steps}" \
   --eval_max_new_tokens "${eval_max_new_tokens}" \
+  --mmlu_dataset "${mmlu_dataset}" \
+  --mmlu_subset "${mmlu_subset}" \
+  --mmlu_split "${mmlu_split}" \
+  --mmlu_mode "${mmlu_mode}" \
+  --mmlu_answer_mode "${mmlu_answer_mode}" \
+  --mmlu_n_shots "${mmlu_n_shots}" \
+  --mmlu_sample_size "${MMLU_SAMPLE_SIZE}" \
+  --mmlu_sample_seed "${mmlu_sample_seed}" \
+  --mmlu_max_new_tokens "${MMLU_MAX_NEW_TOKENS}" \
   # --retain_loss \
 )
 
@@ -63,6 +88,16 @@ cmd=(python -m baselines.rdo_refusal \
 # Reuse an existing run dir (skip training) if provided.
 if [[ -n "${result_path}" ]]; then
   cmd+=(--result_path "${result_path}")
+fi
+
+# cmd+=(--eval_guard_backend "${eval_guard_backends[@]}")
+
+if [[ "${enable_mmlu_eval}" == "true" ]]; then
+  cmd+=(--eval_mmlu)
+fi
+
+if [[ "${MMLU_STORE_PREDICTIONS}" == "true" ]]; then
+  cmd+=(--mmlu_store_predictions)
 fi
 
 # Optional eval flags:

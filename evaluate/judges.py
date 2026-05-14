@@ -285,6 +285,8 @@ def evaluate_harmfulness(
     Supported backends:
     - local_llm_judge (default)
     - llamaguard
+    - wildguard
+    - qwen3guard
     """
     selected_backend = (backend or EVALUATION_BACKEND).strip().lower()
 
@@ -292,6 +294,22 @@ def evaluate_harmfulness(
         from evaluate.evaluation_llamaguard import get_llamaguard_evaluator
 
         evaluator = get_llamaguard_evaluator()
+        result = evaluator.evaluate(question, response)
+        result.setdefault("category_id", "unknown")
+        return result
+
+    if selected_backend == "wildguard":
+        from evaluate.evaluation_wildguard import get_wildguard_evaluator
+
+        evaluator = get_wildguard_evaluator()
+        result = evaluator.evaluate(question, response)
+        result.setdefault("category_id", "unknown")
+        return result
+
+    if selected_backend == "qwen3guard":
+        from evaluate.evaluation_qwen3guard import get_qwen3guard_evaluator
+
+        evaluator = get_qwen3guard_evaluator()
         result = evaluator.evaluate(question, response)
         result.setdefault("category_id", "unknown")
         return result

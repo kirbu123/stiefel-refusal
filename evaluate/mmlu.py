@@ -19,10 +19,9 @@ from typing import Any, Iterable
 from config import MMLU_CONFIG, PROJECT_ROOT, RESULTS_DIR
 from data_utils import extract_response_after_think
 from evaluate.model_scoring import (
-    batchify,
     build_chat_prompts,
     generate_responses,
-    score_completion_logprob,
+    get_next_token_logprobs,
     score_text_choice_variants,
 )
 
@@ -53,6 +52,11 @@ def normalize_mmlu_config(config: dict[str, Any] | None = None) -> dict[str, Any
     if sample_size in ("", "none", "null", "all"):
         sample_size = None
     normalized["sample_size"] = None if sample_size is None else int(sample_size)
+
+    if normalized["mode"] not in ("zero_shot", "few_shot"):
+        raise ValueError(f"Unsupported MMLU mode: {normalized['mode']}")
+    if normalized["answer_mode"] not in ("generate", "logits"):
+        raise ValueError(f"Unsupported MMLU answer_mode: {normalized['answer_mode']}")
 
     if normalized["mode"] == "zero_shot":
         normalized["n_shots"] = 0
@@ -103,18 +107,7 @@ def parse_choice_letter(text: str) -> str | None:
     if len(stripped) == 1 and stripped in CHOICE_LETTERS:
         return stripped[:1]
 
-    # Common explicit answer patterns.
-    match = re.search(r"\b(?:FINAL\s+ANSWER|ANSWER)\s*[:\-]?\s*\(?([ABCD])\)?\b", stripped)
-    if match:
-        return match.group(1)
-
-    # Leading single-letter style: "A", "(B)", "C.", "D)".
-    match = re.match(r"^\s*\(?([ABCD])\)?(?:[\.\):\-]|\s|$)", stripped)
-    if match:
-        return match.group(1)
-
-    # Generic fallback: first standalone letter token in the response.
-    match = re.search(r"\b([ABCD])\b", stripped)
+    match = re.search(r"\b(?:ANSWER\s*:?\s*)?([ABCD])\b", stripped)
     if match:
         return match.group(1)
 
@@ -328,11 +321,77 @@ def _build_chat_prompts(model: Any, prompts: list[str]) -> list[str]:
     return build_chat_prompts(model, prompts)
 
 
-def _score_completion_logprob(model: Any, prompt_text: str, completion_text: str) -> float:
-    return score_completion_logprob(model, prompt_text, completion_text)
+def _choice_letter_token_ids(model: Any) -> dict[str, tuple[int, ...]] | None:
+    token_ids_by_letter: dict[str, tuple[int, ...]] = {}
+
+    for letter in CHOICE_LETTERS:
+        token_ids = []
+        for variant in (letter, f" {letter}"):
+            encoded = model.tokenizer(
+                variant,
+                return_token_type_ids=False,
+                add_special_tokens=False,
+            )["input_ids"]
+            if len(encoded) != 1:
+                return None
+            token_ids.append(int(encoded[0]))
+        token_ids_by_letter[letter] = tuple(dict.fromkeys(token_ids))
+
+    return token_ids_by_letter
+
+
+def _predict_with_logits_fast(
+    model: Any,
+    entries: list[dict[str, Any]],
+    token_ids_by_letter: dict[str, tuple[int, ...]],
+) -> list[dict[str, Any]]:
+    if not entries:
+        return []
+
+    candidate_token_ids = sorted(
+        {token_id for token_ids in token_ids_by_letter.values() for token_id in token_ids}
+    )
+    gathered_scores = get_next_token_logprobs(
+        model,
+        [entry["prompt"] for entry in entries],
+        token_ids=candidate_token_ids,
+    )
+    gathered_index_by_token_id = {
+        token_id: index for index, token_id in enumerate(candidate_token_ids)
+    }
+
+    rows = []
+    for entry, prompt_scores in zip(entries, gathered_scores):
+        choice_scores = {}
+        for letter in CHOICE_LETTERS:
+            choice_scores[letter] = max(
+                float(prompt_scores[gathered_index_by_token_id[token_id]].item())
+                for token_id in token_ids_by_letter[letter]
+            )
+
+        predicted = max(choice_scores, key=choice_scores.get)
+        rows.append(
+            {
+                "index": entry["index"],
+                "subject": entry["subject"],
+                "question": entry["question"],
+                "choices": entry["choices"],
+                "correct_letter": entry["correct_letter"],
+                "predicted_letter": predicted,
+                "is_correct": predicted == entry["correct_letter"],
+                "raw_response": None,
+                "choice_scores": choice_scores,
+            }
+        )
+
+    return rows
 
 
 def _predict_with_logits(model: Any, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    token_ids_by_letter = _choice_letter_token_ids(model)
+    if token_ids_by_letter is not None:
+        return _predict_with_logits_fast(model, entries, token_ids_by_letter)
+
     rows = []
     chat_prompts = _build_chat_prompts(model, [entry["prompt"] for entry in entries])
 

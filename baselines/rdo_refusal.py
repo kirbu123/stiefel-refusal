@@ -1,6 +1,7 @@
 # %%
 import argparse
 import copy
+import csv
 import json
 import os
 import os.path
@@ -34,6 +35,8 @@ from generate_utils import (projection_einops,
 from scoring import refusal_metric, get_bypass_scores 
 
 from evaluate.evaluation_llamaguard import get_llamaguard_evaluator, unload_llamaguard_evaluator
+from evaluate.evaluation_qwen3guard import get_qwen3guard_evaluator, unload_qwen3guard_evaluator
+from evaluate.evaluation_wildguard import get_wildguard_evaluator, unload_wildguard_evaluator
 from evaluate import mmlu as mmlu_eval
 
 dotenv.load_dotenv(override=True)
@@ -153,12 +156,14 @@ DEFAULT_CONFIG = {
     'eval_mmlu': False,
     'eval_split': "val",              # {train,val,test} -> data/{splits}_splits/*_{eval_split}.json
     'llamaguard_data': "rdo",         # rdo -> split jsons, basic -> cached basic-refusal eval targets
+    'eval_guard_backend': ['llamaguard'],  # Guard evaluator backends: llamaguard | qwen3guard | wildguard
     'eval_max_new_tokens': 256,
     'eval_batch_size': 8,
 
     # MMLU evaluation (subset of evaluate/mmlu.py config)
     'mmlu_dataset': "cais/mmlu",
     'mmlu_subset': "all",
+    'mmlu_split': "test",
     'mmlu_mode': "zero_shot",
     'mmlu_answer_mode': "generate",
     'mmlu_n_shots': 5,
@@ -312,6 +317,9 @@ def parse_args():
     parser.add_argument('--llamaguard_data', type=str, default=DEFAULT_CONFIG['llamaguard_data'],
                     choices=['rdo', 'basic'],
                     help='LlamaGuard eval data source: rdo uses data/{splits}_splits/*_{eval_split}.json, basic uses cached basic-refusal targets')
+    parser.add_argument('--eval_guard_backend', type=str, nargs='+', action='append', default=None,
+                    choices=['llamaguard', 'qwen3guard', 'wildguard'],
+                    help='One or more guard evaluator backends to score eval generations')
     parser.add_argument('--eval_max_new_tokens', type=int, default=DEFAULT_CONFIG['eval_max_new_tokens'],
                     help='Max new tokens for generation during LlamaGuard eval')
     parser.add_argument('--eval_batch_size', type=int, default=DEFAULT_CONFIG['eval_batch_size'],
@@ -320,11 +328,12 @@ def parse_args():
     # MMLU
     parser.add_argument('--mmlu_dataset', type=str, default=DEFAULT_CONFIG['mmlu_dataset'])
     parser.add_argument('--mmlu_subset', type=str, default=DEFAULT_CONFIG['mmlu_subset'])
+    parser.add_argument('--mmlu_split', type=str, default=DEFAULT_CONFIG['mmlu_split'],
+                    choices=['train', 'val', 'test'])
     parser.add_argument('--mmlu_mode', type=str, default=DEFAULT_CONFIG['mmlu_mode'],
                     choices=['zero_shot', 'few_shot'])
     parser.add_argument('--mmlu_answer_mode', type=str, default=DEFAULT_CONFIG['mmlu_answer_mode'],
-                    choices=['generate'],
-                    help='Only generate-mode is supported in rdo_refusal.py')
+                    choices=['generate', 'logits'])
     parser.add_argument('--mmlu_n_shots', type=int, default=DEFAULT_CONFIG['mmlu_n_shots'])
     parser.add_argument('--mmlu_sample_size', type=int, default=DEFAULT_CONFIG['mmlu_sample_size'])
     parser.add_argument('--mmlu_sample_seed', type=int, default=DEFAULT_CONFIG['mmlu_sample_seed'])
@@ -2462,7 +2471,7 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
             "enabled": True,
             "dataset": args.mmlu_dataset,
             "subset": args.mmlu_subset,
-            "split": "test",
+            "split": args.mmlu_split,
             "mode": args.mmlu_mode,
             "answer_mode": args.mmlu_answer_mode,
             "n_shots": args.mmlu_n_shots,
@@ -2479,6 +2488,7 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
             splits_name=args.splits,
             eval_split=args.eval_split,
             llamaguard_data_mode=args.llamaguard_data,
+            eval_guard_backend=args.eval_guard_backend,
             model_name=model_id,
             eval_max_new_tokens=args.eval_max_new_tokens,
             eval_batch_size=args.eval_batch_size,
@@ -2491,6 +2501,96 @@ def _safe_json_dump(path: str, payload: dict) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+def _eval_payload_to_major_metrics_rows(payload: dict) -> list[dict]:
+    rows: list[dict] = []
+
+    # Guard metrics (all configured backends)
+    guard_metrics = payload.get("guard_metrics") or {}
+    for backend, backend_block in guard_metrics.items():
+        for harm_kind in ("harmful", "harmless"):
+            split_block = backend_block.get(harm_kind) or {}
+            for phase in ("initial", "refined"):
+                stats = split_block.get(phase) or {}
+                for metric_name in ("n", "mean_score", "mean_unsafe_probability", "pct_unsafe"):
+                    metric_val = stats.get(metric_name)
+                    if metric_val is None:
+                        continue
+                    rows.append(
+                        {
+                            "benchmark": "guard",
+                            "backend": backend,
+                            "group": harm_kind,
+                            "phase": phase,
+                            "metric": metric_name,
+                            "value": metric_val,
+                        }
+                    )
+
+    # Backward-compatible single-backend key if present.
+    if payload.get("llamaguard") and "llamaguard" not in guard_metrics:
+        block = payload["llamaguard"]
+        for harm_kind in ("harmful", "harmless"):
+            split_block = block.get(harm_kind) or {}
+            for phase in ("initial", "refined"):
+                stats = split_block.get(phase) or {}
+                for metric_name in ("n", "mean_score", "mean_unsafe_probability", "pct_unsafe"):
+                    metric_val = stats.get(metric_name)
+                    if metric_val is None:
+                        continue
+                    rows.append(
+                        {
+                            "benchmark": "guard",
+                            "backend": "llamaguard",
+                            "group": harm_kind,
+                            "phase": phase,
+                            "metric": metric_name,
+                            "value": metric_val,
+                        }
+                    )
+
+    # MMLU major metrics
+    mmlu = payload.get("mmlu") or {}
+    for phase in ("initial", "refined"):
+        phase_stats = mmlu.get(phase) or {}
+        for metric_name in ("accuracy", "correct", "total", "invalid_predictions"):
+            metric_val = phase_stats.get(metric_name)
+            if metric_val is None:
+                continue
+            rows.append(
+                {
+                    "benchmark": "mmlu",
+                    "backend": "",
+                    "group": "",
+                    "phase": phase,
+                    "metric": metric_name,
+                    "value": metric_val,
+                }
+            )
+    if mmlu.get("delta_accuracy") is not None:
+        rows.append(
+            {
+                "benchmark": "mmlu",
+                "backend": "",
+                "group": "",
+                "phase": "delta",
+                "metric": "accuracy",
+                "value": mmlu.get("delta_accuracy"),
+            }
+        )
+
+    return rows
+
+
+def _safe_eval_metrics_csv_dump(path: str, payload: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    rows = _eval_payload_to_major_metrics_rows(payload)
+    fieldnames = ["benchmark", "backend", "group", "phase", "metric", "value"]
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def _load_training_results_from_result_path(result_path: str, direction_mode: str) -> dict:
@@ -2754,6 +2854,59 @@ def _aggregate_llamaguard(results: list[dict]) -> dict:
     }
 
 
+def _get_guard_evaluator(backend: str):
+    backend = str(backend).strip().lower()
+    if backend == "llamaguard":
+        return get_llamaguard_evaluator()
+    if backend == "qwen3guard":
+        return get_qwen3guard_evaluator()
+    if backend == "wildguard":
+        return get_wildguard_evaluator()
+    raise ValueError(f"Unsupported eval_guard_backend: {backend}")
+
+
+def _unload_guard_evaluator(backend: str) -> None:
+    backend = str(backend).strip().lower()
+    if backend == "llamaguard":
+        unload_llamaguard_evaluator()
+        return
+    if backend == "qwen3guard":
+        unload_qwen3guard_evaluator()
+        return
+    if backend == "wildguard":
+        unload_wildguard_evaluator()
+        return
+    raise ValueError(f"Unsupported eval_guard_backend: {backend}")
+
+
+def _normalize_guard_backends(backends) -> list[str]:
+    if backends is None:
+        return ["llamaguard"]
+    if isinstance(backends, str):
+        values = [v.strip().lower() for v in backends.split(",") if v.strip()]
+    else:
+        values = []
+        for item in backends:
+            if isinstance(item, (list, tuple)):
+                values.extend(str(v).strip().lower() for v in item if str(v).strip())
+            else:
+                sv = str(item).strip().lower()
+                if sv:
+                    values.append(sv)
+
+    if not values:
+        return ["llamaguard"]
+
+    allowed = {"llamaguard", "qwen3guard", "wildguard"}
+    normalized = []
+    for v in values:
+        if v not in allowed:
+            raise ValueError(f"Unsupported eval_guard_backend: {v}")
+        if v not in normalized:
+            normalized.append(v)
+    return normalized
+
+
 def _load_eval_split_json(splits_name: str, kind: str, split: str) -> list[dict]:
     path = f"data/{splits_name}_splits/{kind}_{split}.json"
     return json.load(open(path, "r", encoding="utf-8"))
@@ -2838,6 +2991,7 @@ def _evaluate_llamaguard_and_mmlu(
     splits_name: str,
     eval_split: str,
     llamaguard_data_mode: str,
+    eval_guard_backend,
     model_name: str,
     eval_max_new_tokens: int,
     eval_batch_size: int,
@@ -2849,11 +3003,13 @@ def _evaluate_llamaguard_and_mmlu(
     """
     eval_writer = SummaryWriter(log_dir=tb_run_dir)
     try:
+        guard_backends = _normalize_guard_backends(eval_guard_backend)
         payload: dict = {
             "saved_at": datetime.now().isoformat(),
             "direction_mode": direction_mode,
             "eval_split": eval_split,
             "llamaguard_data_mode": llamaguard_data_mode,
+            "eval_guard_backends": guard_backends,
         }
 
         def _make_refined_step_fn(refined_artifact):
@@ -2952,8 +3108,8 @@ def _evaluate_llamaguard_and_mmlu(
                 print(f"eval_max_new_tokens: {eval_max_new_tokens}")
                 print(f"lg_max_new_tokens: {lg_max_new_tokens}")
 
-                initial_harmful = _generate_nnsight(model, harmful_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size)
-                initial_harmless = _generate_nnsight(model, harmless_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size)
+                initial_harmful = _generate_nnsight(model, harmful_prompts, max_new_tokens=lg_max_new_tokens, batch_size=eval_batch_size)
+                initial_harmless = _generate_nnsight(model, harmless_prompts, max_new_tokens=lg_max_new_tokens, batch_size=eval_batch_size)
 
                 refined_harmful = None
                 refined_harmless = None
@@ -2979,37 +3135,67 @@ def _evaluate_llamaguard_and_mmlu(
                         intervene_every_step=intervene_every_step,
                     )
 
-                evaluator = get_llamaguard_evaluator()
-                initial_harmful_results = evaluator.evaluate_batch(list(zip(harmful_q, initial_harmful)), progress_every=20)
-                initial_harmless_results = evaluator.evaluate_batch(list(zip(harmless_q, initial_harmless)), progress_every=20)
-                refined_harmful_results = evaluator.evaluate_batch(list(zip(harmful_q, refined_harmful)), progress_every=20) if refined_harmful is not None else None
-                refined_harmless_results = evaluator.evaluate_batch(list(zip(harmless_q, refined_harmless)), progress_every=20) if refined_harmless is not None else None
-
-                llamaguard_block = {
-                    "harmful": {
-                        "initial": _aggregate_llamaguard(initial_harmful_results),
-                        "refined": _aggregate_llamaguard(refined_harmful_results) if refined_harmful_results is not None else None,
-                    },
-                    "harmless": {
-                        "initial": _aggregate_llamaguard(initial_harmless_results),
-                        "refined": _aggregate_llamaguard(refined_harmless_results) if refined_harmless_results is not None else None,
-                    },
-                }
-                payload["llamaguard"] = llamaguard_block
+                guard_metrics = {}
+                guard_errors = {}
 
                 # TensorBoard scalars (step=0)
-                def _log_lg(prefix: str, stats: dict | None):
+                def _log_guard(backend: str, prefix: str, stats: dict | None):
                     if not stats:
                         return
                     if stats.get("mean_score") is not None:
-                        eval_writer.add_scalar(f"eval/llamaguard/{prefix}_mean_score", stats["mean_score"], 0)
+                        eval_writer.add_scalar(f"eval/guard/{backend}/{prefix}_mean_score", stats["mean_score"], 0)
                     if stats.get("pct_unsafe") is not None:
-                        eval_writer.add_scalar(f"eval/llamaguard/{prefix}_pct_unsafe", stats["pct_unsafe"], 0)
+                        eval_writer.add_scalar(f"eval/guard/{backend}/{prefix}_pct_unsafe", stats["pct_unsafe"], 0)
 
-                _log_lg("harmful_initial", llamaguard_block["harmful"]["initial"])
-                _log_lg("harmful_refined", llamaguard_block["harmful"]["refined"])
-                _log_lg("harmless_initial", llamaguard_block["harmless"]["initial"])
-                _log_lg("harmless_refined", llamaguard_block["harmless"]["refined"])
+                for backend in guard_backends:
+                    evaluator = None
+                    try:
+                        evaluator = _get_guard_evaluator(backend)
+                        initial_harmful_results = evaluator.evaluate_batch(list(zip(harmful_q, initial_harmful)), progress_every=20)
+                        initial_harmless_results = evaluator.evaluate_batch(list(zip(harmless_q, initial_harmless)), progress_every=20)
+                        refined_harmful_results = evaluator.evaluate_batch(list(zip(harmful_q, refined_harmful)), progress_every=20) if refined_harmful is not None else None
+                        refined_harmless_results = evaluator.evaluate_batch(list(zip(harmless_q, refined_harmless)), progress_every=20) if refined_harmless is not None else None
+
+                        backend_block = {
+                            "harmful": {
+                                "initial": _aggregate_llamaguard(initial_harmful_results),
+                                "refined": _aggregate_llamaguard(refined_harmful_results) if refined_harmful_results is not None else None,
+                            },
+                            "harmless": {
+                                "initial": _aggregate_llamaguard(initial_harmless_results),
+                                "refined": _aggregate_llamaguard(refined_harmless_results) if refined_harmless_results is not None else None,
+                            },
+                        }
+                        guard_metrics[backend] = backend_block
+
+                        _log_guard(backend, "harmful_initial", backend_block["harmful"]["initial"])
+                        _log_guard(backend, "harmful_refined", backend_block["harmful"]["refined"])
+                        _log_guard(backend, "harmless_initial", backend_block["harmless"]["initial"])
+                        _log_guard(backend, "harmless_refined", backend_block["harmless"]["refined"])
+                    except Exception as be:
+                        guard_errors[backend] = {
+                            "type": type(be).__name__,
+                            "message": str(be),
+                            "traceback": traceback.format_exc(),
+                        }
+                        if strict:
+                            raise
+                    finally:
+                        if evaluator is not None:
+                            try:
+                                _unload_guard_evaluator(backend)
+                            except Exception:
+                                pass
+
+                payload["guard_metrics"] = guard_metrics
+                if "llamaguard" in guard_metrics:
+                    # Backward-compatible key used by existing plotting/analysis scripts.
+                    payload["llamaguard"] = guard_metrics["llamaguard"]
+                elif "llamaguard" in guard_backends:
+                    payload["llamaguard"] = None
+
+                if guard_errors:
+                    payload["guard_errors"] = guard_errors
             except Exception as e:
                 payload["llamaguard"] = None
                 # nnsight often wraps the real error; capture full traceback and cause chain.
@@ -3031,62 +3217,60 @@ def _evaluate_llamaguard_and_mmlu(
 
                 root = chain[-1] if chain else {"type": type(e).__name__, "message": str(e)}
                 print(
-                    "[eval] LlamaGuard failed, skipping "
+                    "[eval] Guard evaluation failed, skipping "
                     f"({type(e).__name__}): {e}\n"
                     f"[eval] Root cause: {root.get('type')}: {root.get('message')}\n"
                     f"{tb}"
                 )
                 if strict:
                     raise
-            finally:
-                try:
-                    unload_llamaguard_evaluator()
-                except Exception:
-                    pass
 
         # --- MMLU ---
         if args.eval_mmlu:
             normalized = mmlu_eval.normalize_mmlu_config(mmlu_cfg)
             prepared = mmlu_eval.prepare_mmlu_data(normalized)
             entries = prepared["entries"]
-
             prompts = [e["prompt"] for e in entries]
             chat_prompts = apply_chat_template(model.tokenizer, prompts)
-
-            initial_resp = _generate_nnsight(model, chat_prompts, max_new_tokens=normalized["max_new_tokens"], batch_size=eval_batch_size)
-            initial_pred = [mmlu_eval.parse_choice_letter(r) for r in initial_resp]
-
-            refined_pred = None
-            if refined_artifact is not None:
-                step_fn = _make_refined_step_fn(refined_artifact)
-                refined_resp = _generate_nnsight(
-                    model,
-                    chat_prompts,
-                    max_new_tokens=normalized["max_new_tokens"],
-                    batch_size=eval_batch_size,
-                    intervene_step_fn=step_fn,
-                    # MMLU answers are often decided on the first generated token,
-                    # so apply intervention before first-token decoding for all modes.
-                    # Keep behavior consistent with LlamaGuard eval for `shtiefel_rot`.
-                    intervene_every_step=(direction_mode != "shtiefel_rot"),
-                )
-                refined_pred = [mmlu_eval.parse_choice_letter(r) for r in refined_resp]
-
             initial_rows = []
             refined_rows = []
-            for e, p, r in zip(entries, initial_pred, initial_resp):
-                initial_rows.append({
-                    "index": e["index"],
-                    "subject": e["subject"],
-                    "question": e["question"],
-                    "correct_letter": e["correct_letter"],
-                    "predicted_letter": p,
-                    "is_correct": p == e["correct_letter"],
-                    "raw_response": r,
-                })
-            if refined_pred is not None:
-                for e, p, r in zip(entries, refined_pred, refined_resp):
-                    refined_rows.append({
+            mmlu_warning = None
+
+            if normalized["answer_mode"] == "logits":
+                initial_rows = mmlu_eval._predict_with_logits(model, entries)
+                if refined_artifact is not None:
+                    # Refined logits-mode with intervention is not yet wired through nnsight;
+                    # use generate-mode predictions for refined so eval still runs.
+                    mmlu_warning = (
+                        "answer_mode=logits requested, but refined logits-mode with intervention "
+                        "is not supported in rdo_refusal; refined metrics use generate-mode parsing."
+                    )
+                    step_fn = _make_refined_step_fn(refined_artifact)
+                    refined_resp = _generate_nnsight(
+                        model,
+                        chat_prompts,
+                        max_new_tokens=normalized["max_new_tokens"],
+                        batch_size=eval_batch_size,
+                        intervene_step_fn=step_fn,
+                        intervene_every_step=True,
+                    )
+                    refined_pred = [mmlu_eval.parse_choice_letter(r) for r in refined_resp]
+                    for e, p, r in zip(entries, refined_pred, refined_resp):
+                        refined_rows.append({
+                            "index": e["index"],
+                            "subject": e["subject"],
+                            "question": e["question"],
+                            "correct_letter": e["correct_letter"],
+                            "predicted_letter": p,
+                            "is_correct": p == e["correct_letter"],
+                            "raw_response": r,
+                            "choice_scores": None,
+                        })
+            else:
+                initial_resp = _generate_nnsight(model, chat_prompts, max_new_tokens=normalized["max_new_tokens"], batch_size=eval_batch_size)
+                initial_pred = [mmlu_eval.parse_choice_letter(r) for r in initial_resp]
+                for e, p, r in zip(entries, initial_pred, initial_resp):
+                    initial_rows.append({
                         "index": e["index"],
                         "subject": e["subject"],
                         "question": e["question"],
@@ -3094,7 +3278,31 @@ def _evaluate_llamaguard_and_mmlu(
                         "predicted_letter": p,
                         "is_correct": p == e["correct_letter"],
                         "raw_response": r,
+                        "choice_scores": None,
                     })
+
+                if refined_artifact is not None:
+                    step_fn = _make_refined_step_fn(refined_artifact)
+                    refined_resp = _generate_nnsight(
+                        model,
+                        chat_prompts,
+                        max_new_tokens=normalized["max_new_tokens"],
+                        batch_size=eval_batch_size,
+                        intervene_step_fn=step_fn,
+                        intervene_every_step=True,
+                    )
+                    refined_pred = [mmlu_eval.parse_choice_letter(r) for r in refined_resp]
+                    for e, p, r in zip(entries, refined_pred, refined_resp):
+                        refined_rows.append({
+                            "index": e["index"],
+                            "subject": e["subject"],
+                            "question": e["question"],
+                            "correct_letter": e["correct_letter"],
+                            "predicted_letter": p,
+                            "is_correct": p == e["correct_letter"],
+                            "raw_response": r,
+                            "choice_scores": None,
+                        })
 
             initial_summary = mmlu_eval.summarize_mmlu_predictions(initial_rows, prepared["config_snapshot"])
             refined_summary = mmlu_eval.summarize_mmlu_predictions(refined_rows, prepared["config_snapshot"]) if refined_rows else None
@@ -3109,6 +3317,8 @@ def _evaluate_llamaguard_and_mmlu(
                     "refined": refined_rows[: mmlu_eval.PREDICTION_PREVIEW_LIMIT] if refined_rows else None,
                 }
             }
+            if mmlu_warning is not None:
+                mmlu_block["warning"] = mmlu_warning
             payload["mmlu"] = mmlu_block
 
             eval_writer.add_scalar("eval/mmlu/initial_accuracy", initial_summary["accuracy"], 0)
@@ -3116,9 +3326,13 @@ def _evaluate_llamaguard_and_mmlu(
                 eval_writer.add_scalar("eval/mmlu/refined_accuracy", refined_summary["accuracy"], 0)
                 eval_writer.add_scalar("eval/mmlu/delta_accuracy", refined_summary["accuracy"] - initial_summary["accuracy"], 0)
 
-        out_path = os.path.join(tb_run_dir, f"eval_metrics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
-        _safe_json_dump(out_path, payload)
-        print(f"Saved eval metrics: {out_path}")
+        out_prefix = os.path.join(tb_run_dir, f"eval_metrics_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        out_json_path = f"{out_prefix}.json"
+        out_csv_path = f"{out_prefix}.csv"
+        _safe_json_dump(out_json_path, payload)
+        _safe_eval_metrics_csv_dump(out_csv_path, payload)
+        print(f"Saved eval metrics JSON: {out_json_path}")
+        print(f"Saved eval metrics CSV: {out_csv_path}")
     finally:
         eval_writer.close()
 
