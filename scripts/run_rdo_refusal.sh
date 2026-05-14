@@ -6,22 +6,24 @@ cd "$(dirname "$0")/.."
 
 # variables
 direction_mode="shtiefel_proj_rot" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot", "angular_steering", "householder_pseudo_rotation"
+protect=false # if true, pass --protect (shtiefel_proj_rot inverse-side rotation)
+train_guard_val_gap=100 # 0 disables; otherwise run train guard validation every N dataloader iterations
 num_opt_layers=1 # optimize this many middle layers (plus best layer during intervention)
 llamaguard_data="basic" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
 eval_guard_backends=("llamaguard" "qwen3guard" "wildguard") # any subset of: "llamaguard" "qwen3guard" "wildguard"
 lr=1e-5
 optimizer="SGD" # "Adam", "AdamW", "SGD"
-max_iters=1000
-result_path="/home/user1/buka2004/LLM-Attack-Defense/results/rdo_refusal/tensorboard/basic_rdo_DeepSeek-R1-Distill-Qwen-7B_shtiefel_proj_rot_nol=1_prr=10_im=diag_permutation_om=svd_b63bb4c7bbc0" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
-log_steps=1000
-init_mode="diag_permutation" # "random", "diag_permutation", or "ab_orthogonal"
+max_iters=10000
+result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
+log_steps=10000
+init_mode="ab_orthogonal" # "random", "diag_permutation", or "ab_orthogonal"
 orth_method="svd" # "qr" or "svd"
 proj_reduce_ratio=10 # used when direction_mode="shtiefel_proj_rot" (k = hidden_size / ratio)
 
 # LlamaGuard eval config
 eval_max_new_tokens=256 # inportant param for llama guard eval
-MAX_HARMFUL=100
-MAX_HARMLESS=100
+MAX_HARMFUL=50
+MAX_HARMLESS=50
 
 # MMLU eval config
 enable_mmlu_eval=true
@@ -29,9 +31,9 @@ mmlu_dataset="cais/mmlu"
 mmlu_subset="all"
 mmlu_split="test" # train|val|test
 mmlu_mode="zero_shot" # zero_shot|few_shot
-mmlu_answer_mode="logits" # generate|logits
+mmlu_answer_mode="generate" # generate|logits
 mmlu_n_shots=5
-mmlu_sample_size=100
+mmlu_sample_size=300
 mmlu_sample_seed=42
 mmlu_max_new_tokens=8
 mmlu_store_predictions=false
@@ -39,7 +41,7 @@ mmlu_store_predictions=false
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=4,5
+export CUDA_VISIBLE_DEVICES=4
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -64,12 +66,13 @@ cmd=(python -m baselines.rdo_refusal \
   --llamaguard_data "${llamaguard_data}" \
   --lr "${lr}" \
   --optimizer "${optimizer}" \
-  --eval_llamaguard \
+  # --eval_llamaguard \
   --num_opt_layers "${num_opt_layers}" \
   --proj_reduce_ratio "${proj_reduce_ratio}" \
   --init_mode "${init_mode}" \
   --orth_method "${orth_method}" \
   --log_steps "${log_steps}" \
+  --train_guard_val_gap "${train_guard_val_gap}" \
   --eval_max_new_tokens "${eval_max_new_tokens}" \
   --mmlu_dataset "${mmlu_dataset}" \
   --mmlu_subset "${mmlu_subset}" \
@@ -90,10 +93,14 @@ if [[ -n "${result_path}" ]]; then
   cmd+=(--result_path "${result_path}")
 fi
 
-# cmd+=(--eval_guard_backend "${eval_guard_backends[@]}")
+cmd+=(--eval_guard_backend "${eval_guard_backends[@]}")
 
 if [[ "${enable_mmlu_eval}" == "true" ]]; then
   cmd+=(--eval_mmlu)
+fi
+
+if [[ "${protect}" == "true" ]]; then
+  cmd+=(--protect)
 fi
 
 if [[ "${MMLU_STORE_PREDICTIONS}" == "true" ]]; then

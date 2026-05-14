@@ -177,6 +177,10 @@ DEFAULT_CONFIG = {
     # 0 = disabled. Save operation weights every N training iterations (dataloader steps; ``num_iters``)
     # to checkpoints/progress_checkpoints. Small values write large tensors often and can saturate disk I/O.
     'log_steps': 0,
+    # 0 = disabled. Run in-training guard validation every N dataloader iterations.
+    'train_guard_val_gap': 0,
+    # If true (shtiefel_proj_rot only), apply inverse-side activation rotation.
+    'protect': False,
 }
 
 def parse_args():
@@ -235,6 +239,17 @@ def parse_args():
             'one per dataloader batch, not per optimizer step); 0 disables. Small values imply '
             'frequent saves of large tensors and heavy disk use.'
         ),
+    )
+    parser.add_argument(
+        '--train_guard_val_gap',
+        type=int,
+        default=DEFAULT_CONFIG['train_guard_val_gap'],
+        help='Run in-training guard validation every N dataloader iterations; 0 disables',
+    )
+    parser.add_argument(
+        '--protect',
+        action='store_true',
+        help='(shtiefel_proj_rot only) apply inverse-side activation rotation',
     )
     parser.add_argument('--direction_mode', type=str, default=DEFAULT_CONFIG['direction_mode'],
                     choices=['baseline', 'rotation', 'activation_rot', 'shtiefel_rot', 'shtiefel_proj_rot', 'angular_steering', 'householder_pseudo_rotation'],
@@ -1291,7 +1306,7 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
     QB (k × dim), k = dim // proj_reduce_ratio. Each factor is projected with
     ``OrthogonalProjection`` in the forward (same autograd rule as RefusalStiefelRotation).
 
-    Reuses ``RefusalStiefelRotation`` for ``fn_vectors``, ``__call__``, ``add``, ``_rotate``,
+    Reuses ``RefusalStiefelRotation`` for ``fn_vectors``, ``__call__``, ``add``,
     ``set_cached_matrices``, ``stack_directions_for_log``, ``skew``, and ``normalize``.
 
     Does not call ``RefusalStiefelRotation.__init__`` (that registers a full ``dim×dim``
@@ -1310,11 +1325,13 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         proj_reduce_ratio: int = 10,
         num_opt_layers: int = 8,
         best_layer: int = None,
+        protect: bool = False,
     ) -> None:
         nn.Module.__init__(self)
         self.module = module
         self.dim = dim
         self._cached_matrices: list[torch.Tensor] | None = None
+        self.protect = bool(protect)
 
         n_layers = len(self.module.layers)
         self.num_opt_layers = int(max(0, num_opt_layers))
@@ -1414,6 +1431,36 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         QA = OrthogonalProjection.apply(A)
         QB = OrthogonalProjection.apply(B)
         return QA @ QB
+
+    def _rotate(self, x, layer_idx: int):
+        # Mirror RefusalStiefelRotation tuple/proxy-safe behavior.
+        if isinstance(x, tuple):
+            if len(x) == 0:
+                return x
+            return (self._rotate(x[0], layer_idx),) + x[1:]
+
+        if not hasattr(x, "dtype") and hasattr(x, "__getitem__"):
+            try:
+                first = x[0]
+                rest = x[1:]
+                return (self._rotate(first, layer_idx),) + tuple(rest)
+            except Exception:
+                return x
+
+        M = self.matrix(layer_idx)
+        try:
+            M = M.to(x)
+        except Exception:
+            try:
+                M = M.to(device=x.device, dtype=x.dtype)
+            except Exception:
+                try:
+                    M = M.to(dtype=model.dtype)
+                except Exception:
+                    pass
+        if self.protect:
+            return x @ M
+        return x @ M.T
 
     def orthogonalize(self):
         with torch.no_grad():
@@ -1901,7 +1948,9 @@ def refusal_cone_optimization(model, train_dataset,
                               tb_writer=None,
                               tb_checkpoint_dir=None,
                               direction_mode=DEFAULT_CONFIG['direction_mode'],
-                              log_steps: int = DEFAULT_CONFIG['log_steps']):
+                              log_steps: int = DEFAULT_CONFIG['log_steps'],
+                              train_guard_val_gap: int = DEFAULT_CONFIG['train_guard_val_gap'],
+                              protect: bool = DEFAULT_CONFIG['protect']):
 
     if direction_mode == "rotation":
         if cone_dim != 1:
@@ -1959,6 +2008,7 @@ def refusal_cone_optimization(model, train_dataset,
             proj_reduce_ratio=proj_reduce_ratio,
             num_opt_layers=num_opt_layers,
             best_layer=best_layer,
+            protect=protect,
         )
     else:
         raise ValueError(f"Invalid direction_mode: {direction_mode}")
@@ -2046,12 +2096,13 @@ def refusal_cone_optimization(model, train_dataset,
 
     max_iters = DEFAULT_CONFIG['max_iters']
     num_iters = 0
+    train_guard_cache: dict = {}
 
     for epoch in range(epochs):
         print('Epoch', epoch)
         for _, batch in enumerate(train_dataloader):
 
-            if (num_iters) % log_steps == 0:
+            if log_steps > 0 and (num_iters % log_steps) == 0:
                 _save_progress_operation_checkpoint(
                     tb_checkpoint_dir,
                     num_iters,
@@ -2065,6 +2116,24 @@ def refusal_cone_optimization(model, train_dataset,
                 print(f'Reached max number of iterations: {max_iters}')
                 stopped = True
                 break
+
+            _run_train_guard_validation(
+                model=model,
+                operation=operation,
+                direction_mode=direction_mode,
+                best_layer=best_layer,
+                num_iters=num_iters,
+                train_guard_val_gap=train_guard_val_gap,
+                tb_writer=tb_writer,
+                eval_batch_size=getattr(args, "eval_batch_size", DEFAULT_CONFIG["eval_batch_size"]),
+                eval_max_new_tokens=getattr(args, "eval_max_new_tokens", DEFAULT_CONFIG["eval_max_new_tokens"]),
+                splits_name=getattr(args, "splits", DEFAULT_CONFIG["splits"]),
+                eval_split=getattr(args, "eval_split", DEFAULT_CONFIG["eval_split"]),
+                llamaguard_data_mode=getattr(args, "llamaguard_data", DEFAULT_CONFIG["llamaguard_data"]),
+                model_name=model_id,
+                guard_backends=getattr(args, "eval_guard_backend", DEFAULT_CONFIG["eval_guard_backend"]),
+                cache=train_guard_cache,
+            )
 
             ablation_prompt = batch['ablation_prompt']
             ablation_labels = batch['ablation_labels']
@@ -2396,6 +2465,8 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
         "num_opt_layers": getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8)),
         "proj_reduce_ratio": getattr(args, "proj_reduce_ratio", DEFAULT_CONFIG.get("proj_reduce_ratio", 10)),
         "log_steps": getattr(args, "log_steps", DEFAULT_CONFIG["log_steps"]),
+        "train_guard_val_gap": getattr(args, "train_guard_val_gap", DEFAULT_CONFIG["train_guard_val_gap"]),
+        "protect": bool(getattr(args, "protect", DEFAULT_CONFIG["protect"])),
     }
     train_kwargs.update(kwargs) # Apply any user-provided overrides
 
@@ -2421,14 +2492,16 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
         try:
             removed = 0
             for fname in os.listdir(tb_run_dir):
-                if fname.startswith("eval_metrics_") and fname.endswith(".json"):
+                if fname.startswith("eval_metrics_") and (
+                    fname.endswith(".json") or fname.endswith(".csv")
+                ):
                     try:
                         os.remove(os.path.join(tb_run_dir, fname))
                         removed += 1
                     except Exception:
                         pass
             if removed:
-                print(f"[run] Removed {removed} existing eval_metrics_*.json from result_path")
+                print(f"[run] Removed {removed} existing eval_metrics_*.json/csv from result_path")
         except Exception:
             pass
 
@@ -2501,6 +2574,67 @@ def _safe_json_dump(path: str, payload: dict) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+def _compute_mmlu_delta_metrics(
+    initial_rows: list[dict],
+    refined_rows: list[dict] | None,
+) -> dict | None:
+    if not refined_rows:
+        return None
+
+    total = min(len(initial_rows), len(refined_rows))
+    if total == 0:
+        return {
+            "n_compared": 0,
+            "prediction_change_count": 0,
+            "prediction_change_rate": 0.0,
+            "correct_to_incorrect_count": 0,
+            "incorrect_to_correct_count": 0,
+            "invalid_to_valid_count": 0,
+            "valid_to_invalid_count": 0,
+            "delta_invalid_predictions": 0,
+        }
+
+    prediction_change_count = 0
+    correct_to_incorrect_count = 0
+    incorrect_to_correct_count = 0
+    invalid_to_valid_count = 0
+    valid_to_invalid_count = 0
+
+    for init_row, ref_row in zip(initial_rows[:total], refined_rows[:total]):
+        init_pred = init_row.get("predicted_letter")
+        ref_pred = ref_row.get("predicted_letter")
+        init_correct = bool(init_row.get("is_correct"))
+        ref_correct = bool(ref_row.get("is_correct"))
+
+        if init_pred != ref_pred:
+            prediction_change_count += 1
+        if init_correct and not ref_correct:
+            correct_to_incorrect_count += 1
+        if (not init_correct) and ref_correct:
+            incorrect_to_correct_count += 1
+
+        init_invalid = init_pred is None
+        ref_invalid = ref_pred is None
+        if init_invalid and not ref_invalid:
+            invalid_to_valid_count += 1
+        if (not init_invalid) and ref_invalid:
+            valid_to_invalid_count += 1
+
+    init_invalid_total = sum(1 for r in initial_rows[:total] if r.get("predicted_letter") is None)
+    ref_invalid_total = sum(1 for r in refined_rows[:total] if r.get("predicted_letter") is None)
+
+    return {
+        "n_compared": total,
+        "prediction_change_count": prediction_change_count,
+        "prediction_change_rate": prediction_change_count / total,
+        "correct_to_incorrect_count": correct_to_incorrect_count,
+        "incorrect_to_correct_count": incorrect_to_correct_count,
+        "invalid_to_valid_count": invalid_to_valid_count,
+        "valid_to_invalid_count": valid_to_invalid_count,
+        "delta_invalid_predictions": ref_invalid_total - init_invalid_total,
+    }
 
 
 def _eval_payload_to_major_metrics_rows(payload: dict) -> list[dict]:
@@ -2577,6 +2711,20 @@ def _eval_payload_to_major_metrics_rows(payload: dict) -> list[dict]:
                 "phase": "delta",
                 "metric": "accuracy",
                 "value": mmlu.get("delta_accuracy"),
+            }
+        )
+    delta_metrics = mmlu.get("delta_metrics") or {}
+    for metric_name, metric_val in delta_metrics.items():
+        if metric_val is None:
+            continue
+        rows.append(
+            {
+                "benchmark": "mmlu",
+                "backend": "",
+                "group": "",
+                "phase": "delta",
+                "metric": metric_name,
+                "value": metric_val,
             }
         )
 
@@ -2905,6 +3053,149 @@ def _normalize_guard_backends(backends) -> list[str]:
         if v not in normalized:
             normalized.append(v)
     return normalized
+
+
+def _build_train_guard_step_fn(operation, direction_mode: str, best_layer: int):
+    def _apply_operation():
+        if direction_mode == "baseline":
+            if hasattr(operation, "fn_vectors") and len(operation.fn_vectors) > 0:
+                operation(operation.fn_vectors[0])
+                return
+            if hasattr(operation, "fn_vector"):
+                operation(operation.fn_vector)
+                return
+            raise ValueError("baseline direction_mode requires operation.fn_vectors/fn_vector")
+
+        try:
+            operation(None, best_layer=best_layer)
+            return
+        except TypeError:
+            pass
+        try:
+            operation(None)
+            return
+        except TypeError:
+            pass
+        if hasattr(operation, "fn_vectors") and len(operation.fn_vectors) > 0:
+            operation(operation.fn_vectors[0])
+            return
+        if hasattr(operation, "fn_vector"):
+            operation(operation.fn_vector)
+            return
+        raise ValueError("Unable to apply operation for train guard validation")
+
+    def step_fn(_model):
+        _apply_operation()
+
+    return step_fn
+
+
+def _run_train_guard_validation(
+    *,
+    model: LanguageModel,
+    operation,
+    direction_mode: str,
+    best_layer: int,
+    num_iters: int,
+    train_guard_val_gap: int,
+    tb_writer,
+    eval_batch_size: int,
+    eval_max_new_tokens: int,
+    splits_name: str,
+    eval_split: str,
+    llamaguard_data_mode: str,
+    model_name: str,
+    guard_backends,
+    cache: dict,
+) -> None:
+    gap = int(train_guard_val_gap or 0)
+    if gap <= 0:
+        return
+    if num_iters <= 0 or (num_iters % gap) != 0:
+        return
+
+    backends = _normalize_guard_backends(guard_backends)
+    if "guard_data" not in cache:
+        harmful, harmless = _load_llamaguard_eval_sets(
+            splits_name=splits_name,
+            eval_split=eval_split,
+            mode=llamaguard_data_mode,
+            model_name=model_name,
+        )
+        max_harmful_total = int(os.getenv("MAX_HARMFUL", "0") or "0")
+        max_harmless_total = int(os.getenv("MAX_HARMLESS", "0") or "0")
+        if max_harmful_total > 0 and len(harmful) > max_harmful_total:
+            harmful = harmful[:max_harmful_total]
+        if max_harmless_total > 0 and len(harmless) > max_harmless_total:
+            harmless = harmless[:max_harmless_total]
+        harmful_q = [d["instruction"] for d in harmful]
+        harmless_q = [d["instruction"] for d in harmless]
+        cache["guard_data"] = {
+            "harmful_q": harmful_q,
+            "harmless_q": harmless_q,
+            "harmful_prompts": apply_chat_template(model.tokenizer, harmful_q),
+            "harmless_prompts": apply_chat_template(model.tokenizer, harmless_q),
+        }
+
+    guard_data = cache["guard_data"]
+    harmful_q = guard_data["harmful_q"]
+    harmless_q = guard_data["harmless_q"]
+    harmful_prompts = guard_data["harmful_prompts"]
+    harmless_prompts = guard_data["harmless_prompts"]
+
+    # Keep train-time guard validation behavior aligned with eval behavior.
+    lg_max_new_tokens = 1 if direction_mode == "shtiefel_rot" else eval_max_new_tokens
+    step_fn = _build_train_guard_step_fn(operation, direction_mode, best_layer)
+
+    with torch.no_grad():
+        harmful_resp = _generate_nnsight(
+            model,
+            harmful_prompts,
+            max_new_tokens=lg_max_new_tokens,
+            batch_size=eval_batch_size,
+            intervene_step_fn=step_fn,
+            intervene_every_step=True,
+        )
+        harmless_resp = _generate_nnsight(
+            model,
+            harmless_prompts,
+            max_new_tokens=lg_max_new_tokens,
+            batch_size=eval_batch_size,
+            intervene_step_fn=step_fn,
+            intervene_every_step=True,
+        )
+
+    for backend in backends:
+        evaluator = None
+        try:
+            evaluator = _get_guard_evaluator(backend)
+            harmful_results = evaluator.evaluate_batch(list(zip(harmful_q, harmful_resp)), progress_every=20)
+            harmless_results = evaluator.evaluate_batch(list(zip(harmless_q, harmless_resp)), progress_every=20)
+            harmful_stats = _aggregate_llamaguard(harmful_results)
+            harmless_stats = _aggregate_llamaguard(harmless_results)
+
+            metrics = {}
+            if harmful_stats.get("mean_score") is not None:
+                metrics[f"train_guard/{backend}/harmful_mean_score"] = harmful_stats["mean_score"]
+            if harmful_stats.get("pct_unsafe") is not None:
+                metrics[f"train_guard/{backend}/harmful_pct_unsafe"] = harmful_stats["pct_unsafe"]
+            if harmless_stats.get("mean_score") is not None:
+                metrics[f"train_guard/{backend}/harmless_mean_score"] = harmless_stats["mean_score"]
+            if harmless_stats.get("pct_unsafe") is not None:
+                metrics[f"train_guard/{backend}/harmless_pct_unsafe"] = harmless_stats["pct_unsafe"]
+            if metrics and tb_writer is not None:
+                tensorboard_log_scalars(tb_writer, metrics, num_iters)
+            print(
+                f"[train_guard] iter={num_iters} backend={backend} "
+                f"harmful_mean={harmful_stats.get('mean_score')} harmful_pct_unsafe={harmful_stats.get('pct_unsafe')} "
+                f"harmless_mean={harmless_stats.get('mean_score')} harmless_pct_unsafe={harmless_stats.get('pct_unsafe')}"
+            )
+        finally:
+            if evaluator is not None:
+                try:
+                    _unload_guard_evaluator(backend)
+                except Exception:
+                    pass
 
 
 def _load_eval_split_json(splits_name: str, kind: str, split: str) -> list[dict]:
@@ -3306,12 +3597,14 @@ def _evaluate_llamaguard_and_mmlu(
 
             initial_summary = mmlu_eval.summarize_mmlu_predictions(initial_rows, prepared["config_snapshot"])
             refined_summary = mmlu_eval.summarize_mmlu_predictions(refined_rows, prepared["config_snapshot"]) if refined_rows else None
+            delta_metrics = _compute_mmlu_delta_metrics(initial_rows, refined_rows)
 
             mmlu_block = {
                 "config": mmlu_eval.get_mmlu_config_snapshot(normalized),
                 "initial": initial_summary,
                 "refined": refined_summary,
                 "delta_accuracy": (refined_summary["accuracy"] - initial_summary["accuracy"]) if refined_summary else None,
+                "delta_metrics": delta_metrics,
                 "preview": {
                     "initial": initial_rows[: mmlu_eval.PREDICTION_PREVIEW_LIMIT],
                     "refined": refined_rows[: mmlu_eval.PREDICTION_PREVIEW_LIMIT] if refined_rows else None,
@@ -3325,6 +3618,19 @@ def _evaluate_llamaguard_and_mmlu(
             if refined_summary is not None:
                 eval_writer.add_scalar("eval/mmlu/refined_accuracy", refined_summary["accuracy"], 0)
                 eval_writer.add_scalar("eval/mmlu/delta_accuracy", refined_summary["accuracy"] - initial_summary["accuracy"], 0)
+            if delta_metrics is not None:
+                for metric_name in (
+                    "prediction_change_rate",
+                    "prediction_change_count",
+                    "correct_to_incorrect_count",
+                    "incorrect_to_correct_count",
+                    "invalid_to_valid_count",
+                    "valid_to_invalid_count",
+                    "delta_invalid_predictions",
+                ):
+                    metric_val = delta_metrics.get(metric_name)
+                    if metric_val is not None:
+                        eval_writer.add_scalar(f"eval/mmlu/{metric_name}", metric_val, 0)
 
         out_prefix = os.path.join(tb_run_dir, f"eval_metrics_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         out_json_path = f"{out_prefix}.json"
@@ -3386,6 +3692,14 @@ def train_refusal_cone(group_name, run_name, init_vectors, **kwargs):
     train_kwargs.setdefault(
         "log_steps",
         getattr(args, "log_steps", DEFAULT_CONFIG["log_steps"]),
+    )
+    train_kwargs.setdefault(
+        "train_guard_val_gap",
+        getattr(args, "train_guard_val_gap", DEFAULT_CONFIG["train_guard_val_gap"]),
+    )
+    train_kwargs.setdefault(
+        "protect",
+        bool(getattr(args, "protect", DEFAULT_CONFIG["protect"])),
     )
 
     run_config = vars(args).copy()
