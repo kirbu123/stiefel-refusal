@@ -669,20 +669,27 @@ def _plot_progressive_refusal_andgles(
     fig = plt.figure(figsize=(10, 8))
     ax3d = fig.add_subplot(111, projection="3d")
     coords = pca_coords.numpy()
-    ax3d.scatter(coords[0, 0], coords[0, 1], coords[0, 2], c="red", marker="*", s=180, label="x_hf")
-    ax3d.scatter(coords[1, 0], coords[1, 1], coords[1, 2], c="green", marker="*", s=180, label="x_harmless")
-    ax3d.scatter(coords[2, 0], coords[2, 1], coords[2, 2], c="black", marker="x", s=110, label="x_hf - refusal")
+    ax3d.scatter(coords[0, 0], coords[0, 1], coords[0, 2], c="red", marker="*", s=180, label=r"$x_{unsafe}$")
+    ax3d.scatter(coords[1, 0], coords[1, 1], coords[1, 2], c="green", marker="*", s=180, label=r"$x_{safe}$")
+    ax3d.scatter(coords[2, 0], coords[2, 1], coords[2, 2], c="black", marker="x", s=110, label=r"$x_{unsafe}-r$")
 
     start = 3
     end = start + len(rotated_vectors)
     if end > start:
         rot = coords[start:end]
         ax3d.plot(rot[:, 0], rot[:, 1], rot[:, 2], color="tab:blue", alpha=0.6, linewidth=1.5)
-        ax3d.scatter(rot[:, 0], rot[:, 1], rot[:, 2], c=range(len(rot)), cmap="Blues", s=55, label="M@x_hf trajectory")
+        ax3d.scatter(
+            rot[:, 0],
+            rot[:, 1],
+            rot[:, 2],
+            c=range(len(rot)),
+            cmap="Blues",
+            s=55,
+            label=r"$(BQB^\top)x_{unsafe}$ trajectory",
+        )
         ax3d.text(rot[0, 0], rot[0, 1], rot[0, 2], f"step={steps[0]}")
         ax3d.text(rot[-1, 0], rot[-1, 1], rot[-1, 2], f"step={steps[-1]}")
 
-    ax3d.set_title("3D PCA relation: x_hf, x_hf-refusal, harmless mean, and M@x_hf")
     ax3d.set_xlabel("PC1")
     ax3d.set_ylabel("PC2")
     ax3d.set_zlabel("PC3")

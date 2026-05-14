@@ -6,21 +6,22 @@ cd "$(dirname "$0")/.."
 
 # variables
 direction_mode="shtiefel_proj_rot" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot", "angular_steering", "householder_pseudo_rotation"
-num_opt_layers=5 # optimize this many middle layers (plus best layer during intervention)
+num_opt_layers=1 # optimize this many middle layers (plus best layer during intervention)
 llamaguard_data="basic" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
 lr=1e-5
+optimizer="SGD" # "Adam", "AdamW", "SGD"
 max_iters=100000
 result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
 log_steps=1000
 init_mode="diag_permutation" # "random", "diag_permutation", or "ab_orthogonal"
 orth_method="svd" # "qr" or "svd"
-proj_reduce_ratio=1000 # used when direction_mode="shtiefel_proj_rot" (k = hidden_size / ratio)
+proj_reduce_ratio=10 # used when direction_mode="shtiefel_proj_rot" (k = hidden_size / ratio)
 eval_max_new_tokens=256 # inportant param for llama guard eval
 
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=7
+export CUDA_VISIBLE_DEVICES=1
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -44,9 +45,10 @@ cmd=(python -m baselines.rdo_refusal \
   --direction_mode "${direction_mode}" \
   --llamaguard_data "${llamaguard_data}" \
   --lr "${lr}" \
+  --optimizer "${optimizer}" \
   --eval_llamaguard \
-  --eval_mmlu \
-  --mmlu_store_predictions \
+  # --eval_mmlu \
+  # --mmlu_store_predictions \
   --num_opt_layers "${num_opt_layers}" \
   --proj_reduce_ratio "${proj_reduce_ratio}" \
   --init_mode "${init_mode}" \

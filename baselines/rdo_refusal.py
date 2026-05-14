@@ -118,6 +118,7 @@ DEFAULT_CONFIG = {
     'epochs': 1,                      # Number of training epochs
     'max_iters': int(os.getenv("MAX_ITERS")),              # Maximum number of iterations to train for
     'lr': 3e-4,                       # Learning rate for optimization
+    'optimizer': 'SGD',               # Optimizer choice: Adam, AdamW, SGD
     'batch_size': 1,                  # Batch size for training
     'effective_batch_size': 16,       # Effective batch size (uses gradient accumulation)
     'patience': 5,                    # Patience for early stopping
@@ -209,6 +210,9 @@ def parse_args():
                     help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=DEFAULT_CONFIG['lr'],
                     help='Learning rate for optimization')
+    parser.add_argument('--optimizer', type=str, default=DEFAULT_CONFIG['optimizer'],
+                    choices=['Adam', 'AdamW', 'SGD'],
+                    help='Optimizer to use for training updates')
     parser.add_argument('--batch_size', type=int, default=DEFAULT_CONFIG['batch_size'],
                     help='Batch size for training')
     parser.add_argument('--effective_batch_size', type=int, default=DEFAULT_CONFIG['effective_batch_size'],
@@ -1852,11 +1856,23 @@ def _write_tb_checkpoint_resources(tb_checkpoint_dir: str, operation) -> None:
         f.write("\n".join(lines) + "\n")
 
 
+def _build_optimizer(optimizer_name: str, params, lr: float):
+    """Construct the optimizer selected by --optimizer."""
+    if optimizer_name == "Adam":
+        return torch.optim.Adam(params, lr=lr)
+    if optimizer_name == "AdamW":
+        return torch.optim.AdamW(params, lr=lr, betas=(.9, .98), weight_decay=0.0, amsgrad=True)
+    if optimizer_name == "SGD":
+        return torch.optim.SGD(params, lr=lr, momentum=0)
+    raise ValueError(f"Unsupported optimizer: {optimizer_name}")
+
+
 def refusal_cone_optimization(model, train_dataset, 
                               batch_size=DEFAULT_CONFIG['batch_size'], 
                               effective_batch_size=DEFAULT_CONFIG['effective_batch_size'], 
                               epochs=DEFAULT_CONFIG['epochs'], 
                               lr=DEFAULT_CONFIG['lr'], 
+                              optimizer_name=DEFAULT_CONFIG['optimizer'],
                               cone_dim=1,
                               n_sample=DEFAULT_CONFIG['n_sample'], 
                               fixed_samples=DEFAULT_CONFIG['fixed_samples'], 
@@ -1938,7 +1954,7 @@ def refusal_cone_optimization(model, train_dataset,
     else:
         raise ValueError(f"Invalid direction_mode: {direction_mode}")
 
-    optimizer = torch.optim.AdamW(operation.parameters(), lr=lr, betas=(.9,.98), weight_decay=0.0, amsgrad=True)
+    optimizer = _build_optimizer(optimizer_name, operation.parameters(), lr)
 
     def _log_scalar(x):
         """
@@ -2367,6 +2383,7 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
         "cone_dim": 1,  # Specific override for single direction training
         "orthogonal_vectors": orthogonal_vectors,
         "direction_mode": args.direction_mode,
+        "optimizer_name": args.optimizer,
         "num_opt_layers": getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8)),
         "proj_reduce_ratio": getattr(args, "proj_reduce_ratio", DEFAULT_CONFIG.get("proj_reduce_ratio", 10)),
         "log_steps": getattr(args, "log_steps", DEFAULT_CONFIG["log_steps"]),
@@ -3298,6 +3315,7 @@ def repind_rdo(model,
                effective_batch_size=DEFAULT_CONFIG['effective_batch_size'],
                epochs=DEFAULT_CONFIG['epochs'],
                lr=DEFAULT_CONFIG['lr'],
+               optimizer_name=DEFAULT_CONFIG['optimizer'],
                ablation_lambda=DEFAULT_CONFIG['ablation_lambda'],
                addition_lambda=DEFAULT_CONFIG['addition_lambda'],
                retain_lambda=DEFAULT_CONFIG['retain_lambda'],
@@ -3338,7 +3356,7 @@ def repind_rdo(model,
             operation = DirectionalAblation(model.model, model.config.hidden_size, orthogonal_vectors, best_layer, alpha, init_vector=init_vector)
 
             parameters = [{"params": operation.fn_vector, "lr": lr}]
-            optimizer = torch.optim.AdamW(parameters, betas=(.9,.98), weight_decay=0.0, amsgrad=True)
+            optimizer = _build_optimizer(optimizer_name, parameters, lr)
 
             # log optimizer parameters
             accumulation_steps = effective_batch_size // batch_size
@@ -3530,6 +3548,7 @@ def train_independent_vector(group_name=None, run_name=None, independent_vectors
         'repind_layers': repind_layers,
         'independent_vectors': independent_vectors,
         'direction_mode': args.direction_mode,
+        'optimizer_name': args.optimizer,
     }
     train_kwargs.update(kwargs) # Apply any user-provided overrides
 
