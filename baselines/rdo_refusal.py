@@ -387,6 +387,14 @@ else:
 model = LanguageModel(MODEL_PATH, cache_dir=os.getenv("HUGGINGFACE_CACHE_DIR"), device_map='auto', torch_dtype=dtype)
 model.requires_grad_(False)
 
+
+def _runtime_device() -> torch.device:
+    """Best-effort device for newly created trainable tensors."""
+    try:
+        return torch.device(model.device)
+    except Exception:
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 # %%
 # loading and testing model
 with model.trace("Hello") as tracer:
@@ -783,11 +791,12 @@ class RefusalCone(nn.Module):
         self.module = module
         self.n_vectors = n_vectors
         self._guard_mode = "attack"
-        self.fn_vectors = [torch.nn.Parameter(torch.randn(dim, dtype=torch.float32).cuda(), requires_grad=True) for _ in range(n_vectors)]
+        dev = _runtime_device()
+        self.fn_vectors = [torch.nn.Parameter(torch.randn(dim, dtype=torch.float32, device=dev), requires_grad=True) for _ in range(n_vectors)]
         if init_vectors is not None:
             for i, init_vector in enumerate(init_vectors):
                 init_vector = init_vector / init_vector.norm()
-                self.fn_vectors[i].data = init_vector.detach().clone().cuda().to(torch.float32)
+                self.fn_vectors[i].data = init_vector.detach().clone().to(device=dev, dtype=torch.float32)
         self.orthogonal_vectors = [(o / o.norm()).to(torch.float32).cpu() for o in orthogonal_vectors]
         self.orthogonalize()
 
@@ -909,26 +918,27 @@ class RefusalDirectionActivationRotation(nn.Module):
         self.module = module
         self.dim = dim
         self._cached_matrices: list[torch.Tensor] | None = None
+        dev = _runtime_device()
 
         # Learn a separate orthogonal transform per layer via Cayley parameterization.
         n_layers = len(self.module.layers)
         # Keep a single `cayley_param` attribute for compatibility with existing
         # training/metrics code, but store per-layer parameters in its leading dim.
         self.cayley_param = nn.Parameter(
-            torch.randn(n_layers, dim, dim, dtype=torch.float32, device="cuda") * 1e-3
+            torch.randn(n_layers, dim, dim, dtype=torch.float32, device=dev) * 1e-3
         )
 
         if init_vectors is not None and len(init_vectors) > 0:
-            r0 = init_vectors[0].detach().float().cuda().clone()
+            r0 = init_vectors[0].detach().clone().to(device=dev, dtype=torch.float32)
         else:
-            r0 = torch.randn(dim, dtype=torch.float32, device="cuda")
+            r0 = torch.randn(dim, dtype=torch.float32, device=dev)
         r0 = r0 / r0.norm()
         self.register_buffer("r0", r0)
 
         # Dummy "fn_vector" so loops like `for fn_vector in operation.fn_vectors`
         # run once and always execute at least one `tracer.invoke(...)`.
         self._dummy_fn = nn.Parameter(
-            torch.zeros(dim, dtype=torch.float32, device="cuda"),
+            torch.zeros(dim, dtype=torch.float32, device=dev),
             requires_grad=False,
         )
 
@@ -1149,6 +1159,7 @@ class RefusalStiefelRotation(nn.Module):
         self._cached_matrices: list[torch.Tensor] | None = None
         self._use_imported_cayley = False
         self._guard_mode = "attack"
+        dev = _runtime_device()
 
         n_layers = len(self.module.layers)
         self.num_opt_layers = int(num_opt_layers)
@@ -1168,35 +1179,35 @@ class RefusalStiefelRotation(nn.Module):
 
         if init_mode == "random":
             self.cayley_param = nn.Parameter(
-                torch.randn(n_layers, dim, dim, dtype=torch.float32, device="cuda") * 1e-3
+                torch.randn(n_layers, dim, dim, dtype=torch.float32, device=dev) * 1e-3
             )
         elif init_mode == "diag_permutation":
             # Near-identity init: I + small Gaussian noise on the diagonal (QR in orthogonalize retracts).
             matrices = []
             diag_noise_scale = 1e-3
             for _ in range(n_layers):
-                eye = torch.eye(dim, dtype=torch.float32, device="cuda")
+                eye = torch.eye(dim, dtype=torch.float32, device=dev)
                 eye.diagonal().add_(
-                    torch.randn(dim, dtype=torch.float32, device="cuda") * diag_noise_scale
+                    torch.randn(dim, dtype=torch.float32, device=dev) * diag_noise_scale
                 )
                 matrices.append(eye)
             self.cayley_param = nn.Parameter(torch.stack(matrices, dim=0))
         elif init_mode == "ones":
             self.cayley_param = nn.Parameter(
-                torch.ones(n_layers, dim, dim, dtype=torch.float32, device="cuda") * 1e-3
+                torch.ones(n_layers, dim, dim, dtype=torch.float32, device=dev) * 1e-3
             )
         else:
             raise ValueError(f"Invalid init_mode: {init_mode}")
 
         if init_vectors is not None and len(init_vectors) > 0:
-            r0 = init_vectors[0].detach().float().cuda().clone()
+            r0 = init_vectors[0].detach().clone().to(device=dev, dtype=torch.float32)
         else:
-            r0 = torch.randn(dim, dtype=torch.float32, device="cuda")
+            r0 = torch.randn(dim, dtype=torch.float32, device=dev)
         r0 = r0 / r0.norm()
         self.register_buffer("r0", r0)
 
         self._dummy_fn = nn.Parameter(
-            torch.zeros(dim, dtype=torch.float32, device="cuda"),
+            torch.zeros(dim, dtype=torch.float32, device=dev),
             requires_grad=False,
         )
 
@@ -1391,6 +1402,7 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         self.dim = dim
         self._cached_matrices: list[torch.Tensor] | None = None
         self._guard_mode = "attack"
+        dev = _runtime_device()
 
         n_layers = len(self.module.layers)
         self.num_opt_layers = int(num_opt_layers)
@@ -1418,48 +1430,48 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         self.k = k
 
         if init_mode == "random":
-            self.proj_A = nn.Parameter(torch.randn(n_layers, dim, k, dtype=torch.float32, device="cuda") * 1e-3)
-            self.proj_B = nn.Parameter(torch.randn(n_layers, k, dim, dtype=torch.float32, device="cuda") * 1e-3)
+            self.proj_A = nn.Parameter(torch.randn(n_layers, dim, k, dtype=torch.float32, device=dev) * 1e-3)
+            self.proj_B = nn.Parameter(torch.randn(n_layers, k, dim, dtype=torch.float32, device=dev) * 1e-3)
         elif init_mode == "ab_orthogonal":
-            self.proj_A = nn.Parameter(torch.randn(n_layers, dim, k, dtype=torch.float32, device="cuda") * 1e-3)
+            self.proj_A = nn.Parameter(torch.randn(n_layers, dim, k, dtype=torch.float32, device=dev) * 1e-3)
             self.proj_B = nn.Parameter(self.proj_A.transpose(-2, -1).clone().contiguous())
         elif init_mode == "diag_permutation":
             matrices_a = []
             matrices_b = []
             diag_noise_scale = 1e-3
             for _ in range(n_layers):
-                a = torch.eye(dim, k, dtype=torch.float32, device="cuda")
+                a = torch.eye(dim, k, dtype=torch.float32, device=dev)
                 d = min(dim, k)
                 a[:d, :d].diagonal().add_(
-                    torch.randn(d, dtype=torch.float32, device="cuda") * diag_noise_scale
+                    torch.randn(d, dtype=torch.float32, device=dev) * diag_noise_scale
                 )
                 matrices_a.append(a)
-                b = torch.eye(k, dim, dtype=torch.float32, device="cuda")
+                b = torch.eye(k, dim, dtype=torch.float32, device=dev)
                 b[:d, :d].diagonal().add_(
-                    torch.randn(d, dtype=torch.float32, device="cuda") * diag_noise_scale
+                    torch.randn(d, dtype=torch.float32, device=dev) * diag_noise_scale
                 )
                 matrices_b.append(b)
             self.proj_A = nn.Parameter(torch.stack(matrices_a, dim=0))
             self.proj_B = nn.Parameter(torch.stack(matrices_b, dim=0))
         elif init_mode == "ones":
-            self.proj_A = nn.Parameter(torch.zeros(n_layers, dim, k, dtype=torch.float32, device="cuda") * 1e-3)
-            self.proj_B = nn.Parameter(torch.zeros(n_layers, k, dim, dtype=torch.float32, device="cuda") * 1e-3)
+            self.proj_A = nn.Parameter(torch.zeros(n_layers, dim, k, dtype=torch.float32, device=dev) * 1e-3)
+            self.proj_B = nn.Parameter(torch.zeros(n_layers, k, dim, dtype=torch.float32, device=dev) * 1e-3)
         else:
             raise ValueError(f"Invalid init_mode: {init_mode}")
 
         if init_vectors is not None and len(init_vectors) > 0:
-            r0 = init_vectors[0].detach().float().cuda().clone()
+            r0 = init_vectors[0].detach().clone().to(device=dev, dtype=torch.float32)
         else:
-            r0 = torch.randn(dim, dtype=torch.float32, device="cuda")
+            r0 = torch.randn(dim, dtype=torch.float32, device=dev)
         r0 = r0 / r0.norm()
         self.register_buffer("r0", r0)
 
         self._dummy_fn = nn.Parameter(
-            torch.zeros(dim, dtype=torch.float32, device="cuda"),
+            torch.zeros(dim, dtype=torch.float32, device=dev),
             requires_grad=False,
         )
 
-        self.register_buffer("cayley_param", torch.zeros(n_layers, dim, dim, dtype=torch.float32, device="cuda"))
+        self.register_buffer("cayley_param", torch.zeros(n_layers, dim, dim, dtype=torch.float32, device=dev))
         self._use_composed_cayley = False
         self._add_total_time_sec = 0.0
         self._add_call_count = 0
@@ -1634,14 +1646,15 @@ class RefusalAngularSteeringRotation(RefusalStiefelRotation):
         self.target_degree = theta
         self._cos_theta = float(np.cos(theta_rad))
         self._sin_theta = float(np.sin(theta_rad))
+        dev = _runtime_device()
 
         if init_vectors is not None and len(init_vectors) > 1:
-            second = init_vectors[1].detach().float().cuda().clone()
+            second = init_vectors[1].detach().clone().to(device=dev, dtype=torch.float32)
         else:
-            second = torch.randn(dim, dtype=torch.float32, device="cuda")
+            second = torch.randn(dim, dtype=torch.float32, device=dev)
         second = second - torch.dot(second, self.r0) * self.r0
         if second.norm() <= 1e-8:
-            second = torch.randn(dim, dtype=torch.float32, device="cuda")
+            second = torch.randn(dim, dtype=torch.float32, device=dev)
             second = second - torch.dot(second, self.r0) * self.r0
         second = second / (second.norm() + 1e-12)
         self.register_buffer("second_direction", second)
@@ -1764,15 +1777,16 @@ class RefusalDirectionRotation(nn.Module):
         super().__init__()
         self.module = module
         self.dim = dim
-        self.cayley_param = nn.Parameter(torch.randn(dim, dim, dtype=torch.float32, device="cuda") * 1e-3)
+        dev = _runtime_device()
+        self.cayley_param = nn.Parameter(torch.randn(dim, dim, dtype=torch.float32, device=dev) * 1e-3)
         if init_vectors is not None and len(init_vectors) > 0:
-            r0 = init_vectors[0].detach().float().cuda().clone()
+            r0 = init_vectors[0].detach().clone().to(device=dev, dtype=torch.float32)
         else:
-            r0 = torch.randn(dim, dtype=torch.float32, device="cuda")
+            r0 = torch.randn(dim, dtype=torch.float32, device=dev)
         r0 = r0 / r0.norm()
         self.register_buffer("r0", r0)
         self.orthogonal_vectors = [(o / o.norm()).to(torch.float32).cpu() for o in orthogonal_vectors]
-        self._dummy_fn = nn.Parameter(torch.zeros(dim, dtype=torch.float32, device="cuda"), requires_grad=False)
+        self._dummy_fn = nn.Parameter(torch.zeros(dim, dtype=torch.float32, device=dev), requires_grad=False)
         self.orthogonalize()
 
     def _skew(self) -> torch.Tensor:
@@ -3051,7 +3065,7 @@ def _make_activation_rotation_step_fn(
         return step_fn
 
     # Backwards-compatible path: explicit Cayley matrices per layer.
-    cayley_param = cayley_param.to(device="cuda", dtype=torch.float32)
+    cayley_param = cayley_param.to(device=_runtime_device(), dtype=torch.float32)
     Ms: list[torch.Tensor] = []
     for layer_idx in range(cayley_param.shape[0]):
         M = _cayley_from_param(cayley_param[layer_idx])
@@ -3998,14 +4012,15 @@ def repind_rdo(model,
 
             # Handle independent vectors safely
             processed_independent_vectors = []
+            dev = _runtime_device()
             for ind in independent_vectors:
                 if ind is not None:
-                    processed_independent_vectors.append(ind.detach().clone().cuda().to(model.dtype))
+                    processed_independent_vectors.append(ind.detach().clone().to(device=dev, dtype=model.dtype))
             independent_vectors = processed_independent_vectors
         
             # Handle init_vector safely
             if init_vector is not None:
-                init_vector = init_vector.detach().clone().cuda().to(model.dtype)
+                init_vector = init_vector.detach().clone().to(device=dev, dtype=model.dtype)
 
             operation = DirectionalAblation(model.model, model.config.hidden_size, orthogonal_vectors, best_layer, alpha, init_vector=init_vector)
 

@@ -5,11 +5,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # variables
-direction_mode="baseline" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot", "angular_steering", "householder_pseudo_rotation"
+direction_mode="shtiefel_proj_rot" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot", "angular_steering", "householder_pseudo_rotation"
 train_guard_val_gap=100 # 0 disables; otherwise run train guard validation every N dataloader iterations
-num_opt_layers=1 # optimize this many middle layers (plus best layer during intervention)
+num_opt_layers=5 # optimize this many middle layers (plus best layer during intervention)
 llamaguard_data="basic" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
-eval_guard_backends=("llamaguard" "qwen3guard") # any subset of: "llamaguard" "qwen3guard" "wildguard"
+eval_guard_backends=(wildguard) # any subset of: "llamaguard" "qwen3guard" "wildguard"
 lr=1e-5
 optimizer="AdamW" # "Adam", "AdamW", "SGD"
 max_iters=10000
@@ -40,7 +40,7 @@ mmlu_store_predictions=false
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=6
+export CUDA_VISIBLE_DEVICES=7
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -55,7 +55,8 @@ export LLAMAGUARD_MAX_NEW_TOKENS="${LLAMAGUARD_MAX_NEW_TOKENS:-100}"
 export MAX_HARMFUL="${MAX_HARMFUL}" # 250
 export MAX_HARMLESS="${MAX_HARMLESS}" # 250
 
-export HF_TOKEN="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"
+# export HF_TOKEN="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"
+export HF_TOKEN="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"
 
 # ---- Default command ----
 cmd=(python -m baselines.rdo_refusal \
@@ -82,7 +83,7 @@ cmd=(python -m baselines.rdo_refusal \
   --mmlu_sample_size "${MMLU_SAMPLE_SIZE}" \
   --mmlu_sample_seed "${mmlu_sample_seed}" \
   --mmlu_max_new_tokens "${MMLU_MAX_NEW_TOKENS}" \
-  --retain_loss \
+  # --retain_loss \
 )
 
 # --init_mode: "random", "diag_permutation", or "ab_orthogonal"
