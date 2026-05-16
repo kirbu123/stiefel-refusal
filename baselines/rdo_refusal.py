@@ -173,14 +173,12 @@ DEFAULT_CONFIG = {
     'mmlu_store_predictions': False,
 
     # Optimization parameters
-    'num_opt_layers': 8,
+    'num_opt_layers': 1,
     # 0 = disabled. Save operation weights every N training iterations (dataloader steps; ``num_iters``)
     # to checkpoints/progress_checkpoints. Small values write large tensors often and can saturate disk I/O.
     'log_steps': 0,
     # 0 = disabled. Run in-training guard validation every N dataloader iterations.
     'train_guard_val_gap': 0,
-    # If true (shtiefel_proj_rot only), apply inverse-side activation rotation.
-    'protect': False,
 }
 
 def parse_args():
@@ -245,11 +243,6 @@ def parse_args():
         type=int,
         default=DEFAULT_CONFIG['train_guard_val_gap'],
         help='Run in-training guard validation every N dataloader iterations; 0 disables',
-    )
-    parser.add_argument(
-        '--protect',
-        action='store_true',
-        help='(shtiefel_proj_rot only) apply inverse-side activation rotation',
     )
     parser.add_argument('--direction_mode', type=str, default=DEFAULT_CONFIG['direction_mode'],
                     choices=['baseline', 'rotation', 'activation_rot', 'shtiefel_rot', 'shtiefel_proj_rot', 'angular_steering', 'householder_pseudo_rotation'],
@@ -359,13 +352,15 @@ def parse_args():
     return parser.parse_args()
 
 args = parse_args()
+if int(getattr(args, "num_opt_layers", 1)) <= 0:
+    raise AssertionError(f"--num_opt_layers must be >= 1, got {args.num_opt_layers}")
 MODEL_PATH = args.model
 
 
 def _tb_dir_frz_suffix(train_kwargs: dict | None = None) -> str:
     """Short TensorBoard dirname segment: nol=num_opt_layers, prr=proj_reduce_ratio, im=init_mode, om=orth_method."""
     k = train_kwargs or {}
-    nol = int(k.get("num_opt_layers", getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8))))
+    nol = int(k.get("num_opt_layers", getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1))))
     prr = int(k.get("proj_reduce_ratio", getattr(args, "proj_reduce_ratio", DEFAULT_CONFIG.get("proj_reduce_ratio", 10))))
     im = k.get("init_mode", getattr(args, "init_mode", DEFAULT_CONFIG.get("init_mode", "random")))
     om = k.get("orth_method", getattr(args, "orth_method", DEFAULT_CONFIG.get("orth_method", "svd")))
@@ -786,6 +781,7 @@ class RefusalCone(nn.Module):
         super(RefusalCone, self).__init__()
         self.module = module
         self.n_vectors = n_vectors
+        self._guard_mode = "attack"
         self.fn_vectors = [torch.nn.Parameter(torch.randn(dim, dtype=torch.float32).cuda(), requires_grad=True) for _ in range(n_vectors)]
         if init_vectors is not None:
             for i, init_vector in enumerate(init_vectors):
@@ -838,7 +834,14 @@ class RefusalCone(nn.Module):
     def add(self, direction, alpha, layer_idx, best_layer: int = None):
         direction = direction / direction.norm()
         direction = direction.to(model.dtype)
-        self.module.layers[layer_idx].input += alpha * direction
+        sign = -1.0 if self._guard_mode == "protect" else 1.0
+        self.module.layers[layer_idx].input += sign * alpha * direction
+
+    def set_guard_mode(self, mode: str) -> None:
+        mode = str(mode).strip().lower()
+        if mode not in ("attack", "protect"):
+            raise ValueError(f"Unsupported guard mode: {mode}")
+        self._guard_mode = mode
     
     def transform(self, sample):
         fn_vectors = torch.stack(self.fn_vectors, dim=0)
@@ -1059,19 +1062,61 @@ class OrthogonalProjection(torch.autograd.Function):
         return grad_W
 
 
-def _build_optimized_layer_idxs(n_layers: int, num_opt_layers: int) -> set[int]:
-    """Pick middle-layer indices to optimize; layer 0 and last are never included."""
+def _layer_scores_from_refusal_directions(
+    refusal_dirs: torch.Tensor | np.ndarray | list | tuple,
+    n_layers: int,
+) -> list[float]:
+    """
+    Build per-layer scalar scores from ``refusal_directions``.
+
+    Higher score means higher priority for optimization.
+    """
+    try:
+        t = torch.as_tensor(refusal_dirs)
+        if t.ndim == 0:
+            return [0.0] * n_layers
+        if t.shape[0] != n_layers:
+            return [0.0] * n_layers
+        flat = t.reshape(n_layers, -1).to(torch.float32)
+        return flat.norm(dim=1).cpu().tolist()
+    except Exception:
+        return [0.0] * n_layers
+
+
+def _build_optimized_layer_idxs(
+    n_layers: int,
+    num_opt_layers: int,
+    best_layer: int,
+    layer_scores: list[float],
+) -> set[int]:
+    """
+    Pick optimized middle layers by descending score (derived from refusal_directions),
+    prioritizing closeness to best_layer on ties.
+    """
     if n_layers <= 2:
-        return set()
+        raise ValueError("Model must have at least 3 layers for middle-layer optimization.")
+
+    target = int(num_opt_layers)
+    if target <= 0:
+        raise ValueError(f"num_opt_layers must be >= 1, got {num_opt_layers}")
+
     middle = list(range(1, n_layers - 1))
-    target = max(0, int(num_opt_layers))
-    if target >= len(middle):
-        return set(middle)
-    if target == 0:
-        return set()
-    # Evenly sample middle layers to avoid clustering on one side.
-    pos = np.linspace(0, len(middle) - 1, num=target, dtype=int)
-    return {middle[i] for i in pos.tolist()}
+    if best_layer not in middle:
+        raise ValueError(f"best_layer must be a middle layer in [1, {n_layers - 2}], got {best_layer}")
+
+    if len(layer_scores) != n_layers:
+        layer_scores = [0.0] * n_layers
+
+    ranked = sorted(
+        middle,
+        key=lambda idx: (-float(layer_scores[idx]), abs(idx - int(best_layer))),
+    )
+
+    # Ensure best layer is always first-priority when target >= 1.
+    ranked = [int(best_layer)] + [idx for idx in ranked if idx != int(best_layer)]
+
+    target = min(target, len(middle))
+    return set(ranked[:target])
 
 
 class RefusalStiefelRotation(nn.Module):
@@ -1094,7 +1139,7 @@ class RefusalStiefelRotation(nn.Module):
         init_vectors: torch.Tensor | None = None,
         init_mode: str = "diag_permutation",
         orth_method: str = "svd",
-        num_opt_layers: int = 8,
+        num_opt_layers: int = 1,
         best_layer: int = None,
     ) -> None:
         super().__init__()
@@ -1102,12 +1147,20 @@ class RefusalStiefelRotation(nn.Module):
         self.dim = dim
         self._cached_matrices: list[torch.Tensor] | None = None
         self._use_imported_cayley = False
+        self._guard_mode = "attack"
 
         n_layers = len(self.module.layers)
-        self.num_opt_layers = int(max(0, num_opt_layers))
-        self._optimized_layer_idxs = _build_optimized_layer_idxs(n_layers, self.num_opt_layers)
-        if best_layer is not None and 0 < best_layer < n_layers - 1:
-            self._optimized_layer_idxs.add(int(best_layer))
+        self.num_opt_layers = int(num_opt_layers)
+        layer_scores = _layer_scores_from_refusal_directions(globals().get("refusal_directions"), n_layers)
+        if best_layer is None or not (0 < int(best_layer) < n_layers - 1):
+            middle = list(range(1, n_layers - 1))
+            best_layer = max(middle, key=lambda idx: float(layer_scores[idx]))
+        self._optimized_layer_idxs = _build_optimized_layer_idxs(
+            n_layers=n_layers,
+            num_opt_layers=self.num_opt_layers,
+            best_layer=int(best_layer),
+            layer_scores=layer_scores,
+        )
         if orth_method not in ("qr", "svd"):
             raise ValueError(f"Invalid orth_method: {orth_method}")
         self.orth_method = orth_method
@@ -1247,6 +1300,12 @@ class RefusalStiefelRotation(nn.Module):
                     pass
         return x @ M.T
 
+    def set_guard_mode(self, mode: str) -> None:
+        mode = str(mode).strip().lower()
+        if mode not in ("attack", "protect"):
+            raise ValueError(f"Unsupported guard mode: {mode}")
+        self._guard_mode = mode
+
     def __call__(self, direction, best_layer: int = None):
         del direction
         for layer_idx, layer in enumerate(self.module.layers):
@@ -1323,21 +1382,27 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         init_mode: str = "diag_permutation",
         orth_method: str = "svd",
         proj_reduce_ratio: int = 10,
-        num_opt_layers: int = 8,
+        num_opt_layers: int = 1,
         best_layer: int = None,
-        protect: bool = False,
     ) -> None:
         nn.Module.__init__(self)
         self.module = module
         self.dim = dim
         self._cached_matrices: list[torch.Tensor] | None = None
-        self.protect = bool(protect)
+        self._guard_mode = "attack"
 
         n_layers = len(self.module.layers)
-        self.num_opt_layers = int(max(0, num_opt_layers))
-        self._optimized_layer_idxs = _build_optimized_layer_idxs(n_layers, self.num_opt_layers)
-        if best_layer is not None and 0 < best_layer < n_layers - 1:
-            self._optimized_layer_idxs.add(int(best_layer))
+        self.num_opt_layers = int(num_opt_layers)
+        layer_scores = _layer_scores_from_refusal_directions(globals().get("refusal_directions"), n_layers)
+        if best_layer is None or not (0 < int(best_layer) < n_layers - 1):
+            middle = list(range(1, n_layers - 1))
+            best_layer = max(middle, key=lambda idx: float(layer_scores[idx]))
+        self._optimized_layer_idxs = _build_optimized_layer_idxs(
+            n_layers=n_layers,
+            num_opt_layers=self.num_opt_layers,
+            best_layer=int(best_layer),
+            layer_scores=layer_scores,
+        )
         if orth_method not in ("qr", "svd"):
             raise ValueError(f"Invalid orth_method: {orth_method}")
         self.orth_method = orth_method
@@ -1458,7 +1523,7 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
                     M = M.to(dtype=model.dtype)
                 except Exception:
                     pass
-        if self.protect:
+        if self._guard_mode == "protect":
             return x @ M
         return x @ M.T
 
@@ -1546,7 +1611,7 @@ class RefusalAngularSteeringRotation(RefusalStiefelRotation):
         init_vectors: torch.Tensor | None = None,
         init_mode: str = "diag_permutation",
         orth_method: str = "svd",
-        num_opt_layers: int = 8,
+        num_opt_layers: int = 1,
         best_layer: int = None,
         target_degree: float = 180.0,
         adaptive_mode: int = 1,
@@ -1943,14 +2008,13 @@ def refusal_cone_optimization(model, train_dataset,
                               init_vectors=[], 
                               n_lr_reduce=DEFAULT_CONFIG['n_lr_reduce'], 
                               orthogonal_vectors=[],
-                              num_opt_layers: int = DEFAULT_CONFIG.get('num_opt_layers', 8),
+                              num_opt_layers: int = DEFAULT_CONFIG.get('num_opt_layers', 1),
                               proj_reduce_ratio: int = DEFAULT_CONFIG.get('proj_reduce_ratio', 10),
                               tb_writer=None,
                               tb_checkpoint_dir=None,
                               direction_mode=DEFAULT_CONFIG['direction_mode'],
                               log_steps: int = DEFAULT_CONFIG['log_steps'],
-                              train_guard_val_gap: int = DEFAULT_CONFIG['train_guard_val_gap'],
-                              protect: bool = DEFAULT_CONFIG['protect']):
+                              train_guard_val_gap: int = DEFAULT_CONFIG['train_guard_val_gap']):
 
     if direction_mode == "rotation":
         if cone_dim != 1:
@@ -2008,7 +2072,6 @@ def refusal_cone_optimization(model, train_dataset,
             proj_reduce_ratio=proj_reduce_ratio,
             num_opt_layers=num_opt_layers,
             best_layer=best_layer,
-            protect=protect,
         )
     else:
         raise ValueError(f"Invalid direction_mode: {direction_mode}")
@@ -2462,11 +2525,10 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
         "orthogonal_vectors": orthogonal_vectors,
         "direction_mode": args.direction_mode,
         "optimizer_name": args.optimizer,
-        "num_opt_layers": getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8)),
+        "num_opt_layers": getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
         "proj_reduce_ratio": getattr(args, "proj_reduce_ratio", DEFAULT_CONFIG.get("proj_reduce_ratio", 10)),
         "log_steps": getattr(args, "log_steps", DEFAULT_CONFIG["log_steps"]),
         "train_guard_val_gap": getattr(args, "train_guard_val_gap", DEFAULT_CONFIG["train_guard_val_gap"]),
-        "protect": bool(getattr(args, "protect", DEFAULT_CONFIG["protect"])),
     }
     train_kwargs.update(kwargs) # Apply any user-provided overrides
 
@@ -2645,8 +2707,8 @@ def _eval_payload_to_major_metrics_rows(payload: dict) -> list[dict]:
     for backend, backend_block in guard_metrics.items():
         for harm_kind in ("harmful", "harmless"):
             split_block = backend_block.get(harm_kind) or {}
-            for phase in ("initial", "refined"):
-                stats = split_block.get(phase) or {}
+            for phase, stats in split_block.items():
+                stats = stats or {}
                 for metric_name in ("n", "mean_score", "mean_unsafe_probability", "pct_unsafe"):
                     metric_val = stats.get(metric_name)
                     if metric_val is None:
@@ -2915,6 +2977,27 @@ def _make_ablation_step_fn(fn_vector: torch.Tensor):
     return step_fn
 
 
+def _make_baseline_addition_step_fn(
+    fn_vector: torch.Tensor,
+    *,
+    best_layer: int,
+    alpha_value: float | torch.Tensor,
+    guard_mode: str = "attack",
+):
+    v = fn_vector / (fn_vector.norm() + 1e-12)
+    sign = -1.0 if str(guard_mode).strip().lower() == "protect" else 1.0
+    if torch.is_tensor(alpha_value):
+        alpha_scalar = float(alpha_value.detach().item())
+    else:
+        alpha_scalar = float(alpha_value)
+
+    def step_fn(model: LanguageModel):
+        direction = v.to(model.dtype).to(model.device)
+        model.model.layers[int(best_layer)].input += sign * alpha_scalar * direction
+
+    return step_fn
+
+
 def _make_activation_rotation_step_fn(
     cayley_param: torch.Tensor,
     rotation_model: nn.Module | None = None,
@@ -3055,14 +3138,22 @@ def _normalize_guard_backends(backends) -> list[str]:
     return normalized
 
 
-def _build_train_guard_step_fn(operation, direction_mode: str, best_layer: int):
+def _supports_protect_guard_mode(direction_mode: str) -> bool:
+    return str(direction_mode).strip().lower() in {"baseline", "shtiefel_proj_rot"}
+
+
+def _build_train_guard_step_fn(operation, direction_mode: str, best_layer: int, guard_mode: str = "attack"):
+    mode = str(guard_mode).strip().lower()
+    if hasattr(operation, "set_guard_mode"):
+        operation.set_guard_mode(mode)
+
     def _apply_operation():
         if direction_mode == "baseline":
-            if hasattr(operation, "fn_vectors") and len(operation.fn_vectors) > 0:
-                operation(operation.fn_vectors[0])
+            if hasattr(operation, "fn_vectors") and len(operation.fn_vectors) > 0 and best_layer is not None:
+                operation.add(operation.fn_vectors[0], alpha, int(best_layer), best_layer)
                 return
             if hasattr(operation, "fn_vector"):
-                operation(operation.fn_vector)
+                operation.add(operation.fn_vector, alpha, int(best_layer), best_layer)
                 return
             raise ValueError("baseline direction_mode requires operation.fn_vectors/fn_vector")
 
@@ -3145,57 +3236,65 @@ def _run_train_guard_validation(
 
     # Keep train-time guard validation behavior aligned with eval behavior.
     lg_max_new_tokens = 1 if direction_mode == "shtiefel_rot" else eval_max_new_tokens
-    step_fn = _build_train_guard_step_fn(operation, direction_mode, best_layer)
+    guard_modes = ["attack"]
+    if _supports_protect_guard_mode(direction_mode):
+        guard_modes.append("protect")
 
-    with torch.no_grad():
-        harmful_resp = _generate_nnsight(
-            model,
-            harmful_prompts,
-            max_new_tokens=lg_max_new_tokens,
-            batch_size=eval_batch_size,
-            intervene_step_fn=step_fn,
-            intervene_every_step=True,
-        )
-        harmless_resp = _generate_nnsight(
-            model,
-            harmless_prompts,
-            max_new_tokens=lg_max_new_tokens,
-            batch_size=eval_batch_size,
-            intervene_step_fn=step_fn,
-            intervene_every_step=True,
-        )
+    try:
+        for guard_mode in guard_modes:
+            step_fn = _build_train_guard_step_fn(operation, direction_mode, best_layer, guard_mode=guard_mode)
+            with torch.no_grad():
+                harmful_resp = _generate_nnsight(
+                    model,
+                    harmful_prompts,
+                    max_new_tokens=lg_max_new_tokens,
+                    batch_size=eval_batch_size,
+                    intervene_step_fn=step_fn,
+                    intervene_every_step=True,
+                )
+                harmless_resp = _generate_nnsight(
+                    model,
+                    harmless_prompts,
+                    max_new_tokens=lg_max_new_tokens,
+                    batch_size=eval_batch_size,
+                    intervene_step_fn=step_fn,
+                    intervene_every_step=True,
+                )
 
-    for backend in backends:
-        evaluator = None
-        try:
-            evaluator = _get_guard_evaluator(backend)
-            harmful_results = evaluator.evaluate_batch(list(zip(harmful_q, harmful_resp)), progress_every=20)
-            harmless_results = evaluator.evaluate_batch(list(zip(harmless_q, harmless_resp)), progress_every=20)
-            harmful_stats = _aggregate_llamaguard(harmful_results)
-            harmless_stats = _aggregate_llamaguard(harmless_results)
-
-            metrics = {}
-            if harmful_stats.get("mean_score") is not None:
-                metrics[f"train_guard/{backend}/harmful_mean_score"] = harmful_stats["mean_score"]
-            if harmful_stats.get("pct_unsafe") is not None:
-                metrics[f"train_guard/{backend}/harmful_pct_unsafe"] = harmful_stats["pct_unsafe"]
-            if harmless_stats.get("mean_score") is not None:
-                metrics[f"train_guard/{backend}/harmless_mean_score"] = harmless_stats["mean_score"]
-            if harmless_stats.get("pct_unsafe") is not None:
-                metrics[f"train_guard/{backend}/harmless_pct_unsafe"] = harmless_stats["pct_unsafe"]
-            if metrics and tb_writer is not None:
-                tensorboard_log_scalars(tb_writer, metrics, num_iters)
-            print(
-                f"[train_guard] iter={num_iters} backend={backend} "
-                f"harmful_mean={harmful_stats.get('mean_score')} harmful_pct_unsafe={harmful_stats.get('pct_unsafe')} "
-                f"harmless_mean={harmless_stats.get('mean_score')} harmless_pct_unsafe={harmless_stats.get('pct_unsafe')}"
-            )
-        finally:
-            if evaluator is not None:
+            for backend in backends:
+                evaluator = None
                 try:
-                    _unload_guard_evaluator(backend)
-                except Exception:
-                    pass
+                    evaluator = _get_guard_evaluator(backend)
+                    harmful_results = evaluator.evaluate_batch(list(zip(harmful_q, harmful_resp)), progress_every=20)
+                    harmless_results = evaluator.evaluate_batch(list(zip(harmless_q, harmless_resp)), progress_every=20)
+                    harmful_stats = _aggregate_llamaguard(harmful_results)
+                    harmless_stats = _aggregate_llamaguard(harmless_results)
+
+                    metrics = {}
+                    if harmful_stats.get("mean_score") is not None:
+                        metrics[f"train_guard/{guard_mode}/{backend}/harmful_mean_score"] = harmful_stats["mean_score"]
+                    if harmful_stats.get("pct_unsafe") is not None:
+                        metrics[f"train_guard/{guard_mode}/{backend}/harmful_pct_unsafe"] = harmful_stats["pct_unsafe"]
+                    if harmless_stats.get("mean_score") is not None:
+                        metrics[f"train_guard/{guard_mode}/{backend}/harmless_mean_score"] = harmless_stats["mean_score"]
+                    if harmless_stats.get("pct_unsafe") is not None:
+                        metrics[f"train_guard/{guard_mode}/{backend}/harmless_pct_unsafe"] = harmless_stats["pct_unsafe"]
+                    if metrics and tb_writer is not None:
+                        tensorboard_log_scalars(tb_writer, metrics, num_iters)
+                    print(
+                        f"[train_guard] iter={num_iters} mode={guard_mode} backend={backend} "
+                        f"harmful_mean={harmful_stats.get('mean_score')} harmful_pct_unsafe={harmful_stats.get('pct_unsafe')} "
+                        f"harmless_mean={harmless_stats.get('mean_score')} harmless_pct_unsafe={harmless_stats.get('pct_unsafe')}"
+                    )
+                finally:
+                    if evaluator is not None:
+                        try:
+                            _unload_guard_evaluator(backend)
+                        except Exception:
+                            pass
+    finally:
+        if hasattr(operation, "set_guard_mode"):
+            operation.set_guard_mode("attack")
 
 
 def _load_eval_split_json(splits_name: str, kind: str, split: str) -> list[dict]:
@@ -3303,11 +3402,16 @@ def _evaluate_llamaguard_and_mmlu(
             "eval_guard_backends": guard_backends,
         }
 
-        def _make_refined_step_fn(refined_artifact):
+        def _make_refined_step_fn(refined_artifact, guard_mode: str = "attack"):
             if refined_artifact is None:
                 return None
             if direction_mode == "baseline":
-                return _make_ablation_step_fn(refined_artifact)
+                return _make_baseline_addition_step_fn(
+                    refined_artifact,
+                    best_layer=best_layer,
+                    alpha_value=alpha,
+                    guard_mode=guard_mode,
+                )
 
             # For activation-rotation style modes, reuse the operation modules' own
             # proxy-safe rotation logic (avoids bf16/float32 matmul mismatches).
@@ -3323,7 +3427,7 @@ def _evaluate_llamaguard_and_mmlu(
                     init_vectors=[],
                     init_mode=args.init_mode,
                     orth_method=args.orth_method,
-                    num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8)),
+                    num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
                     best_layer=best_layer,
                 )
             elif direction_mode == "angular_steering":
@@ -3333,7 +3437,7 @@ def _evaluate_llamaguard_and_mmlu(
                     init_vectors=[],
                     init_mode=args.init_mode,
                     orth_method=args.orth_method,
-                    num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8)),
+                    num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
                     best_layer=best_layer,
                 )
             elif direction_mode == "householder_pseudo_rotation":
@@ -3343,7 +3447,7 @@ def _evaluate_llamaguard_and_mmlu(
                     init_vectors=[],
                     init_mode=args.init_mode,
                     orth_method=args.orth_method,
-                    num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8)),
+                    num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
                     best_layer=best_layer,
                 )
             elif direction_mode == "shtiefel_proj_rot":
@@ -3354,9 +3458,11 @@ def _evaluate_llamaguard_and_mmlu(
                     init_mode=args.init_mode,
                     orth_method=args.orth_method,
                     proj_reduce_ratio=getattr(args, "proj_reduce_ratio", DEFAULT_CONFIG.get("proj_reduce_ratio", 10)),
-                    num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8)),
+                    num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
                     best_layer=best_layer,
                 )
+                if hasattr(rotation_model, "set_guard_mode"):
+                    rotation_model.set_guard_mode(guard_mode)
 
             return _make_activation_rotation_step_fn(
                 refined_artifact,
@@ -3402,29 +3508,34 @@ def _evaluate_llamaguard_and_mmlu(
                 initial_harmful = _generate_nnsight(model, harmful_prompts, max_new_tokens=lg_max_new_tokens, batch_size=eval_batch_size)
                 initial_harmless = _generate_nnsight(model, harmless_prompts, max_new_tokens=lg_max_new_tokens, batch_size=eval_batch_size)
 
-                refined_harmful = None
-                refined_harmless = None
+                refined_generations: dict[str, dict[str, list[str]]] = {}
                 if refined_artifact is not None:
-                    step_fn = _make_refined_step_fn(refined_artifact)
+                    guard_modes = ["attack"]
+                    if _supports_protect_guard_mode(direction_mode):
+                        guard_modes.append("protect")
                     # For single-token `shtiefel_rot` eval, intervention must happen before
                     # the first decode step; otherwise no intervention is applied.
                     intervene_every_step = True
-                    refined_harmful = _generate_nnsight(
-                        model,
-                        harmful_prompts,
-                        max_new_tokens=lg_max_new_tokens,
-                        batch_size=eval_batch_size,
-                        intervene_step_fn=step_fn,
-                        intervene_every_step=intervene_every_step,
-                    )
-                    refined_harmless = _generate_nnsight(
-                        model,
-                        harmless_prompts,
-                        max_new_tokens=lg_max_new_tokens,
-                        batch_size=eval_batch_size,
-                        intervene_step_fn=step_fn,
-                        intervene_every_step=intervene_every_step,
-                    )
+                    for guard_mode in guard_modes:
+                        step_fn = _make_refined_step_fn(refined_artifact, guard_mode=guard_mode)
+                        refined_generations[guard_mode] = {
+                            "harmful": _generate_nnsight(
+                                model,
+                                harmful_prompts,
+                                max_new_tokens=lg_max_new_tokens,
+                                batch_size=eval_batch_size,
+                                intervene_step_fn=step_fn,
+                                intervene_every_step=intervene_every_step,
+                            ),
+                            "harmless": _generate_nnsight(
+                                model,
+                                harmless_prompts,
+                                max_new_tokens=lg_max_new_tokens,
+                                batch_size=eval_batch_size,
+                                intervene_step_fn=step_fn,
+                                intervene_every_step=intervene_every_step,
+                            ),
+                        }
 
                 guard_metrics = {}
                 guard_errors = {}
@@ -3444,25 +3555,43 @@ def _evaluate_llamaguard_and_mmlu(
                         evaluator = _get_guard_evaluator(backend)
                         initial_harmful_results = evaluator.evaluate_batch(list(zip(harmful_q, initial_harmful)), progress_every=20)
                         initial_harmless_results = evaluator.evaluate_batch(list(zip(harmless_q, initial_harmless)), progress_every=20)
-                        refined_harmful_results = evaluator.evaluate_batch(list(zip(harmful_q, refined_harmful)), progress_every=20) if refined_harmful is not None else None
-                        refined_harmless_results = evaluator.evaluate_batch(list(zip(harmless_q, refined_harmless)), progress_every=20) if refined_harmless is not None else None
+                        refined_results_by_mode = {}
+                        for mode_name, mode_generations in refined_generations.items():
+                            refined_results_by_mode[mode_name] = {
+                                "harmful": evaluator.evaluate_batch(
+                                    list(zip(harmful_q, mode_generations["harmful"])),
+                                    progress_every=20,
+                                ),
+                                "harmless": evaluator.evaluate_batch(
+                                    list(zip(harmless_q, mode_generations["harmless"])),
+                                    progress_every=20,
+                                ),
+                            }
 
                         backend_block = {
                             "harmful": {
                                 "initial": _aggregate_llamaguard(initial_harmful_results),
-                                "refined": _aggregate_llamaguard(refined_harmful_results) if refined_harmful_results is not None else None,
+                                "refined": _aggregate_llamaguard(refined_results_by_mode["attack"]["harmful"]) if "attack" in refined_results_by_mode else None,
+                                "refined_attack": _aggregate_llamaguard(refined_results_by_mode["attack"]["harmful"]) if "attack" in refined_results_by_mode else None,
+                                "refined_protect": _aggregate_llamaguard(refined_results_by_mode["protect"]["harmful"]) if "protect" in refined_results_by_mode else None,
                             },
                             "harmless": {
                                 "initial": _aggregate_llamaguard(initial_harmless_results),
-                                "refined": _aggregate_llamaguard(refined_harmless_results) if refined_harmless_results is not None else None,
+                                "refined": _aggregate_llamaguard(refined_results_by_mode["attack"]["harmless"]) if "attack" in refined_results_by_mode else None,
+                                "refined_attack": _aggregate_llamaguard(refined_results_by_mode["attack"]["harmless"]) if "attack" in refined_results_by_mode else None,
+                                "refined_protect": _aggregate_llamaguard(refined_results_by_mode["protect"]["harmless"]) if "protect" in refined_results_by_mode else None,
                             },
                         }
                         guard_metrics[backend] = backend_block
 
                         _log_guard(backend, "harmful_initial", backend_block["harmful"]["initial"])
                         _log_guard(backend, "harmful_refined", backend_block["harmful"]["refined"])
+                        _log_guard(backend, "harmful_refined_attack", backend_block["harmful"]["refined_attack"])
+                        _log_guard(backend, "harmful_refined_protect", backend_block["harmful"]["refined_protect"])
                         _log_guard(backend, "harmless_initial", backend_block["harmless"]["initial"])
                         _log_guard(backend, "harmless_refined", backend_block["harmless"]["refined"])
+                        _log_guard(backend, "harmless_refined_attack", backend_block["harmless"]["refined_attack"])
+                        _log_guard(backend, "harmless_refined_protect", backend_block["harmless"]["refined_protect"])
                     except Exception as be:
                         guard_errors[backend] = {
                             "type": type(be).__name__,
@@ -3683,7 +3812,7 @@ def train_refusal_cone(group_name, run_name, init_vectors, **kwargs):
     train_kwargs.update(kwargs)
     train_kwargs.setdefault(
         "num_opt_layers",
-        getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 8)),
+        getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
     )
     train_kwargs.setdefault(
         "proj_reduce_ratio",
@@ -3696,10 +3825,6 @@ def train_refusal_cone(group_name, run_name, init_vectors, **kwargs):
     train_kwargs.setdefault(
         "train_guard_val_gap",
         getattr(args, "train_guard_val_gap", DEFAULT_CONFIG["train_guard_val_gap"]),
-    )
-    train_kwargs.setdefault(
-        "protect",
-        bool(getattr(args, "protect", DEFAULT_CONFIG["protect"])),
     )
 
     run_config = vars(args).copy()

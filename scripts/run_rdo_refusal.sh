@@ -5,18 +5,17 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # variables
-direction_mode="shtiefel_proj_rot" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot", "angular_steering", "householder_pseudo_rotation"
-protect=false # if true, pass --protect (shtiefel_proj_rot inverse-side rotation)
+direction_mode="baseline" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot", "angular_steering", "householder_pseudo_rotation"
 train_guard_val_gap=100 # 0 disables; otherwise run train guard validation every N dataloader iterations
 num_opt_layers=1 # optimize this many middle layers (plus best layer during intervention)
 llamaguard_data="basic" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
-eval_guard_backends=("llamaguard" "qwen3guard" "wildguard") # any subset of: "llamaguard" "qwen3guard" "wildguard"
+eval_guard_backends=("llamaguard" "qwen3guard") # any subset of: "llamaguard" "qwen3guard" "wildguard"
 lr=1e-5
-optimizer="SGD" # "Adam", "AdamW", "SGD"
+optimizer="AdamW" # "Adam", "AdamW", "SGD"
 max_iters=10000
 result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
 log_steps=10000
-init_mode="ab_orthogonal" # "random", "diag_permutation", or "ab_orthogonal"
+init_mode="diag_permutation" # "random", "diag_permutation", or "ab_orthogonal"
 orth_method="svd" # "qr" or "svd"
 proj_reduce_ratio=10 # used when direction_mode="shtiefel_proj_rot" (k = hidden_size / ratio)
 
@@ -41,7 +40,7 @@ mmlu_store_predictions=false
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=4
+export CUDA_VISIBLE_DEVICES=6
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -66,7 +65,7 @@ cmd=(python -m baselines.rdo_refusal \
   --llamaguard_data "${llamaguard_data}" \
   --lr "${lr}" \
   --optimizer "${optimizer}" \
-  # --eval_llamaguard \
+  --eval_llamaguard \
   --num_opt_layers "${num_opt_layers}" \
   --proj_reduce_ratio "${proj_reduce_ratio}" \
   --init_mode "${init_mode}" \
@@ -83,7 +82,7 @@ cmd=(python -m baselines.rdo_refusal \
   --mmlu_sample_size "${MMLU_SAMPLE_SIZE}" \
   --mmlu_sample_seed "${mmlu_sample_seed}" \
   --mmlu_max_new_tokens "${MMLU_MAX_NEW_TOKENS}" \
-  # --retain_loss \
+  --retain_loss \
 )
 
 # --init_mode: "random", "diag_permutation", or "ab_orthogonal"
@@ -97,10 +96,6 @@ cmd+=(--eval_guard_backend "${eval_guard_backends[@]}")
 
 if [[ "${enable_mmlu_eval}" == "true" ]]; then
   cmd+=(--eval_mmlu)
-fi
-
-if [[ "${protect}" == "true" ]]; then
-  cmd+=(--protect)
 fi
 
 if [[ "${MMLU_STORE_PREDICTIONS}" == "true" ]]; then
