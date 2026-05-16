@@ -55,7 +55,8 @@ export LLAMAGUARD_MAX_NEW_TOKENS="${LLAMAGUARD_MAX_NEW_TOKENS:-100}"
 export MAX_HARMFUL="${MAX_HARMFUL}" # 250
 export MAX_HARMLESS="${MAX_HARMLESS}" # 250
 
-export HF_TOKEN="your-hf-token"
+# export HF_TOKEN="hf_fJyEXMwqeWZJvzLrBqCLDajXibFEDMGWW"
+export HF_TOKEN="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"
 
 # ---- Default command ----
 cmd=(python -m baselines.rdo_refusal \
