@@ -405,11 +405,12 @@ if not (os.path.exists(direction_file) and os.path.exists(metadata_file)):
         "DIM direction files not found. Please compute the DIM directions first as described in the README."
     )
 
-refusal_directions = torch.load(mean_diffs_file)
+load_map_location = "cuda" if torch.cuda.is_available() else "cpu"
+refusal_directions = torch.load(mean_diffs_file, map_location=load_map_location)
 refusal_results = json.load(open(metadata_file))
 best_layer = refusal_results["layer"]
 best_token = refusal_results["pos"]
-best_refusal_direction = torch.load(direction_file).to(model.dtype)
+best_refusal_direction = torch.load(direction_file, map_location=load_map_location).to(model.dtype)
 
 # %%
 SAVE_DIR = f"{os.getenv('SAVE_DIR')}/rdo/{MODEL_PATH.split('/')[-1]}/"
