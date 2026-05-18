@@ -917,7 +917,7 @@ class RefusalDirectionActivationRotation(nn.Module):
         super().__init__()
         self.module = module
         self.dim = dim
-        self._cached_matrices: list[torch.Tensor] | None = None
+        self._cached_matrices: list[torch.Tensor | None] | None = None
         dev = _runtime_device()
 
         # Learn a separate orthogonal transform per layer via Cayley parameterization.
@@ -941,6 +941,7 @@ class RefusalDirectionActivationRotation(nn.Module):
             torch.zeros(dim, dtype=torch.float32, device=dev),
             requires_grad=False,
         )
+        self.register_buffer("_identity_matrix", torch.eye(dim, dtype=torch.float32, device=dev))
 
     @property
     def fn_vectors(self):
@@ -1222,10 +1223,12 @@ class RefusalStiefelRotation(nn.Module):
     def matrix(self, layer_idx: int) -> torch.Tensor:
         """Apply orthogonal projection with correct gradients."""
         if layer_idx not in self._optimized_layer_idxs:
-            W = self.cayley_param[layer_idx]
-            return torch.eye(self.dim, device=W.device, dtype=W.dtype)
+            return self._identity_matrix
         if self._cached_matrices is not None:
-            return self._cached_matrices[layer_idx]
+            M = self._cached_matrices[layer_idx]
+            if M is None:
+                return self._identity_matrix
+            return M
         # During eval, checkpoints are already post-retraction orthogonal maps.
         # Use them directly to avoid an extra SVD projection pass.
         if self._use_imported_cayley:
@@ -1234,7 +1237,7 @@ class RefusalStiefelRotation(nn.Module):
         Q = OrthogonalProjection.apply(W)
         return Q
 
-    def set_cached_matrices(self, matrices: list[torch.Tensor] | None) -> None:
+    def set_cached_matrices(self, matrices: list[torch.Tensor | None] | None) -> None:
         self._cached_matrices = matrices
 
     def _update_optimized_layer_idxs_from_checkpoint(
@@ -1400,7 +1403,7 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         nn.Module.__init__(self)
         self.module = module
         self.dim = dim
-        self._cached_matrices: list[torch.Tensor] | None = None
+        self._cached_matrices: list[torch.Tensor | None] | None = None
         self._guard_mode = "attack"
         dev = _runtime_device()
 
@@ -1472,6 +1475,7 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         )
 
         self.register_buffer("cayley_param", torch.zeros(n_layers, dim, dim, dtype=torch.float32, device=dev))
+        self.register_buffer("_identity_matrix", torch.eye(dim, dtype=torch.float32, device=dev))
         self._use_composed_cayley = False
         self._add_total_time_sec = 0.0
         self._add_call_count = 0
@@ -1498,10 +1502,12 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
 
     def matrix(self, layer_idx: int) -> torch.Tensor:
         if layer_idx not in self._optimized_layer_idxs:
-            W = self.proj_A[layer_idx]
-            return torch.eye(self.dim, device=W.device, dtype=W.dtype)
+            return self._identity_matrix
         if self._cached_matrices is not None:
-            return self._cached_matrices[layer_idx]
+            M = self._cached_matrices[layer_idx]
+            if M is None:
+                return self._identity_matrix
+            return M
         if self._use_composed_cayley:
             return self.cayley_param[layer_idx]
         A = self.proj_A[layer_idx]
@@ -2934,6 +2940,118 @@ def set_matrix(cayley_param: torch.Tensor, rotation_model: nn.Module) -> None:
         target.copy_(src)
 
 
+def _build_sparse_rotation_cache(cayley_param: torch.Tensor, rotation_model: nn.Module) -> list[torch.Tensor | None]:
+    """
+    Precompute per-layer rotation matrices with sparse identity sentinels.
+    Non-optimized layers are cached as None to avoid storing dense eye matrices.
+    """
+    Ms: list[torch.Tensor | None] = []
+    n_layers = cayley_param.shape[0]
+    optimized = getattr(rotation_model, "_optimized_layer_idxs", None)
+    optimized_set = set(optimized) if optimized is not None else None
+    for layer_idx in range(n_layers):
+        if optimized_set is not None and layer_idx not in optimized_set:
+            Ms.append(None)
+            continue
+        if hasattr(rotation_model, "cayley_matrix"):
+            M = rotation_model.cayley_matrix(layer_idx)
+        elif hasattr(rotation_model, "matrix"):
+            M = rotation_model.matrix(layer_idx)
+        else:
+            cp = rotation_model.cayley_param[layer_idx]
+            M = _cayley_from_param(cp)
+        Ms.append(M.detach())
+    return Ms
+
+
+def _prime_rotation_model_cache(rotation_model: nn.Module, cayley_param: torch.Tensor | None = None) -> None:
+    if cayley_param is not None:
+        set_matrix(cayley_param, rotation_model)
+    if not hasattr(rotation_model, "set_cached_matrices"):
+        return
+    with torch.no_grad():
+        if cayley_param is None:
+            if hasattr(rotation_model, "cayley_param"):
+                n_layers = rotation_model.cayley_param.shape[0]
+                dummy = rotation_model.cayley_param
+            elif hasattr(rotation_model, "proj_A"):
+                n_layers = rotation_model.proj_A.shape[0]
+                dummy = rotation_model.proj_A
+            else:
+                return
+            source = torch.empty((n_layers,), device=dummy.device)
+        else:
+            source = cayley_param
+        Ms = _build_sparse_rotation_cache(source, rotation_model)
+        rotation_model.set_cached_matrices(Ms)
+
+
+def _clear_rotation_model_cache(rotation_model: nn.Module) -> None:
+    if hasattr(rotation_model, "set_cached_matrices"):
+        try:
+            rotation_model.set_cached_matrices(None)
+        except Exception:
+            pass
+
+
+def _is_cuda_oom_error(exc: Exception) -> bool:
+    if isinstance(exc, torch.OutOfMemoryError):
+        return True
+    msg = str(exc).lower()
+    return "out of memory" in msg and "cuda" in msg
+
+
+def _guard_eval_batch_size(default_batch_size: int, *, phase: str) -> int:
+    # Optional per-phase override with backward-compatible defaults.
+    env_name = f"GUARD_{phase.upper()}_BATCH_SIZE"
+    raw = os.getenv(env_name) or os.getenv("GUARD_EVAL_BATCH_SIZE")
+    if raw is None:
+        return max(1, int(default_batch_size))
+    try:
+        return max(1, int(raw))
+    except Exception:
+        return max(1, int(default_batch_size))
+
+
+def _generate_nnsight_with_guard_retry(
+    *,
+    model: LanguageModel,
+    prompts: list[str],
+    max_new_tokens: int,
+    batch_size: int,
+    intervene_step_fn=None,
+    intervene_every_step: bool = True,
+    retry_on_oom: bool = True,
+    log_prefix: str = "guard",
+) -> list[str]:
+    cur_bs = max(1, int(batch_size))
+    attempts = 2 if retry_on_oom else 1
+    for attempt in range(attempts):
+        try:
+            return _generate_nnsight(
+                model,
+                prompts,
+                max_new_tokens=max_new_tokens,
+                batch_size=cur_bs,
+                intervene_step_fn=intervene_step_fn,
+                intervene_every_step=intervene_every_step,
+            )
+        except Exception as e:
+            if (not retry_on_oom) or (attempt + 1 >= attempts) or (not _is_cuda_oom_error(e)):
+                raise
+            new_bs = max(1, cur_bs // 2)
+            if new_bs == cur_bs:
+                raise
+            print(f"[{log_prefix}] CUDA OOM at batch_size={cur_bs}; retrying once with batch_size={new_bs}")
+            cur_bs = new_bs
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+    raise RuntimeError("unreachable")
+
+
 def _generate_nnsight(
     model: LanguageModel,
     prompts: list[str],
@@ -3030,29 +3148,7 @@ def _make_activation_rotation_step_fn(
     """
     if rotation_model is not None:
         # Reuse the trained rotation module for evaluation.
-        set_matrix(cayley_param, rotation_model)
-
-        # Precompute and cache per-layer orthogonal matrices once (outside tracing)
-        # so the module's original __call__ doesn't rebuild linalg_inv/SVD nodes
-        # during nnsight generation (which can lead to OOM).
-        with torch.no_grad():
-            Ms: list[torch.Tensor] = []
-            n_layers = cayley_param.shape[0]
-            for layer_idx in range(n_layers):
-                if hasattr(rotation_model, "cayley_matrix"):
-                    M = rotation_model.cayley_matrix(layer_idx)
-                elif hasattr(rotation_model, "matrix"):
-                    M = rotation_model.matrix(layer_idx)
-                else:
-                    cp = rotation_model.cayley_param[layer_idx]
-                    M = _cayley_from_param(cp)
-                Ms.append(M.detach())
-
-            if hasattr(rotation_model, "set_cached_matrices"):
-                try:
-                    rotation_model.set_cached_matrices(Ms)
-                except Exception:
-                    pass
+        _prime_rotation_model_cache(rotation_model, cayley_param)
 
         def step_fn(model: LanguageModel):
             # Make sure the rotation module points at the live model's layers.
@@ -3066,7 +3162,7 @@ def _make_activation_rotation_step_fn(
 
     # Backwards-compatible path: explicit Cayley matrices per layer.
     cayley_param = cayley_param.to(device=_runtime_device(), dtype=torch.float32)
-    Ms: list[torch.Tensor] = []
+    Ms: list[torch.Tensor | None] = []
     for layer_idx in range(cayley_param.shape[0]):
         M = _cayley_from_param(cayley_param[layer_idx])
         Ms.append(M)
@@ -3075,6 +3171,8 @@ def _make_activation_rotation_step_fn(
         # Rotate only layer inputs, consistent with RefusalDirectionActivationRotation.
         for layer_idx, layer in enumerate(model.model.layers):
             M = Ms[layer_idx]
+            if M is None:
+                continue
             try:
                 Mx = M.to(device=layer.input.device, dtype=layer.input.dtype)
             except Exception:
@@ -3251,29 +3349,37 @@ def _run_train_guard_validation(
 
     # Keep train-time guard validation behavior aligned with eval behavior.
     lg_max_new_tokens = 1 if direction_mode == "shtiefel_rot" else eval_max_new_tokens
+    guard_batch_size = _guard_eval_batch_size(eval_batch_size, phase="train")
     guard_modes = ["attack"]
     if _supports_protect_guard_mode(direction_mode):
         guard_modes.append("protect")
 
     try:
         for guard_mode in guard_modes:
+            # Snapshot rotation matrices once for this validation run to avoid
+            # recomputing OrthogonalProjection/SVD inside each decode step.
+            _prime_rotation_model_cache(operation, None)
             step_fn = _build_train_guard_step_fn(operation, direction_mode, best_layer, guard_mode=guard_mode)
             with torch.no_grad():
-                harmful_resp = _generate_nnsight(
-                    model,
-                    harmful_prompts,
+                harmful_resp = _generate_nnsight_with_guard_retry(
+                    model=model,
+                    prompts=harmful_prompts,
                     max_new_tokens=lg_max_new_tokens,
-                    batch_size=eval_batch_size,
+                    batch_size=guard_batch_size,
                     intervene_step_fn=step_fn,
                     intervene_every_step=True,
+                    retry_on_oom=True,
+                    log_prefix=f"train_guard/{guard_mode}/harmful",
                 )
-                harmless_resp = _generate_nnsight(
-                    model,
-                    harmless_prompts,
+                harmless_resp = _generate_nnsight_with_guard_retry(
+                    model=model,
+                    prompts=harmless_prompts,
                     max_new_tokens=lg_max_new_tokens,
-                    batch_size=eval_batch_size,
+                    batch_size=guard_batch_size,
                     intervene_step_fn=step_fn,
                     intervene_every_step=True,
+                    retry_on_oom=True,
+                    log_prefix=f"train_guard/{guard_mode}/harmless",
                 )
 
             for backend in backends:
@@ -3308,6 +3414,7 @@ def _run_train_guard_validation(
                         except Exception:
                             pass
     finally:
+        _clear_rotation_model_cache(operation)
         if hasattr(operation, "set_guard_mode"):
             operation.set_guard_mode("attack")
 
@@ -3417,6 +3524,58 @@ def _evaluate_llamaguard_and_mmlu(
             "eval_guard_backends": guard_backends,
         }
 
+        def _build_refined_rotation_model():
+            if direction_mode == "activation_rot":
+                return RefusalDirectionActivationRotation(model.model, model.config.hidden_size, init_vectors=[])
+            if direction_mode == "shtiefel_rot":
+                return RefusalStiefelRotation(
+                    model.model,
+                    model.config.hidden_size,
+                    init_vectors=[],
+                    init_mode=args.init_mode,
+                    orth_method=args.orth_method,
+                    num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
+                    best_layer=best_layer,
+                )
+            if direction_mode == "angular_steering":
+                return RefusalAngularSteeringRotation(
+                    model.model,
+                    model.config.hidden_size,
+                    init_vectors=[],
+                    init_mode=args.init_mode,
+                    orth_method=args.orth_method,
+                    num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
+                    best_layer=best_layer,
+                )
+            if direction_mode == "householder_pseudo_rotation":
+                return RefusalHouseholderPseudoRotation(
+                    model.model,
+                    model.config.hidden_size,
+                    init_vectors=[],
+                    init_mode=args.init_mode,
+                    orth_method=args.orth_method,
+                    num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
+                    best_layer=best_layer,
+                )
+            if direction_mode == "shtiefel_proj_rot":
+                return RefusalStiefelProjRotation(
+                    model.model,
+                    model.config.hidden_size,
+                    init_vectors=[],
+                    init_mode=args.init_mode,
+                    orth_method=args.orth_method,
+                    proj_reduce_ratio=getattr(args, "proj_reduce_ratio", DEFAULT_CONFIG.get("proj_reduce_ratio", 10)),
+                    num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
+                    best_layer=best_layer,
+                )
+            return None
+
+        refined_rotation_model = None
+        if refined_artifact is not None and direction_mode != "baseline":
+            refined_rotation_model = _build_refined_rotation_model()
+            if refined_rotation_model is not None:
+                _prime_rotation_model_cache(refined_rotation_model, refined_artifact)
+
         def _make_refined_step_fn(refined_artifact, guard_mode: str = "attack"):
             if refined_artifact is None:
                 return None
@@ -3427,62 +3586,18 @@ def _evaluate_llamaguard_and_mmlu(
                     alpha_value=alpha,
                     guard_mode=guard_mode,
                 )
+            if refined_rotation_model is None:
+                return _make_activation_rotation_step_fn(refined_artifact, rotation_model=None)
 
-            # For activation-rotation style modes, reuse the operation modules' own
-            # proxy-safe rotation logic (avoids bf16/float32 matmul mismatches).
-            rotation_model = None
-            if direction_mode == "activation_rot":
-                rotation_model = RefusalDirectionActivationRotation(
-                    model.model, model.config.hidden_size, init_vectors=[]
-                )
-            elif direction_mode == "shtiefel_rot":
-                rotation_model = RefusalStiefelRotation(
-                    model.model,
-                    model.config.hidden_size,
-                    init_vectors=[],
-                    init_mode=args.init_mode,
-                    orth_method=args.orth_method,
-                    num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
-                    best_layer=best_layer,
-                )
-            elif direction_mode == "angular_steering":
-                rotation_model = RefusalAngularSteeringRotation(
-                    model.model,
-                    model.config.hidden_size,
-                    init_vectors=[],
-                    init_mode=args.init_mode,
-                    orth_method=args.orth_method,
-                    num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
-                    best_layer=best_layer,
-                )
-            elif direction_mode == "householder_pseudo_rotation":
-                rotation_model = RefusalHouseholderPseudoRotation(
-                    model.model,
-                    model.config.hidden_size,
-                    init_vectors=[],
-                    init_mode=args.init_mode,
-                    orth_method=args.orth_method,
-                    num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
-                    best_layer=best_layer,
-                )
-            elif direction_mode == "shtiefel_proj_rot":
-                rotation_model = RefusalStiefelProjRotation(
-                    model.model,
-                    model.config.hidden_size,
-                    init_vectors=[],
-                    init_mode=args.init_mode,
-                    orth_method=args.orth_method,
-                    proj_reduce_ratio=getattr(args, "proj_reduce_ratio", DEFAULT_CONFIG.get("proj_reduce_ratio", 10)),
-                    num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
-                    best_layer=best_layer,
-                )
-                if hasattr(rotation_model, "set_guard_mode"):
-                    rotation_model.set_guard_mode(guard_mode)
+            if hasattr(refined_rotation_model, "set_guard_mode"):
+                refined_rotation_model.set_guard_mode(guard_mode)
 
-            return _make_activation_rotation_step_fn(
-                refined_artifact,
-                rotation_model=rotation_model,
-            )
+            def step_fn(_model: LanguageModel):
+                if hasattr(refined_rotation_model, "module"):
+                    refined_rotation_model.module = _model.model
+                refined_rotation_model(direction=None)
+
+            return step_fn
 
         # --- LlamaGuard ---
         if args.eval_llamaguard:
@@ -3520,8 +3635,23 @@ def _evaluate_llamaguard_and_mmlu(
                 print(f"eval_max_new_tokens: {eval_max_new_tokens}")
                 print(f"lg_max_new_tokens: {lg_max_new_tokens}")
 
-                initial_harmful = _generate_nnsight(model, harmful_prompts, max_new_tokens=lg_max_new_tokens, batch_size=eval_batch_size)
-                initial_harmless = _generate_nnsight(model, harmless_prompts, max_new_tokens=lg_max_new_tokens, batch_size=eval_batch_size)
+                guard_batch_size = _guard_eval_batch_size(eval_batch_size, phase="eval")
+                initial_harmful = _generate_nnsight_with_guard_retry(
+                    model=model,
+                    prompts=harmful_prompts,
+                    max_new_tokens=lg_max_new_tokens,
+                    batch_size=guard_batch_size,
+                    retry_on_oom=True,
+                    log_prefix="eval_guard/initial_harmful",
+                )
+                initial_harmless = _generate_nnsight_with_guard_retry(
+                    model=model,
+                    prompts=harmless_prompts,
+                    max_new_tokens=lg_max_new_tokens,
+                    batch_size=guard_batch_size,
+                    retry_on_oom=True,
+                    log_prefix="eval_guard/initial_harmless",
+                )
 
                 refined_generations: dict[str, dict[str, list[str]]] = {}
                 if refined_artifact is not None:
@@ -3534,21 +3664,25 @@ def _evaluate_llamaguard_and_mmlu(
                     for guard_mode in guard_modes:
                         step_fn = _make_refined_step_fn(refined_artifact, guard_mode=guard_mode)
                         refined_generations[guard_mode] = {
-                            "harmful": _generate_nnsight(
-                                model,
-                                harmful_prompts,
+                            "harmful": _generate_nnsight_with_guard_retry(
+                                model=model,
+                                prompts=harmful_prompts,
                                 max_new_tokens=lg_max_new_tokens,
-                                batch_size=eval_batch_size,
+                                batch_size=guard_batch_size,
                                 intervene_step_fn=step_fn,
                                 intervene_every_step=intervene_every_step,
+                                retry_on_oom=True,
+                                log_prefix=f"eval_guard/{guard_mode}/harmful",
                             ),
-                            "harmless": _generate_nnsight(
-                                model,
-                                harmless_prompts,
+                            "harmless": _generate_nnsight_with_guard_retry(
+                                model=model,
+                                prompts=harmless_prompts,
                                 max_new_tokens=lg_max_new_tokens,
-                                batch_size=eval_batch_size,
+                                batch_size=guard_batch_size,
                                 intervene_step_fn=step_fn,
                                 intervene_every_step=intervene_every_step,
+                                retry_on_oom=True,
+                                log_prefix=f"eval_guard/{guard_mode}/harmless",
                             ),
                         }
 
@@ -3784,6 +3918,8 @@ def _evaluate_llamaguard_and_mmlu(
         print(f"Saved eval metrics JSON: {out_json_path}")
         print(f"Saved eval metrics CSV: {out_csv_path}")
     finally:
+        if "refined_rotation_model" in locals() and refined_rotation_model is not None:
+            _clear_rotation_model_cache(refined_rotation_model)
         eval_writer.close()
 
 # Conditional training based on command line arguments

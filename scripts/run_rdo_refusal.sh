@@ -5,9 +5,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # variables
-direction_mode="shtiefel_proj_rot" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot", "angular_steering", "householder_pseudo_rotation"
-train_guard_val_gap=100 # 0 disables; otherwise run train guard validation every N dataloader iterations
-num_opt_layers=7 # optimize this many middle layers (plus best layer during intervention)
+direction_mode="baseline" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot", "angular_steering", "householder_pseudo_rotation"
+train_guard_val_gap=50 # 0 disables; otherwise run train guard validation every N dataloader iterations
+num_opt_layers=1 # optimize this many middle layers (plus best layer during intervention)
 llamaguard_data="basic" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
 eval_guard_backends=("llamaguard" "qwen3guard" "wildguard") # any subset of: "llamaguard" "qwen3guard" "wildguard"
 lr=1e-5
@@ -15,14 +15,15 @@ optimizer="AdamW" # "Adam", "AdamW", "SGD"
 max_iters=10000
 result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
 log_steps=0
-init_mode="diag_permutation" # "random", "diag_permutation", or "ab_orthogonal"
+init_mode="ab_orthogonal" # "random", "diag_permutation", or "ab_orthogonal"
 orth_method="qr" # "qr" or "svd"
-proj_reduce_ratio=10 # used when direction_mode="shtiefel_proj_rot" (k = hidden_size / ratio)
+proj_reduce_ratio=100 # used when direction_mode="shtiefel_proj_rot" (k = hidden_size / ratio)
 
 # LlamaGuard eval config
 eval_max_new_tokens=256 # inportant param for llama guard eval
-MAX_HARMFUL=50
-MAX_HARMLESS=50
+eval_batch_size=8
+MAX_HARMFUL=200
+MAX_HARMLESS=200
 
 # MMLU eval config
 enable_mmlu_eval=true
@@ -40,7 +41,7 @@ mmlu_store_predictions=false
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=3
+export CUDA_VISIBLE_DEVICES=2
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -50,13 +51,17 @@ export MMLU_STORE_PREDICTIONS="${MMLU_STORE_PREDICTIONS:-$mmlu_store_predictions
 
 # LlamaGuard: we only need the first generated token to compute P(unsafe).
 export LLAMAGUARD_MAX_NEW_TOKENS="${LLAMAGUARD_MAX_NEW_TOKENS:-100}"
+# Optional guard-generation micro-batch overrides (reduce to avoid CUDA OOM):
+export GUARD_EVAL_BATCH_SIZE="${GUARD_EVAL_BATCH_SIZE:-$eval_batch_size}"
+export GUARD_TRAIN_BATCH_SIZE="${GUARD_TRAIN_BATCH_SIZE:-$eval_batch_size}"
 
 # LlamaGuard eval caps (total counts, not per-category).
 export MAX_HARMFUL="${MAX_HARMFUL}" # 250
 export MAX_HARMLESS="${MAX_HARMLESS}" # 250
 
 # export HF_TOKEN="hf_fJyEXMwqeWZJvzLrBqCLDajXibFEDMGWW"
-export HF_TOKEN="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"
+# export HF_TOKEN="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"
+export HF_TOKEN="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"
 
 # ---- Default command ----
 cmd=(python -m baselines.rdo_refusal \
@@ -74,6 +79,7 @@ cmd=(python -m baselines.rdo_refusal \
   --log_steps "${log_steps}" \
   --train_guard_val_gap "${train_guard_val_gap}" \
   --eval_max_new_tokens "${eval_max_new_tokens}" \
+  --eval_batch_size "${eval_batch_size}" \
   --mmlu_dataset "${mmlu_dataset}" \
   --mmlu_subset "${mmlu_subset}" \
   --mmlu_split "${mmlu_split}" \
@@ -83,7 +89,7 @@ cmd=(python -m baselines.rdo_refusal \
   --mmlu_sample_size "${MMLU_SAMPLE_SIZE}" \
   --mmlu_sample_seed "${mmlu_sample_seed}" \
   --mmlu_max_new_tokens "${MMLU_MAX_NEW_TOKENS}" \
-  # --retain_loss \
+  --retain_loss \
 )
 
 # --init_mode: "random", "diag_permutation", or "ab_orthogonal"
