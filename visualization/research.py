@@ -367,9 +367,7 @@ def _plot_series(
     phase: str,
     metric: str,
     family_hash: str,
-    family_descriptor: str,
-    plots_dir: Path,
-    tables_dir: Path,
+    family_dir: Path,
     initial_metric_value: float | None,
 ) -> bool:
     subset = family_df[["num_opt_layers", metric_col]].dropna().copy()
@@ -384,6 +382,11 @@ def _plot_series(
         f"num_opt_layers__{_sanitize_token(backend)}__{_sanitize_token(group)}__"
         f"{_sanitize_token(phase)}__{_sanitize_token(metric)}__family_{family_hash}"
     )
+    plots_dir = family_dir / "plots"
+    tables_dir = family_dir / "tables"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    tables_dir.mkdir(parents=True, exist_ok=True)
+
     y = subset[metric_col].astype(float).tolist()
     x = subset["num_opt_layers"].astype(float).tolist()
 
@@ -409,20 +412,10 @@ def _plot_series(
         )
     ax.set_xlabel("num_opt_layers")
     ax.set_ylabel(metric)
-    ax.set_title(f"{backend} / {group} / {phase} / {metric}\nFamily {family_hash}")
     ax.set_xticks(sorted(set(x)))
     ax.legend()
     for xv, yv in zip(x, y):
         ax.annotate(f"{yv:.4g}", (xv, yv), textcoords="offset points", xytext=(0, 7), ha="center")
-    ax.text(
-        0.01,
-        0.01,
-        family_descriptor,
-        transform=ax.transAxes,
-        fontsize=8,
-        alpha=0.85,
-        va="bottom",
-    )
     fig.tight_layout()
     fig.savefig(plots_dir / f"{base}.png", dpi=300, bbox_inches="tight")
     fig.savefig(plots_dir / f"{base}.pdf", bbox_inches="tight")
@@ -435,15 +428,22 @@ def _plot_series(
     proj_reduce_ratio = (
         family_df["hp__proj_reduce_ratio"].iloc[0] if "hp__proj_reduce_ratio" in family_df.columns else None
     )
+    param_values = (
+        f"direction_mode={direction_mode}, "
+        f"orth_method={orth_method}, "
+        f"init_mode={init_mode}, "
+        f"proj_reduce_ratio={proj_reduce_ratio}"
+    )
     table_df.insert(0, "family_hash", family_hash)
-    table_df.insert(1, "direction_mode", direction_mode)
-    table_df.insert(2, "orth_method", orth_method)
-    table_df.insert(3, "init_mode", init_mode)
-    table_df.insert(4, "proj_reduce_ratio", proj_reduce_ratio)
-    table_df.insert(5, "backend", backend)
-    table_df.insert(6, "group", group)
-    table_df.insert(7, "phase", phase)
-    table_df.insert(8, "metric", metric)
+    table_df.insert(1, "family_param_values", param_values)
+    table_df.insert(2, "direction_mode", direction_mode)
+    table_df.insert(3, "orth_method", orth_method)
+    table_df.insert(4, "init_mode", init_mode)
+    table_df.insert(5, "proj_reduce_ratio", proj_reduce_ratio)
+    table_df.insert(6, "backend", backend)
+    table_df.insert(7, "group", group)
+    table_df.insert(8, "phase", phase)
+    table_df.insert(9, "metric", metric)
     table_df.to_csv(tables_dir / f"{base}.csv", index=False)
     table_df.to_latex(
         tables_dir / f"{base}.tex",
@@ -456,17 +456,33 @@ def _plot_series(
     return True
 
 
+def _ensure_family_dir_and_manifest(output_dir: Path, family_hash: str, family_json: str) -> Path:
+    family_dir = output_dir / "families" / f"family_{_sanitize_token(family_hash)}"
+    family_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        family_params = json.loads(family_json)
+    except Exception:
+        family_params = {"raw_family_json": family_json}
+
+    manifest = {
+        "family_hash": family_hash,
+        "family_parameters": family_params,
+    }
+    with open(family_dir / "family_parameters.json", "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, ensure_ascii=False)
+    return family_dir
+
+
 def main() -> None:
     args = _parse_args()
     input_dir = Path(args.input_dir).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
-    plots_dir = output_dir / "plots"
-    tables_dir = output_dir / "tables"
+    families_dir = output_dir / "families"
     meta_dir = output_dir / "meta"
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    plots_dir.mkdir(parents=True, exist_ok=True)
-    tables_dir.mkdir(parents=True, exist_ok=True)
+    families_dir.mkdir(parents=True, exist_ok=True)
     meta_dir.mkdir(parents=True, exist_ok=True)
 
     _setup_plot_style()
@@ -504,7 +520,12 @@ def main() -> None:
             continue
         initial_col = _guard_col_name(backend=backend, group=group, phase="initial", metric=metric)
         for family_hash, family_df in df.groupby("family_hash", dropna=False):
-            family_desc = str(family_df["family_descriptor"].iloc[0])
+            family_json = str(family_df["_family_json"].iloc[0]) if "_family_json" in family_df.columns else "{}"
+            family_dir = _ensure_family_dir_and_manifest(
+                output_dir=output_dir,
+                family_hash=str(family_hash),
+                family_json=family_json,
+            )
             initial_metric_value = None
             if initial_col in family_df.columns:
                 initial_vals = pd.to_numeric(family_df[initial_col], errors="coerce").dropna()
@@ -518,9 +539,7 @@ def main() -> None:
                 phase=phase,
                 metric=metric,
                 family_hash=str(family_hash),
-                family_descriptor=family_desc,
-                plots_dir=plots_dir,
-                tables_dir=tables_dir,
+                family_dir=family_dir,
                 initial_metric_value=initial_metric_value,
             )
             if generated:
@@ -551,8 +570,7 @@ def main() -> None:
         print(f"{key}: {value}")
     print(f"Full table CSV: {output_dir / 'all_experiments.csv'}")
     print(f"Full table TEX: {output_dir / 'all_experiments.tex'}")
-    print(f"Plots dir: {plots_dir}")
-    print(f"Per-plot tables dir: {tables_dir}")
+    print(f"Families dir: {families_dir}")
     print(f"Diagnostics: {meta_dir / 'run_diagnostics.json'}")
 
 
