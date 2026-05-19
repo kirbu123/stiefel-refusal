@@ -51,6 +51,12 @@ def _setup_plot_style() -> None:
     plt.rcParams["figure.figsize"] = (10, 6)
     plt.rcParams["axes.grid"] = True
     plt.rcParams["grid.alpha"] = 0.25
+    plt.rcParams["font.size"] = 12
+    plt.rcParams["axes.labelsize"] = 13
+    plt.rcParams["axes.titlesize"] = 13
+    plt.rcParams["legend.fontsize"] = 11
+    plt.rcParams["xtick.labelsize"] = 11
+    plt.rcParams["ytick.labelsize"] = 11
 
 
 def _safe_value(v: Any) -> Any:
@@ -369,6 +375,7 @@ def _plot_series(
     family_hash: str,
     family_dir: Path,
     initial_metric_value: float | None,
+    baseline_metric_value: float | None,
 ) -> bool:
     subset = family_df[["num_opt_layers", metric_col]].dropna().copy()
     subset = subset.sort_values("num_opt_layers")
@@ -410,8 +417,17 @@ def _plot_series(
             alpha=0.9,
             label="initial baseline",
         )
-    ax.set_xlabel("num_opt_layers")
-    ax.set_ylabel(metric)
+    if baseline_metric_value is not None:
+        ax.axhline(
+            y=baseline_metric_value,
+            linestyle="-.",
+            linewidth=1.8,
+            color="black",
+            alpha=0.9,
+            label="baseline model",
+        )
+    ax.set_xlabel("Number of layers")
+    ax.set_ylabel(f"{backend} score")
     ax.set_xticks(sorted(set(x)))
     ax.legend()
     for xv, yv in zip(x, y):
@@ -474,6 +490,28 @@ def _ensure_family_dir_and_manifest(output_dir: Path, family_hash: str, family_j
     return family_dir
 
 
+def _build_baseline_metric_lookup(df: pd.DataFrame, guard_cols: list[str]) -> dict[str, float]:
+    baseline_mask = pd.Series(False, index=df.index)
+    if "run_name" in df.columns:
+        baseline_mask = baseline_mask | df["run_name"].astype(str).str.contains("baseline", case=False, na=False)
+    if "run_dir" in df.columns:
+        baseline_mask = baseline_mask | df["run_dir"].astype(str).str.contains("baseline", case=False, na=False)
+    if "hp__direction_mode" in df.columns:
+        baseline_mask = baseline_mask | (df["hp__direction_mode"].astype(str).str.lower() == "baseline")
+
+    baseline_df = df[baseline_mask].copy()
+    lookup: dict[str, float] = {}
+    if baseline_df.empty:
+        return lookup
+
+    for col in guard_cols:
+        values = pd.to_numeric(baseline_df[col], errors="coerce").dropna() if col in baseline_df.columns else pd.Series(dtype=float)
+        if values.empty:
+            continue
+        lookup[col] = float(values.mean())
+    return lookup
+
+
 def main() -> None:
     args = _parse_args()
     input_dir = Path(args.input_dir).expanduser().resolve()
@@ -509,6 +547,7 @@ def main() -> None:
     _write_full_tables(df, output_dir)
 
     guard_cols = [c for c in df.columns if c.startswith("guard__")]
+    baseline_metric_lookup = _build_baseline_metric_lookup(df, guard_cols)
     plot_count = 0
     table_count = 0
     for metric_col in sorted(guard_cols):
@@ -531,6 +570,7 @@ def main() -> None:
                 initial_vals = pd.to_numeric(family_df[initial_col], errors="coerce").dropna()
                 if not initial_vals.empty:
                     initial_metric_value = float(initial_vals.iloc[0])
+            baseline_metric_value = baseline_metric_lookup.get(metric_col)
             generated = _plot_series(
                 family_df=family_df,
                 metric_col=metric_col,
@@ -541,6 +581,7 @@ def main() -> None:
                 family_hash=str(family_hash),
                 family_dir=family_dir,
                 initial_metric_value=initial_metric_value,
+                baseline_metric_value=baseline_metric_value,
             )
             if generated:
                 plot_count += 2  # PNG + PDF
