@@ -393,6 +393,7 @@ def _plot_series(
     x_col: str = "num_opt_layers",
     x_label: str = "Number of layers",
     series_label: str | None = None,
+    plot_kind: str = "line",
 ) -> bool:
     subset = family_df[[x_col, metric_col]].dropna().copy()
     subset = subset.sort_values(x_col)
@@ -421,16 +422,43 @@ def _plot_series(
         x_labels = None
 
     fig, ax = plt.subplots()
-    ax.plot(
-        x,
-        y,
-        marker="o",
-        linewidth=2.0,
-        markersize=7,
-        markerfacecolor="white",
-        markeredgewidth=1.8,
-        label=series_label or f"{phase}",
-    )
+    if plot_kind == "bar":
+        if x_labels is not None:
+            if sns is not None:
+                colors = sns.color_palette("tab10", n_colors=len(x))
+            else:
+                colors = [plt.cm.tab10(i % 10) for i in range(len(x))]
+            for i, (xv, yv, lbl) in enumerate(zip(x, y, x_labels)):
+                ax.bar(
+                    xv,
+                    yv,
+                    width=0.62,
+                    color=colors[i],
+                    edgecolor="black",
+                    alpha=0.9,
+                    label=str(lbl),
+                )
+        else:
+            ax.bar(
+                x,
+                y,
+                width=0.62,
+                color="steelblue",
+                edgecolor="black",
+                alpha=0.9,
+                label=series_label or f"{phase}",
+            )
+    else:
+        ax.plot(
+            x,
+            y,
+            marker="o",
+            linewidth=2.0,
+            markersize=7,
+            markerfacecolor="white",
+            markeredgewidth=1.8,
+            label=series_label or f"{phase}",
+        )
     if initial_metric_value is not None:
         ax.axhline(
             y=initial_metric_value,
@@ -567,18 +595,40 @@ def _generate_init_mode_boundary_plots(
 ) -> tuple[int, int]:
     # Boundary metric is interpreted as guard mean_score.
     guard_cols = [c for c in df.columns if c.startswith("guard__") and c.endswith("__mean_score")]
-    if not guard_cols or "im_family_hash" not in df.columns:
+    if not guard_cols:
+        return 0, 0
+
+    hp_cols = [c for c in df.columns if c.startswith("hp__")]
+    exclude_hp = {f"hp__{k}" for k in VOLATILE_IM_FAMILY_KEYS}
+    group_cols = [c for c in hp_cols if c not in exclude_hp]
+    if not group_cols:
+        return 0, 0
+
+    working_df = df.copy()
+    if "hp__direction_mode" in working_df.columns:
+        working_df = working_df[
+            working_df["hp__direction_mode"].astype(str).str.lower().ne("baseline")
+        ].copy()
+    if working_df.empty:
         return 0, 0
 
     plot_count = 0
     table_count = 0
-    for im_family_hash, fam_df in df.groupby("im_family_hash", dropna=False):
+    for group_key, fam_df in working_df.groupby(group_cols, dropna=False):
         if "hp__init_mode" not in fam_df.columns:
             continue
         init_modes = fam_df["hp__init_mode"].astype(str).dropna().unique().tolist()
         if len(init_modes) < 2:
             continue
-        im_family_json = str(fam_df["_im_family_json"].iloc[0]) if "_im_family_json" in fam_df.columns else "{}"
+
+        if isinstance(group_key, tuple):
+            group_values = group_key
+        else:
+            group_values = (group_key,)
+        family_params = {col[4:]: _safe_value(val) for col, val in zip(group_cols, group_values)}
+        im_family_json = json.dumps(family_params, sort_keys=True, ensure_ascii=False)
+        im_family_hash = hashlib.sha1(im_family_json.encode("utf-8")).hexdigest()[:10]
+
         family_dir = _ensure_im_family_dir_and_manifest(
             output_dir=output_dir,
             im_family_hash=str(im_family_hash),
@@ -612,7 +662,8 @@ def _generate_init_mode_boundary_plots(
                 baseline_metric_value=baseline_metric_value,
                 x_col="hp__init_mode",
                 x_label="Init mode",
-                series_label=f"{phase} boundary",
+                series_label=None,
+                plot_kind="bar",
             )
             if generated:
                 plot_count += 2
