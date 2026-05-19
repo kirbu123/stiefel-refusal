@@ -593,8 +593,8 @@ def _generate_init_mode_boundary_plots(
     output_dir: Path,
     baseline_metric_lookup: dict[str, float],
 ) -> tuple[int, int]:
-    # Boundary metric is interpreted as guard mean_score.
-    guard_cols = [c for c in df.columns if c.startswith("guard__") and c.endswith("__mean_score")]
+    # Include all guard metrics for init_mode ablations.
+    guard_cols = [c for c in df.columns if c.startswith("guard__")]
     if not guard_cols:
         return 0, 0
 
