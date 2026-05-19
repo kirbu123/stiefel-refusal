@@ -33,6 +33,7 @@ VOLATILE_FAMILY_KEYS = {
     "cone_dim",
     "optimizer_name",
 }
+VOLATILE_IM_FAMILY_KEYS = VOLATILE_FAMILY_KEYS | {"init_mode"}
 EVAL_FILE_RE = re.compile(r"eval_metrics_(\d{8}_\d{6})\.(csv|json)$")
 
 
@@ -241,6 +242,15 @@ def _family_payload(hparams: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _im_family_payload(hparams: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key in sorted(hparams.keys()):
+        if key in VOLATILE_IM_FAMILY_KEYS:
+            continue
+        payload[key] = _safe_value(hparams[key])
+    return payload
+
+
 def _family_descriptor(payload: dict[str, Any]) -> str:
     keys = (
         "model_id",
@@ -330,6 +340,10 @@ def _load_run(run_dir: Path) -> tuple[dict[str, Any] | None, RunDiagnostics]:
     record["family_descriptor"] = _family_descriptor(family_payload)
     record["num_opt_layers"] = _coerce_float(hparams.get("num_opt_layers"))
     record["_family_json"] = family_json
+    im_family_payload = _im_family_payload(hparams)
+    im_family_json = json.dumps(im_family_payload, sort_keys=True, ensure_ascii=False)
+    record["im_family_hash"] = hashlib.sha1(im_family_json.encode("utf-8")).hexdigest()[:10]
+    record["_im_family_json"] = im_family_json
 
     return record, RunDiagnostics(
         run_dir=str(run_dir),
@@ -376,13 +390,16 @@ def _plot_series(
     family_dir: Path,
     initial_metric_value: float | None,
     baseline_metric_value: float | None,
+    x_col: str = "num_opt_layers",
+    x_label: str = "Number of layers",
+    series_label: str | None = None,
 ) -> bool:
-    subset = family_df[["num_opt_layers", metric_col]].dropna().copy()
-    subset = subset.sort_values("num_opt_layers")
-    subset = subset.drop_duplicates(subset=["num_opt_layers"], keep="last")
+    subset = family_df[[x_col, metric_col]].dropna().copy()
+    subset = subset.sort_values(x_col)
+    subset = subset.drop_duplicates(subset=[x_col], keep="last")
     if len(subset) < 2:
         return False
-    if subset["num_opt_layers"].nunique() < 2:
+    if subset[x_col].nunique() < 2:
         return False
 
     base = (
@@ -395,7 +412,13 @@ def _plot_series(
     tables_dir.mkdir(parents=True, exist_ok=True)
 
     y = subset[metric_col].astype(float).tolist()
-    x = subset["num_opt_layers"].astype(float).tolist()
+    if x_col != "num_opt_layers":
+        x_labels = subset[x_col].astype(str).tolist()
+        x_positions = list(range(len(x_labels)))
+        x = x_positions
+    else:
+        x = subset[x_col].astype(float).tolist()
+        x_labels = None
 
     fig, ax = plt.subplots()
     ax.plot(
@@ -406,32 +429,34 @@ def _plot_series(
         markersize=7,
         markerfacecolor="white",
         markeredgewidth=1.8,
-        label=f"{phase}",
+        label=series_label or f"{phase}",
     )
     if initial_metric_value is not None:
         ax.axhline(
             y=initial_metric_value,
             linestyle="--",
             linewidth=1.7,
-            color="gray",
+            color="black",
             alpha=0.9,
-            label="initial baseline",
+            label="initial model",
         )
     if baseline_metric_value is not None:
         ax.axhline(
             y=baseline_metric_value,
             linestyle="-.",
             linewidth=1.8,
-            color="black",
+            color="red",
             alpha=0.9,
-            label="baseline model",
+            label="rdo",
         )
-    ax.set_xlabel("Number of layers")
+    ax.set_xlabel(x_label)
     ax.set_ylabel(f"{backend} score")
-    ax.set_xticks(sorted(set(x)))
+    if x_labels is not None:
+        ax.set_xticks(x_positions)
+        ax.set_xticklabels(x_labels, rotation=20, ha="right")
+    else:
+        ax.set_xticks(sorted(set(x)))
     ax.legend()
-    for xv, yv in zip(x, y):
-        ax.annotate(f"{yv:.4g}", (xv, yv), textcoords="offset points", xytext=(0, 7), ha="center")
     fig.tight_layout()
     fig.savefig(plots_dir / f"{base}.png", dpi=300, bbox_inches="tight")
     fig.savefig(plots_dir / f"{base}.pdf", bbox_inches="tight")
@@ -490,6 +515,29 @@ def _ensure_family_dir_and_manifest(output_dir: Path, family_hash: str, family_j
     return family_dir
 
 
+def _ensure_im_family_dir_and_manifest(
+    output_dir: Path, im_family_hash: str, im_family_json: str, init_modes: list[str]
+) -> Path:
+    family_dir = output_dir / "families" / f"family_{_sanitize_token(im_family_hash)}_im"
+    family_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        family_params = json.loads(im_family_json)
+    except Exception:
+        family_params = {"raw_family_json": im_family_json}
+
+    manifest = {
+        "family_hash": im_family_hash,
+        "family_type": "init_mode_ablation",
+        "family_parameters": family_params,
+        "varying_parameter": "init_mode",
+        "init_modes": sorted(set(init_modes)),
+    }
+    with open(family_dir / "family_parameters.json", "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, ensure_ascii=False)
+    return family_dir
+
+
 def _build_baseline_metric_lookup(df: pd.DataFrame, guard_cols: list[str]) -> dict[str, float]:
     baseline_mask = pd.Series(False, index=df.index)
     if "run_name" in df.columns:
@@ -510,6 +558,66 @@ def _build_baseline_metric_lookup(df: pd.DataFrame, guard_cols: list[str]) -> di
             continue
         lookup[col] = float(values.mean())
     return lookup
+
+
+def _generate_init_mode_boundary_plots(
+    df: pd.DataFrame,
+    output_dir: Path,
+    baseline_metric_lookup: dict[str, float],
+) -> tuple[int, int]:
+    # Boundary metric is interpreted as guard mean_score.
+    guard_cols = [c for c in df.columns if c.startswith("guard__") and c.endswith("__mean_score")]
+    if not guard_cols or "im_family_hash" not in df.columns:
+        return 0, 0
+
+    plot_count = 0
+    table_count = 0
+    for im_family_hash, fam_df in df.groupby("im_family_hash", dropna=False):
+        if "hp__init_mode" not in fam_df.columns:
+            continue
+        init_modes = fam_df["hp__init_mode"].astype(str).dropna().unique().tolist()
+        if len(init_modes) < 2:
+            continue
+        im_family_json = str(fam_df["_im_family_json"].iloc[0]) if "_im_family_json" in fam_df.columns else "{}"
+        family_dir = _ensure_im_family_dir_and_manifest(
+            output_dir=output_dir,
+            im_family_hash=str(im_family_hash),
+            im_family_json=im_family_json,
+            init_modes=init_modes,
+        )
+        for metric_col in sorted(guard_cols):
+            parsed = _parse_guard_col(metric_col)
+            if parsed is None:
+                continue
+            backend, group, phase, metric = parsed
+            if phase == "initial":
+                continue
+            initial_col = _guard_col_name(backend=backend, group=group, phase="initial", metric=metric)
+            initial_metric_value = None
+            if initial_col in fam_df.columns:
+                initial_vals = pd.to_numeric(fam_df[initial_col], errors="coerce").dropna()
+                if not initial_vals.empty:
+                    initial_metric_value = float(initial_vals.iloc[0])
+            baseline_metric_value = baseline_metric_lookup.get(metric_col)
+            generated = _plot_series(
+                family_df=fam_df,
+                metric_col=metric_col,
+                backend=backend,
+                group=group,
+                phase=phase,
+                metric=metric,
+                family_hash=f"{im_family_hash}_im",
+                family_dir=family_dir,
+                initial_metric_value=initial_metric_value,
+                baseline_metric_value=baseline_metric_value,
+                x_col="hp__init_mode",
+                x_label="Init mode",
+                series_label=f"{phase} boundary",
+            )
+            if generated:
+                plot_count += 2
+                table_count += 2
+    return plot_count, table_count
 
 
 def main() -> None:
@@ -586,6 +694,14 @@ def main() -> None:
             if generated:
                 plot_count += 2  # PNG + PDF
                 table_count += 2  # CSV + TEX
+
+    im_plot_count, im_table_count = _generate_init_mode_boundary_plots(
+        df=df,
+        output_dir=output_dir,
+        baseline_metric_lookup=baseline_metric_lookup,
+    )
+    plot_count += im_plot_count
+    table_count += im_table_count
 
     diagnostics_payload = [d.__dict__ for d in diagnostics]
     with open(meta_dir / "run_diagnostics.json", "w", encoding="utf-8") as f:
