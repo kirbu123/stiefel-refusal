@@ -91,6 +91,11 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         help="Output directory for plots and LaTeX tables.",
     )
+    parser.add_argument(
+        "--tight",
+        action="store_true",
+        help="If set, family plots include only pct_unsafe metrics.",
+    )
     return parser.parse_args()
 
 
@@ -592,9 +597,12 @@ def _generate_init_mode_boundary_plots(
     df: pd.DataFrame,
     output_dir: Path,
     baseline_metric_lookup: dict[str, float],
+    tight: bool = False,
 ) -> tuple[int, int]:
     # Include all guard metrics for init_mode ablations.
     guard_cols = [c for c in df.columns if c.startswith("guard__")]
+    if tight:
+        guard_cols = [c for c in guard_cols if c.endswith("__pct_unsafe")]
     if not guard_cols:
         return 0, 0
 
@@ -706,6 +714,8 @@ def main() -> None:
     _write_full_tables(df, output_dir)
 
     guard_cols = [c for c in df.columns if c.startswith("guard__")]
+    if args.tight:
+        guard_cols = [c for c in guard_cols if c.endswith("__pct_unsafe")]
     baseline_metric_lookup = _build_baseline_metric_lookup(df, guard_cols)
     plot_count = 0
     table_count = 0
@@ -750,6 +760,7 @@ def main() -> None:
         df=df,
         output_dir=output_dir,
         baseline_metric_lookup=baseline_metric_lookup,
+        tight=args.tight,
     )
     plot_count += im_plot_count
     table_count += im_table_count
