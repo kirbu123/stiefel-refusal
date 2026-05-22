@@ -34,6 +34,14 @@ VOLATILE_FAMILY_KEYS = {
     "optimizer_name",
 }
 VOLATILE_IM_FAMILY_KEYS = VOLATILE_FAMILY_KEYS | {"init_mode"}
+VOLATILE_PRR_FAMILY_KEYS = {
+    "proj_reduce_ratio",
+    "result_path",
+    "add_layer",
+    "alpha",
+    "cone_dim",
+    "optimizer_name",
+}
 EVAL_FILE_RE = re.compile(r"eval_metrics_(\d{8}_\d{6})\.(csv|json)$")
 
 
@@ -399,17 +407,29 @@ def _plot_series(
     x_label: str = "Number of layers",
     series_label: str | None = None,
     plot_kind: str = "line",
+    plot_prefix: str = "num_opt_layers",
 ) -> bool:
     subset = family_df[[x_col, metric_col]].dropna().copy()
-    subset = subset.sort_values(x_col)
-    subset = subset.drop_duplicates(subset=[x_col], keep="last")
+    numeric_x = pd.to_numeric(subset[x_col], errors="coerce")
+    x_positions: list[int] | None = None
+    if numeric_x.notna().all():
+        subset = subset.assign(_x_numeric=numeric_x)
+        subset = subset.sort_values("_x_numeric")
+        subset = subset.drop_duplicates(subset=["_x_numeric"], keep="last")
+    else:
+        subset = subset.assign(_x_label=subset[x_col].astype(str))
+        subset = subset.sort_values("_x_label")
+        subset = subset.drop_duplicates(subset=["_x_label"], keep="last")
     if len(subset) < 2:
         return False
-    if subset[x_col].nunique() < 2:
+    if numeric_x.notna().all():
+        if subset["_x_numeric"].nunique() < 2:
+            return False
+    elif subset["_x_label"].nunique() < 2:
         return False
 
     base = (
-        f"num_opt_layers__{_sanitize_token(backend)}__{_sanitize_token(group)}__"
+        f"{_sanitize_token(plot_prefix)}__{_sanitize_token(backend)}__{_sanitize_token(group)}__"
         f"{_sanitize_token(phase)}__{_sanitize_token(metric)}__family_{family_hash}"
     )
     plots_dir = family_dir / "plots"
@@ -418,13 +438,13 @@ def _plot_series(
     tables_dir.mkdir(parents=True, exist_ok=True)
 
     y = subset[metric_col].astype(float).tolist()
-    if x_col != "num_opt_layers":
-        x_labels = subset[x_col].astype(str).tolist()
+    if numeric_x.notna().all():
+        x = subset["_x_numeric"].astype(float).tolist()
+        x_labels = None
+    else:
+        x_labels = subset["_x_label"].astype(str).tolist()
         x_positions = list(range(len(x_labels)))
         x = x_positions
-    else:
-        x = subset[x_col].astype(float).tolist()
-        x_labels = None
 
     fig, ax = plt.subplots()
     if plot_kind == "bar":
@@ -524,7 +544,7 @@ def _plot_series(
         index=False,
         float_format="%.6g",
         escape=True,
-        caption=f"num_opt_layers ablation for {backend}/{group}/{phase}/{metric}",
+        caption=f"{plot_prefix} ablation for {backend}/{group}/{phase}/{metric}",
         label=f"tab:{base[:80]}",
     )
     return True
@@ -565,6 +585,36 @@ def _ensure_im_family_dir_and_manifest(
         "family_parameters": family_params,
         "varying_parameter": "init_mode",
         "init_modes": sorted(set(init_modes)),
+    }
+    with open(family_dir / "family_parameters.json", "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, ensure_ascii=False)
+    return family_dir
+
+
+def _ensure_prr_family_dir_and_manifest(
+    output_dir: Path,
+    prr_family_hash: str,
+    prr_family_json: str,
+    project_ratios: list[float],
+    r_values: list[int],
+) -> Path:
+    family_dir = output_dir / "families" / f"family_{_sanitize_token(prr_family_hash)}_prr"
+    family_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        family_params = json.loads(prr_family_json)
+    except Exception:
+        family_params = {"raw_family_json": prr_family_json}
+
+    manifest = {
+        "family_hash": prr_family_hash,
+        "family_type": "prr_ablation",
+        "family_parameters": family_params,
+        "varying_parameter": "proj_reduce_ratio",
+        "varying_parameter_label": "project ratio",
+        "project_ratios": sorted(set(project_ratios)),
+        "derived_parameter": "r=int(3500/proj_reduce_ratio)",
+        "r_values": sorted(set(r_values)),
     }
     with open(family_dir / "family_parameters.json", "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False)
@@ -679,6 +729,125 @@ def _generate_init_mode_boundary_plots(
     return plot_count, table_count
 
 
+def _generate_prr_boundary_plots(
+    df: pd.DataFrame,
+    output_dir: Path,
+    baseline_metric_lookup: dict[str, float],
+    tight: bool = False,
+) -> tuple[int, int]:
+    guard_cols = [c for c in df.columns if c.startswith("guard__")]
+    if tight:
+        guard_cols = [c for c in guard_cols if c.endswith("__pct_unsafe")]
+    if not guard_cols:
+        return 0, 0
+
+    hp_cols = [c for c in df.columns if c.startswith("hp__")]
+    exclude_hp = {f"hp__{k}" for k in VOLATILE_PRR_FAMILY_KEYS}
+    group_cols = [c for c in hp_cols if c not in exclude_hp]
+    if not group_cols or "hp__proj_reduce_ratio" not in df.columns:
+        return 0, 0
+
+    working_df = df.copy()
+    if "hp__direction_mode" in working_df.columns:
+        working_df = working_df[
+            working_df["hp__direction_mode"].astype(str).str.lower().ne("baseline")
+        ].copy()
+    if working_df.empty:
+        return 0, 0
+
+    working_df["hp__proj_reduce_ratio"] = pd.to_numeric(
+        working_df["hp__proj_reduce_ratio"], errors="coerce"
+    )
+    working_df = working_df.dropna(subset=["hp__proj_reduce_ratio"]).copy()
+    if working_df.empty:
+        return 0, 0
+
+    working_df["hp__r"] = working_df["hp__proj_reduce_ratio"].apply(
+        lambda prr: int(3500.0 / prr) if prr and prr > 0 else math.nan
+    )
+
+    plot_count = 0
+    table_count = 0
+    for group_key, fam_df in working_df.groupby(group_cols, dropna=False):
+        unique_prr = pd.to_numeric(fam_df["hp__proj_reduce_ratio"], errors="coerce").dropna()
+        if unique_prr.nunique() < 2:
+            continue
+
+        if isinstance(group_key, tuple):
+            group_values = group_key
+        else:
+            group_values = (group_key,)
+        family_params = {col[4:]: _safe_value(val) for col, val in zip(group_cols, group_values)}
+        prr_family_json = json.dumps(family_params, sort_keys=True, ensure_ascii=False)
+        prr_family_hash = hashlib.sha1(prr_family_json.encode("utf-8")).hexdigest()[:10]
+
+        r_values = pd.to_numeric(fam_df["hp__r"], errors="coerce").dropna().astype(int).tolist()
+        family_dir = _ensure_prr_family_dir_and_manifest(
+            output_dir=output_dir,
+            prr_family_hash=str(prr_family_hash),
+            prr_family_json=prr_family_json,
+            project_ratios=unique_prr.astype(float).tolist(),
+            r_values=r_values,
+        )
+        for metric_col in sorted(guard_cols):
+            parsed = _parse_guard_col(metric_col)
+            if parsed is None:
+                continue
+            backend, group, phase, metric = parsed
+            if phase == "initial":
+                continue
+            initial_col = _guard_col_name(backend=backend, group=group, phase="initial", metric=metric)
+            initial_metric_value = None
+            if initial_col in fam_df.columns:
+                initial_vals = pd.to_numeric(fam_df[initial_col], errors="coerce").dropna()
+                if not initial_vals.empty:
+                    initial_metric_value = float(initial_vals.iloc[0])
+            baseline_metric_value = baseline_metric_lookup.get(metric_col)
+
+            generated = _plot_series(
+                family_df=fam_df,
+                metric_col=metric_col,
+                backend=backend,
+                group=group,
+                phase=phase,
+                metric=metric,
+                family_hash=f"{prr_family_hash}_prr",
+                family_dir=family_dir,
+                initial_metric_value=initial_metric_value,
+                baseline_metric_value=baseline_metric_value,
+                x_col="hp__proj_reduce_ratio",
+                x_label="project ratio",
+                series_label=None,
+                plot_kind="line",
+                plot_prefix="project_ratio",
+            )
+            if generated:
+                plot_count += 2
+                table_count += 2
+
+            generated = _plot_series(
+                family_df=fam_df,
+                metric_col=metric_col,
+                backend=backend,
+                group=group,
+                phase=phase,
+                metric=metric,
+                family_hash=f"{prr_family_hash}_prr",
+                family_dir=family_dir,
+                initial_metric_value=initial_metric_value,
+                baseline_metric_value=baseline_metric_value,
+                x_col="hp__r",
+                x_label="r",
+                series_label=None,
+                plot_kind="line",
+                plot_prefix="r",
+            )
+            if generated:
+                plot_count += 2
+                table_count += 2
+    return plot_count, table_count
+
+
 def main() -> None:
     args = _parse_args()
     input_dir = Path(args.input_dir).expanduser().resolve()
@@ -764,6 +933,15 @@ def main() -> None:
     )
     plot_count += im_plot_count
     table_count += im_table_count
+
+    prr_plot_count, prr_table_count = _generate_prr_boundary_plots(
+        df=df,
+        output_dir=output_dir,
+        baseline_metric_lookup=baseline_metric_lookup,
+        tight=args.tight,
+    )
+    plot_count += prr_plot_count
+    table_count += prr_table_count
 
     diagnostics_payload = [d.__dict__ for d in diagnostics]
     with open(meta_dir / "run_diagnostics.json", "w", encoding="utf-8") as f:
