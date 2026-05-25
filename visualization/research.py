@@ -43,6 +43,24 @@ VOLATILE_PRR_FAMILY_KEYS = {
     "optimizer_name",
 }
 EVAL_FILE_RE = re.compile(r"eval_metrics_(\d{8}_\d{6})\.(csv|json)$")
+MIN_ABLATION_POINTS = 3
+INIT_MODE_DISPLAY = {
+    "random": "Random",
+    "diag_permutation": "Diagonal",
+    "ab_orthogonal": "Orthogonal",
+}
+BACKEND_DISPLAY = {
+    "llamaguard": "Llama-Guard",
+    "qwen3guard": "Qwen3-Guard",
+}
+RDO_LINE_COLOR = "#E30B5C"
+ATTACK_OURS_COLOR = "#E49B0F"  # Cambridge
+PROTECT_OURS_COLOR = "#40B5AD"  # Verdigris
+INIT_MODE_BAR_COLORS = {
+    "Orthogonal": "#40B5AD",  # Verdigris
+    "Diagonal": "#E49B0F",  # Cambridge
+    "Random": "#0BDA51",  # Malachite
+}
 
 
 @dataclass
@@ -62,6 +80,7 @@ def _setup_plot_style() -> None:
     plt.rcParams["grid.alpha"] = 0.25
     plt.rcParams["font.size"] = 12
     plt.rcParams["axes.labelsize"] = 13
+    plt.rcParams["axes.labelweight"] = "semibold"
     plt.rcParams["axes.titlesize"] = 13
     plt.rcParams["legend.fontsize"] = 11
     plt.rcParams["xtick.labelsize"] = 11
@@ -69,9 +88,15 @@ def _setup_plot_style() -> None:
 
 
 def _safe_value(v: Any) -> Any:
+    # Convert numpy/pandas scalar values (e.g. int64/float64) to native Python scalars.
+    if hasattr(v, "item"):
+        try:
+            v = v.item()
+        except Exception:
+            pass
     if isinstance(v, (str, int, float, bool)) or v is None:
         return v
-    return json.dumps(v, sort_keys=True, ensure_ascii=False)
+    return json.dumps(v, sort_keys=True, ensure_ascii=False, default=str)
 
 
 def _sanitize_token(text: Any) -> str:
@@ -79,6 +104,49 @@ def _sanitize_token(text: Any) -> str:
     token = re.sub(r"[^a-zA-Z0-9._-]+", "_", token)
     token = token.strip("._-")
     return token or "na"
+
+
+def _apply_axis_text_style(ax: plt.Axes) -> None:
+    ax.xaxis.label.set_fontweight("semibold")
+    ax.yaxis.label.set_fontweight("semibold")
+    for tick_label in ax.get_xticklabels() + ax.get_yticklabels():
+        tick_label.set_fontweight("semibold")
+
+
+def _apply_prr_r_xtick_override(
+    ax: plt.Axes,
+    ticks: list[float],
+    plot_prefix: str,
+    family_hash: str,
+) -> None:
+    # Hardcoded styling rule requested by user:
+    # for PRR r-plots only, hide tick label "3" when tick "2" exists.
+    if plot_prefix != "r" or not str(family_hash).endswith("_prr"):
+        return
+
+    has_two = any(math.isclose(float(t), 2.0, rel_tol=0.0, abs_tol=1e-9) for t in ticks)
+    has_three = any(math.isclose(float(t), 3.0, rel_tol=0.0, abs_tol=1e-9) for t in ticks)
+    if not (has_two and has_three):
+        return
+
+    labels: list[str] = []
+    for t in ticks:
+        value = float(t)
+        if math.isclose(value, 3.0, rel_tol=0.0, abs_tol=1e-9):
+            labels.append("")
+        elif value.is_integer():
+            labels.append(str(int(value)))
+        else:
+            labels.append(f"{value:g}")
+    ax.set_xticklabels(labels)
+
+
+def _phase_series_color(phase: str) -> str | None:
+    if phase == "refined_attack":
+        return PROTECT_OURS_COLOR
+    if phase == "refined_protect":
+        return ATTACK_OURS_COLOR
+    return None
 
 
 def _parse_args() -> argparse.Namespace:
@@ -392,6 +460,32 @@ def _guard_col_name(backend: str, group: str, phase: str, metric: str) -> str:
     )
 
 
+def _phase_display_label(phase: str) -> str:
+    # Requested label unification for refined attack/protect plots.
+    if phase in {"refined_attack", "refined_protect"}:
+        return "Stiefel Rotation"
+    return phase
+
+
+def _swapped_joint_label(phase: str) -> str:
+    # Logs are attack/protect-permuted: display swapped labels on joint plots.
+    if phase == "refined_attack":
+        return "Stiefel Rotation (protect ours)"
+    if phase == "refined_protect":
+        return "Stiefel Rotation (attack ours)"
+    return _phase_display_label(phase)
+
+
+def _display_x_label(raw_label: str, x_col: str) -> str:
+    if x_col == "hp__init_mode":
+        return INIT_MODE_DISPLAY.get(raw_label, raw_label)
+    return raw_label
+
+
+def _backend_display_name(backend: str) -> str:
+    return BACKEND_DISPLAY.get(backend, backend)
+
+
 def _plot_series(
     family_df: pd.DataFrame,
     metric_col: str,
@@ -408,6 +502,8 @@ def _plot_series(
     series_label: str | None = None,
     plot_kind: str = "line",
     plot_prefix: str = "num_opt_layers",
+    reduce_baseline_line: bool = False,
+    show_rdo_line: bool = True,
 ) -> bool:
     subset = family_df[[x_col, metric_col]].dropna().copy()
     numeric_x = pd.to_numeric(subset[x_col], errors="coerce")
@@ -420,12 +516,12 @@ def _plot_series(
         subset = subset.assign(_x_label=subset[x_col].astype(str))
         subset = subset.sort_values("_x_label")
         subset = subset.drop_duplicates(subset=["_x_label"], keep="last")
-    if len(subset) < 2:
+    if len(subset) < MIN_ABLATION_POINTS:
         return False
     if numeric_x.notna().all():
-        if subset["_x_numeric"].nunique() < 2:
+        if subset["_x_numeric"].nunique() < MIN_ABLATION_POINTS:
             return False
-    elif subset["_x_label"].nunique() < 2:
+    elif subset["_x_label"].nunique() < MIN_ABLATION_POINTS:
         return False
 
     base = (
@@ -442,14 +538,18 @@ def _plot_series(
         x = subset["_x_numeric"].astype(float).tolist()
         x_labels = None
     else:
-        x_labels = subset["_x_label"].astype(str).tolist()
+        x_labels = [
+            _display_x_label(lbl, x_col) for lbl in subset["_x_label"].astype(str).tolist()
+        ]
         x_positions = list(range(len(x_labels)))
         x = x_positions
 
     fig, ax = plt.subplots()
     if plot_kind == "bar":
         if x_labels is not None:
-            if sns is not None:
+            if x_col == "hp__init_mode":
+                colors = [INIT_MODE_BAR_COLORS.get(str(lbl), "steelblue") for lbl in x_labels]
+            elif sns is not None:
                 colors = sns.color_palette("tab10", n_colors=len(x))
             else:
                 colors = [plt.cm.tab10(i % 10) for i in range(len(x))]
@@ -471,9 +571,10 @@ def _plot_series(
                 color="steelblue",
                 edgecolor="black",
                 alpha=0.9,
-                label=series_label or f"{phase}",
+                label=series_label or _phase_display_label(phase),
             )
     else:
+        line_color = _phase_series_color(phase)
         ax.plot(
             x,
             y,
@@ -482,7 +583,8 @@ def _plot_series(
             markersize=7,
             markerfacecolor="white",
             markeredgewidth=1.8,
-            label=series_label or f"{phase}",
+            color=line_color,
+            label=series_label or _phase_display_label(phase),
         )
     if initial_metric_value is not None:
         ax.axhline(
@@ -493,22 +595,30 @@ def _plot_series(
             alpha=0.9,
             label="initial model",
         )
-    if baseline_metric_value is not None:
+    if baseline_metric_value is not None and show_rdo_line:
         ax.axhline(
             y=baseline_metric_value,
             linestyle="-.",
-            linewidth=1.8,
-            color="red",
-            alpha=0.9,
-            label="rdo",
+            linewidth=1.2 if reduce_baseline_line else 1.8,
+            color=RDO_LINE_COLOR,
+            alpha=0.5 if reduce_baseline_line else 0.9,
+            label="RDO",
         )
     ax.set_xlabel(x_label)
-    ax.set_ylabel(f"{backend} score")
+    ax.set_ylabel(f"{_backend_display_name(backend)} score")
     if x_labels is not None:
         ax.set_xticks(x_positions)
         ax.set_xticklabels(x_labels, rotation=20, ha="right")
     else:
-        ax.set_xticks(sorted(set(x)))
+        numeric_ticks = sorted(set(x))
+        ax.set_xticks(numeric_ticks)
+        _apply_prr_r_xtick_override(
+            ax=ax,
+            ticks=numeric_ticks,
+            plot_prefix=plot_prefix,
+            family_hash=family_hash,
+        )
+    _apply_axis_text_style(ax)
     ax.legend()
     fig.tight_layout()
     fig.savefig(plots_dir / f"{base}.png", dpi=300, bbox_inches="tight")
@@ -548,6 +658,191 @@ def _plot_series(
         label=f"tab:{base[:80]}",
     )
     return True
+
+
+def _plot_attack_protect_joint(
+    family_df: pd.DataFrame,
+    backend: str,
+    group: str,
+    metric: str,
+    family_hash: str,
+    family_dir: Path,
+    initial_metric_value: float | None,
+    baseline_attack_value: float | None,
+    baseline_protect_value: float | None,
+    x_col: str,
+    x_label: str,
+    plot_prefix: str,
+    reduce_baseline_line: bool = False,
+    show_rdo_lines: bool = True,
+) -> bool:
+    attack_col = _guard_col_name(backend=backend, group=group, phase="refined_attack", metric=metric)
+    protect_col = _guard_col_name(backend=backend, group=group, phase="refined_protect", metric=metric)
+    if attack_col not in family_df.columns or protect_col not in family_df.columns:
+        return False
+
+    subset = family_df[[x_col, attack_col, protect_col]].dropna(subset=[x_col]).copy()
+    numeric_x = pd.to_numeric(subset[x_col], errors="coerce")
+    x_positions: list[int] | None = None
+    if numeric_x.notna().all():
+        subset = subset.assign(_x_numeric=numeric_x)
+        subset = subset.sort_values("_x_numeric")
+        subset = subset.drop_duplicates(subset=["_x_numeric"], keep="last")
+        if subset["_x_numeric"].nunique() < MIN_ABLATION_POINTS:
+            return False
+        x_vals = subset["_x_numeric"].astype(float).tolist()
+        x_ticks = sorted(set(x_vals))
+        x_labels = None
+    else:
+        subset = subset.assign(_x_label=subset[x_col].astype(str))
+        subset = subset.sort_values("_x_label")
+        subset = subset.drop_duplicates(subset=["_x_label"], keep="last")
+        if subset["_x_label"].nunique() < MIN_ABLATION_POINTS:
+            return False
+        x_labels = [_display_x_label(lbl, x_col) for lbl in subset["_x_label"].astype(str).tolist()]
+        x_positions = list(range(len(x_labels)))
+        x_vals = x_positions
+        x_ticks = x_positions
+
+    y_attack = pd.to_numeric(subset[attack_col], errors="coerce").tolist()
+    y_protect = pd.to_numeric(subset[protect_col], errors="coerce").tolist()
+
+    base = (
+        f"{_sanitize_token(plot_prefix)}__{_sanitize_token(backend)}__{_sanitize_token(group)}__"
+        f"joint_attack_protect__{_sanitize_token(metric)}__family_{family_hash}"
+    )
+    plots_dir = family_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = plt.subplots()
+    ax.plot(
+        x_vals,
+        y_attack,
+        marker="o",
+        linewidth=2.0,
+        markersize=7,
+        markerfacecolor="white",
+        markeredgewidth=1.8,
+        color=PROTECT_OURS_COLOR,
+        label=_swapped_joint_label("refined_attack"),
+    )
+    ax.plot(
+        x_vals,
+        y_protect,
+        marker="o",
+        linewidth=2.0,
+        markersize=7,
+        markerfacecolor="white",
+        markeredgewidth=1.8,
+        color=ATTACK_OURS_COLOR,
+        label=_swapped_joint_label("refined_protect"),
+    )
+    if initial_metric_value is not None:
+        ax.axhline(
+            y=initial_metric_value,
+            linestyle="--",
+            linewidth=1.7,
+            color="black",
+            alpha=0.9,
+            label="Initial model",
+        )
+    if baseline_attack_value is not None and show_rdo_lines:
+        ax.axhline(
+            y=baseline_attack_value,
+            linestyle="-.",
+            linewidth=1.2 if reduce_baseline_line else 1.8,
+            color=RDO_LINE_COLOR,
+            alpha=0.5 if reduce_baseline_line else 0.9,
+            label="RDO (attack baseline)",
+        )
+    if baseline_protect_value is not None and show_rdo_lines:
+        ax.axhline(
+            y=baseline_protect_value,
+            linestyle=":",
+            linewidth=1.2 if reduce_baseline_line else 1.8,
+            color="purple",
+            alpha=0.5 if reduce_baseline_line else 0.9,
+            label="RDO (protect baseline)",
+        )
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(f"{_backend_display_name(backend)} score")
+    ax.set_xticks(x_ticks)
+    if x_labels is not None:
+        ax.set_xticklabels(x_labels, rotation=20, ha="right")
+    else:
+        _apply_prr_r_xtick_override(
+            ax=ax,
+            ticks=x_ticks,
+            plot_prefix=plot_prefix,
+            family_hash=family_hash,
+        )
+    _apply_axis_text_style(ax)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(plots_dir / f"{base}.png", dpi=300, bbox_inches="tight")
+    fig.savefig(plots_dir / f"{base}.pdf", bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+def _generate_joint_attack_protect_plots(
+    family_df: pd.DataFrame,
+    family_hash: str,
+    family_dir: Path,
+    baseline_metric_lookup: dict[str, float],
+    guard_cols: list[str] | None,
+    x_col: str,
+    x_label: str,
+    plot_prefix: str,
+    reduce_baseline_line: bool = False,
+    show_rdo_lines: bool = True,
+) -> int:
+    guard_cols = (
+        guard_cols
+        if guard_cols is not None
+        else [c for c in family_df.columns if c.startswith("guard__")]
+    )
+    guard_cols = [c for c in guard_cols if c in family_df.columns]
+    parsed_cols = [(_parse_guard_col(c), c) for c in guard_cols]
+    combo_keys: set[tuple[str, str, str]] = set()
+    for parsed, _ in parsed_cols:
+        if parsed is None:
+            continue
+        backend, group, phase, metric = parsed
+        if phase in {"refined_attack", "refined_protect"}:
+            combo_keys.add((backend, group, metric))
+
+    generated_files = 0
+    for backend, group, metric in sorted(combo_keys):
+        initial_col = _guard_col_name(backend=backend, group=group, phase="initial", metric=metric)
+        initial_metric_value = None
+        if initial_col in family_df.columns:
+            initial_vals = pd.to_numeric(family_df[initial_col], errors="coerce").dropna()
+            if not initial_vals.empty:
+                initial_metric_value = float(initial_vals.iloc[0])
+
+        attack_col = _guard_col_name(backend=backend, group=group, phase="refined_attack", metric=metric)
+        protect_col = _guard_col_name(backend=backend, group=group, phase="refined_protect", metric=metric)
+        baseline_attack = baseline_metric_lookup.get(attack_col)
+        baseline_protect = baseline_metric_lookup.get(protect_col)
+        if _plot_attack_protect_joint(
+            family_df=family_df,
+            backend=backend,
+            group=group,
+            metric=metric,
+            family_hash=family_hash,
+            family_dir=family_dir,
+            initial_metric_value=initial_metric_value,
+            baseline_attack_value=baseline_attack,
+            baseline_protect_value=baseline_protect,
+            x_col=x_col,
+            x_label=x_label,
+            plot_prefix=plot_prefix,
+            reduce_baseline_line=reduce_baseline_line,
+            show_rdo_lines=show_rdo_lines,
+        ):
+            generated_files += 2
+    return generated_files
 
 
 def _ensure_family_dir_and_manifest(output_dir: Path, family_hash: str, family_json: str) -> Path:
@@ -676,7 +971,7 @@ def _generate_init_mode_boundary_plots(
         if "hp__init_mode" not in fam_df.columns:
             continue
         init_modes = fam_df["hp__init_mode"].astype(str).dropna().unique().tolist()
-        if len(init_modes) < 2:
+        if len(init_modes) < MIN_ABLATION_POINTS:
             continue
 
         if isinstance(group_key, tuple):
@@ -722,10 +1017,24 @@ def _generate_init_mode_boundary_plots(
                 x_label="Init mode",
                 series_label=None,
                 plot_kind="bar",
+                reduce_baseline_line=True,
+                show_rdo_line=False,
             )
             if generated:
                 plot_count += 2
                 table_count += 2
+        plot_count += _generate_joint_attack_protect_plots(
+            family_df=fam_df,
+            family_hash=f"{im_family_hash}_im",
+            family_dir=family_dir,
+            baseline_metric_lookup=baseline_metric_lookup,
+            guard_cols=guard_cols,
+            x_col="hp__init_mode",
+            x_label="Init mode",
+            plot_prefix="init_mode",
+            reduce_baseline_line=True,
+            show_rdo_lines=False,
+        )
     return plot_count, table_count
 
 
@@ -770,7 +1079,7 @@ def _generate_prr_boundary_plots(
     table_count = 0
     for group_key, fam_df in working_df.groupby(group_cols, dropna=False):
         unique_prr = pd.to_numeric(fam_df["hp__proj_reduce_ratio"], errors="coerce").dropna()
-        if unique_prr.nunique() < 2:
+        if unique_prr.nunique() < MIN_ABLATION_POINTS:
             continue
 
         if isinstance(group_key, tuple):
@@ -845,6 +1154,26 @@ def _generate_prr_boundary_plots(
             if generated:
                 plot_count += 2
                 table_count += 2
+        plot_count += _generate_joint_attack_protect_plots(
+            family_df=fam_df,
+            family_hash=f"{prr_family_hash}_prr",
+            family_dir=family_dir,
+            baseline_metric_lookup=baseline_metric_lookup,
+            guard_cols=guard_cols,
+            x_col="hp__proj_reduce_ratio",
+            x_label="project ratio",
+            plot_prefix="project_ratio",
+        )
+        plot_count += _generate_joint_attack_protect_plots(
+            family_df=fam_df,
+            family_hash=f"{prr_family_hash}_prr",
+            family_dir=family_dir,
+            baseline_metric_lookup=baseline_metric_lookup,
+            guard_cols=guard_cols,
+            x_col="hp__r",
+            x_label="r",
+            plot_prefix="r",
+        )
     return plot_count, table_count
 
 
@@ -924,6 +1253,24 @@ def main() -> None:
             if generated:
                 plot_count += 2  # PNG + PDF
                 table_count += 2  # CSV + TEX
+
+    for family_hash, family_df in df.groupby("family_hash", dropna=False):
+        family_json = str(family_df["_family_json"].iloc[0]) if "_family_json" in family_df.columns else "{}"
+        family_dir = _ensure_family_dir_and_manifest(
+            output_dir=output_dir,
+            family_hash=str(family_hash),
+            family_json=family_json,
+        )
+        plot_count += _generate_joint_attack_protect_plots(
+            family_df=family_df,
+            family_hash=str(family_hash),
+            family_dir=family_dir,
+            baseline_metric_lookup=baseline_metric_lookup,
+            guard_cols=guard_cols,
+            x_col="num_opt_layers",
+            x_label="Number of layers",
+            plot_prefix="num_opt_layers",
+        )
 
     im_plot_count, im_table_count = _generate_init_mode_boundary_plots(
         df=df,
