@@ -54,12 +54,17 @@ BACKEND_DISPLAY = {
     "qwen3guard": "Qwen3-Guard",
 }
 RDO_LINE_COLOR = "#E30B5C"
+PROTECT_BASELINE_COLOR = "purple"
 ATTACK_OURS_COLOR = "#E49B0F"  # Cambridge
 PROTECT_OURS_COLOR = "#40B5AD"  # Verdigris
 INIT_MODE_BAR_COLORS = {
     "Orthogonal": "#40B5AD",  # Verdigris
     "Diagonal": "#E49B0F",  # Cambridge
     "Random": "#0BDA51",  # Malachite
+}
+ANGULAR_STEERING_PROTECT_BASELINES = {
+    "llamaguard": 0.03,
+    "qwen3guard": 0.045,
 }
 
 
@@ -486,6 +491,15 @@ def _backend_display_name(backend: str) -> str:
     return BACKEND_DISPLAY.get(backend, backend)
 
 
+def _angular_steering_protect_baseline(
+    backend: str, phase: str, metric: str
+) -> float | None:
+    # Requested manual protect baseline override.
+    if phase != "refined_protect" or metric != "pct_unsafe":
+        return None
+    return ANGULAR_STEERING_PROTECT_BASELINES.get(backend)
+
+
 def _plot_series(
     family_df: pd.DataFrame,
     metric_col: str,
@@ -595,14 +609,25 @@ def _plot_series(
             alpha=0.9,
             label="initial model",
         )
-    if baseline_metric_value is not None and show_rdo_line:
+    protect_override = _angular_steering_protect_baseline(
+        backend=backend, phase=phase, metric=metric
+    )
+    baseline_value_to_plot = (
+        protect_override if protect_override is not None else baseline_metric_value
+    )
+    if baseline_value_to_plot is not None and show_rdo_line:
+        baseline_label = "RDO"
+        baseline_color = RDO_LINE_COLOR
+        if protect_override is not None:
+            baseline_label = "Angular Steering (protect baseline)"
+            baseline_color = PROTECT_BASELINE_COLOR
         ax.axhline(
-            y=baseline_metric_value,
+            y=baseline_value_to_plot,
             linestyle="-.",
             linewidth=1.2 if reduce_baseline_line else 1.8,
-            color=RDO_LINE_COLOR,
+            color=baseline_color,
             alpha=0.5 if reduce_baseline_line else 0.9,
-            label="RDO",
+            label=baseline_label,
         )
     ax.set_xlabel(x_label)
     ax.set_ylabel(f"{_backend_display_name(backend)} score")
@@ -756,13 +781,22 @@ def _plot_attack_protect_joint(
             label="RDO (attack baseline)",
         )
     if baseline_protect_value is not None and show_rdo_lines:
+        protect_override = _angular_steering_protect_baseline(
+            backend=backend, phase="refined_protect", metric=metric
+        )
+        baseline_protect_value_to_plot = (
+            protect_override if protect_override is not None else baseline_protect_value
+        )
+        baseline_protect_label = "RDO (protect baseline)"
+        if protect_override is not None:
+            baseline_protect_label = "Angular Steering (protect baseline)"
         ax.axhline(
-            y=baseline_protect_value,
+            y=baseline_protect_value_to_plot,
             linestyle=":",
             linewidth=1.2 if reduce_baseline_line else 1.8,
-            color="purple",
+            color=PROTECT_BASELINE_COLOR,
             alpha=0.5 if reduce_baseline_line else 0.9,
-            label="RDO (protect baseline)",
+            label=baseline_protect_label,
         )
     ax.set_xlabel(x_label)
     ax.set_ylabel(f"{_backend_display_name(backend)} score")
@@ -823,8 +857,10 @@ def _generate_joint_attack_protect_plots(
 
         attack_col = _guard_col_name(backend=backend, group=group, phase="refined_attack", metric=metric)
         protect_col = _guard_col_name(backend=backend, group=group, phase="refined_protect", metric=metric)
-        baseline_attack = baseline_metric_lookup.get(attack_col)
-        baseline_protect = baseline_metric_lookup.get(protect_col)
+        # Logs are attack/protect-permuted on joint plots; keep baseline values
+        # aligned to displayed labels by swapping lookup columns too.
+        baseline_attack = baseline_metric_lookup.get(protect_col)
+        baseline_protect = baseline_metric_lookup.get(attack_col)
         if _plot_attack_protect_joint(
             family_df=family_df,
             backend=backend,
@@ -1146,7 +1182,7 @@ def _generate_prr_boundary_plots(
                 initial_metric_value=initial_metric_value,
                 baseline_metric_value=baseline_metric_value,
                 x_col="hp__r",
-                x_label="r",
+                x_label="n",
                 series_label=None,
                 plot_kind="line",
                 plot_prefix="r",
@@ -1171,7 +1207,7 @@ def _generate_prr_boundary_plots(
             baseline_metric_lookup=baseline_metric_lookup,
             guard_cols=guard_cols,
             x_col="hp__r",
-            x_label="r",
+            x_label="n",
             plot_prefix="r",
         )
     return plot_count, table_count

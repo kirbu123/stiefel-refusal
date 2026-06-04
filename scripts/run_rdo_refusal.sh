@@ -17,7 +17,7 @@ result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave 
 log_steps=0
 init_mode="diag_permutation" # "random", "diag_permutation", or "ab_orthogonal"
 orth_method="qr" # "qr" or "svd"
-proj_reduce_ratio=100 # used when direction_mode="shtiefel_proj_rot" (k = hidden_size / ratio)
+proj_reduce_ratio=15 # used when direction_mode="shtiefel_proj_rot" (k = hidden_size / ratio)
 
 # LlamaGuard eval config
 eval_max_new_tokens=256 # inportant param for llama guard eval
@@ -61,7 +61,7 @@ export MAX_HARMLESS="${MAX_HARMLESS}" # 250
 
 # export HF_TOKEN="hf_fJyEXMwqeWZJvzLrBqCLDajXibFEDMGWW"
 # export HF_TOKEN="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"
-export HF_TOKEN="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"
+export HF_TOKEN=""
 
 # ---- Default command ----
 cmd=(python -m baselines.rdo_refusal \
