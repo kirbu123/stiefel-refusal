@@ -3493,6 +3493,86 @@ def _load_llamaguard_eval_sets(
 
     raise ValueError(f"Unsupported llamaguard_data mode: {mode}")
 
+def _save_generated_responses(
+    tb_run_dir: str,
+    harmful_q: list[str],
+    harmless_q: list[str],
+    initial_harmful: list[str],
+    initial_harmless: list[str],
+    refined_generations: dict[str, dict[str, list[str]]],
+    direction_mode: str,
+) -> None:
+    """Save generated responses to JSON files."""
+    
+    responses_dir = os.path.join(tb_run_dir, "generated_responses")
+    os.makedirs(responses_dir, exist_ok=True)
+    
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    # Save initial responses
+    initial_data = {
+        "config": {
+            "direction_mode": direction_mode,
+            "timestamp": timestamp,
+        },
+        "harmful": [
+            {"prompt": q, "response": r}
+            for q, r in zip(harmful_q, initial_harmful)
+        ],
+        "harmless": [
+            {"prompt": q, "response": r}
+            for q, r in zip(harmless_q, initial_harmless)
+        ]
+    }
+    
+    with open(os.path.join(responses_dir, f"initial_responses_{timestamp}.json"), "w", encoding="utf-8") as f:
+        json.dump(initial_data, f, indent=2, ensure_ascii=False)
+    
+    # Save refined responses
+    for guard_mode, mode_generations in refined_generations.items():
+        refined_data = {
+            "config": {
+                "direction_mode": direction_mode,
+                "guard_mode": guard_mode,
+                "timestamp": timestamp,
+            },
+            "harmful": [
+                {"prompt": q, "response": r}
+                for q, r in zip(harmful_q, mode_generations["harmful"])
+            ],
+            "harmless": [
+                {"prompt": q, "response": r}
+                for q, r in zip(harmless_q, mode_generations["harmless"])
+            ]
+        }
+        
+        with open(os.path.join(responses_dir, f"refined_responses_{guard_mode}_{timestamp}.json"), "w", encoding="utf-8") as f:
+            json.dump(refined_data, f, indent=2, ensure_ascii=False)
+    
+    # Also save a CSV version for easier analysis
+    import csv
+    
+    # Initial responses CSV
+    with open(os.path.join(responses_dir, f"initial_responses_{timestamp}.csv"), "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["type", "prompt", "response"])
+        for q, r in zip(harmful_q, initial_harmful):
+            writer.writerow(["harmful", q, r])
+        for q, r in zip(harmless_q, initial_harmless):
+            writer.writerow(["harmless", q, r])
+    
+    # Refined responses CSV for each mode
+    for guard_mode, mode_generations in refined_generations.items():
+        with open(os.path.join(responses_dir, f"refined_responses_{guard_mode}_{timestamp}.csv"), "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["type", "prompt", "response"])
+            for q, r in zip(harmful_q, mode_generations["harmful"]):
+                writer.writerow(["harmful", q, r])
+            for q, r in zip(harmless_q, mode_generations["harmless"]):
+                writer.writerow(["harmless", q, r])
+    
+    print(f"Saved generated responses to {responses_dir}")
+
 
 def _evaluate_llamaguard_and_mmlu(
     *,
@@ -3793,6 +3873,16 @@ def _evaluate_llamaguard_and_mmlu(
                 )
                 if strict:
                     raise
+
+            _save_generated_responses(
+                tb_run_dir=tb_run_dir,
+                harmful_q=harmful_q,
+                harmless_q=harmless_q,
+                initial_harmful=initial_harmful,
+                initial_harmless=initial_harmless,
+                refined_generations=refined_generations,
+                direction_mode=direction_mode,
+            )
 
         # --- MMLU ---
         if args.eval_mmlu:
