@@ -2240,10 +2240,7 @@ def refusal_cone_optimization(model, train_dataset,
                                 direction = operation.transform(sample_vector)
                                 operation(direction)
                                 logits = model.lm_head.output[:, :-1]
-                                if direction_mode == "baseline":
-                                    sample_ablation_loss = compute_ce_loss(logits, ablation_labels) / n_sample
-                                else:
-                                    sample_ablation_loss = _zero_loss_with_grad()
+                                sample_ablation_loss = compute_ce_loss(logits, ablation_labels) / n_sample
                                 log = _log_scalar(sample_ablation_loss)
                             (ablation_lambda * sample_ablation_loss).backward()
                     batch_sample_ablation_loss += log
@@ -2283,10 +2280,7 @@ def refusal_cone_optimization(model, train_dataset,
                             with tracer.invoke(ablation_prompt):
                                 operation(fn_vector)
                                 logits = model.lm_head.output[:, :-1]
-                                if direction_mode == "baseline":
-                                    basis_ablation_loss = compute_ce_loss(logits, ablation_labels) / cone_dim
-                                else:
-                                    basis_ablation_loss = _zero_loss_with_grad()
+                                basis_ablation_loss = compute_ce_loss(logits, ablation_labels) / cone_dim
                                 log = _log_scalar(basis_ablation_loss)
                             (ablation_lambda * basis_ablation_loss).backward()
                         batch_basis_ablation_loss += log
