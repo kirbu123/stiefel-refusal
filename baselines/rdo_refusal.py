@@ -1284,18 +1284,18 @@ class RefusalStiefelRotation(nn.Module):
     def stack_directions_for_log(self) -> torch.Tensor:
         return self.r0.detach().unsqueeze(0).cpu()
 
-    def _rotate(self, x, layer_idx: int):
+    def _rotate(self, x, layer_idx: int, inverse: bool = False):
         # Mirror RefusalDirectionActivationRotation's tuple/proxy-safe behavior.
         if isinstance(x, tuple):
             if len(x) == 0:
                 return x
-            return (self._rotate(x[0], layer_idx),) + x[1:]
+            return (self._rotate(x[0], layer_idx, inverse=inverse),) + x[1:]
 
         if not hasattr(x, "dtype") and hasattr(x, "__getitem__"):
             try:
                 first = x[0]
                 rest = x[1:]
-                return (self._rotate(first, layer_idx),) + tuple(rest)
+                return (self._rotate(first, layer_idx, inverse=inverse),) + tuple(rest)
             except Exception:
                 return x
 
@@ -1313,6 +1313,8 @@ class RefusalStiefelRotation(nn.Module):
                     M = M.to(dtype=model.dtype)
                 except Exception:
                     pass
+        if inverse:
+            return x @ M
         return x @ M.T
 
     def set_guard_mode(self, mode: str) -> None:
@@ -1324,22 +1326,41 @@ class RefusalStiefelRotation(nn.Module):
     def __call__(self, direction, best_layer: int = None):
         del direction
         for layer_idx, layer in enumerate(self.module.layers):
-            self._add(None, None, layer_idx, best_layer)
+            self._add(None, None, layer_idx, best_layer, inverse=False)
 
     def add(self, direction, alpha, layer_idx, best_layer: int = None):
-        self.__call__(direction, best_layer)
+        del direction
+        self._add(None, alpha, int(layer_idx), best_layer, inverse=True)
 
-    def _add(self, direction, alpha, layer_idx, best_layer: int = None):
+    def _add(self, direction, alpha, layer_idx, best_layer: int = None, inverse: bool = False):
         if direction is not None:
             del direction
-        if alpha is not None:
-            del alpha
         if best_layer is not None and 0 < best_layer < len(self.module.layers) - 1:
             self._optimized_layer_idxs.add(int(best_layer))
         if layer_idx not in self._optimized_layer_idxs:
             return
         layer = self.module.layers[layer_idx]
-        layer.input = self._rotate(layer.input, layer_idx)
+        rotated_input = self._rotate(layer.input, layer_idx, inverse=inverse)
+
+        # For harmless-time intervention (`add`), alpha controls interpolation strength:
+        # alpha=0 -> no-op, alpha=1 -> full inverse transform.
+        # if alpha is not None:
+        #     # Keep alpha as a Python scalar to avoid touching proxy device/dtype
+        #     # attributes under nnsight tracing.
+        #     if torch.is_tensor(alpha):
+        #         try:
+        #             alpha_scale = float(alpha.detach().mean().item())
+        #         except Exception:
+        #             alpha_scale = float(alpha.detach().mean().cpu().item())
+        #     else:
+        #         alpha_scale = float(alpha)
+        #     alpha_scale = max(0.0, min(1.0, alpha_scale))
+        #     layer.input = layer.input + alpha_scale * (rotated_input - layer.input)
+        # else:
+            # layer.input = rotated_input
+        
+        norm_correction = layer.input.norm() / rotated_input.norm()
+        layer.input = rotated_input * norm_correction
 
     def orthogonalize(self):
         """Initialize/force orthogonality without gradients."""
@@ -1516,18 +1537,18 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         QB = OrthogonalProjection.apply(B)
         return QA @ QB
 
-    def _rotate(self, x, layer_idx: int):
+    def _rotate(self, x, layer_idx: int, inverse: bool = False):
         # Mirror RefusalStiefelRotation tuple/proxy-safe behavior.
         if isinstance(x, tuple):
             if len(x) == 0:
                 return x
-            return (self._rotate(x[0], layer_idx),) + x[1:]
+            return (self._rotate(x[0], layer_idx, inverse=inverse),) + x[1:]
 
         if not hasattr(x, "dtype") and hasattr(x, "__getitem__"):
             try:
                 first = x[0]
                 rest = x[1:]
-                return (self._rotate(first, layer_idx),) + tuple(rest)
+                return (self._rotate(first, layer_idx, inverse=inverse),) + tuple(rest)
             except Exception:
                 return x
 
@@ -1542,9 +1563,12 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
                     M = M.to(dtype=model.dtype)
                 except Exception:
                     pass
-        if self._guard_mode == "protect":
-            return x @ M
-        return x @ M.T
+        use_transpose = self._guard_mode != "protect"
+        if inverse:
+            use_transpose = not use_transpose
+        if use_transpose:
+            return x @ M.T
+        return x @ M
 
     def orthogonalize(self):
         with torch.no_grad():
@@ -3342,7 +3366,8 @@ def _run_train_guard_validation(
     harmless_prompts = guard_data["harmless_prompts"]
 
     # Keep train-time guard validation behavior aligned with eval behavior.
-    lg_max_new_tokens = 1 if direction_mode == "shtiefel_rot" else eval_max_new_tokens
+    # lg_max_new_tokens = 1 if direction_mode == "shtiefel_rot" else eval_max_new_tokens
+    lg_max_new_tokens = eval_max_new_tokens
     guard_batch_size = _guard_eval_batch_size(eval_batch_size, phase="train")
     guard_modes = ["attack"]
     if _supports_protect_guard_mode(direction_mode):
@@ -3495,10 +3520,19 @@ def _save_generated_responses(
     initial_harmless: list[str],
     refined_generations: dict[str, dict[str, list[str]]],
     direction_mode: str,
+    llamaguard_data_mode: str,
 ) -> None:
     """Save generated responses to JSON files."""
-    
-    responses_dir = os.path.join(tb_run_dir, "generated_responses")
+
+    mode = str(llamaguard_data_mode).strip().lower()
+    if mode == "basic":
+        split_dir = "train_answers"
+    elif mode == "rdo":
+        split_dir = "test_answers"
+    else:
+        split_dir = f"{mode}_answers"
+
+    responses_dir = os.path.join(tb_run_dir, "generated_responses", split_dir)
     os.makedirs(responses_dir, exist_ok=True)
     
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -3507,6 +3541,8 @@ def _save_generated_responses(
     initial_data = {
         "config": {
             "direction_mode": direction_mode,
+            "llamaguard_data_mode": mode,
+            "answers_split": split_dir,
             "timestamp": timestamp,
         },
         "harmful": [
@@ -3528,6 +3564,8 @@ def _save_generated_responses(
             "config": {
                 "direction_mode": direction_mode,
                 "guard_mode": guard_mode,
+                "llamaguard_data_mode": mode,
+                "answers_split": split_dir,
                 "timestamp": timestamp,
             },
             "harmful": [
@@ -3705,7 +3743,8 @@ def _evaluate_llamaguard_and_mmlu(
                 # can drift into blanket refusals and mask the intended intervention effect.
                 # Keep LlamaGuard generation aligned with the training-time decision point.
 
-                lg_max_new_tokens = 1 if direction_mode == "shtiefel_rot" else eval_max_new_tokens
+                # lg_max_new_tokens = 1 if direction_mode == "shtiefel_rot" else eval_max_new_tokens
+                lg_max_new_tokens = eval_max_new_tokens
                 print(f"eval_max_new_tokens: {eval_max_new_tokens}")
                 print(f"lg_max_new_tokens: {lg_max_new_tokens}")
 
@@ -3876,7 +3915,100 @@ def _evaluate_llamaguard_and_mmlu(
                 initial_harmless=initial_harmless,
                 refined_generations=refined_generations,
                 direction_mode=direction_mode,
+                llamaguard_data_mode=llamaguard_data_mode,
             )
+
+            # Also write generated responses for the complementary split so both
+            # train_answers (basic) and test_answers (rdo) are available from one run.
+            normalized_mode = str(llamaguard_data_mode).strip().lower()
+            if normalized_mode in ("basic", "rdo"):
+                secondary_mode = "rdo" if normalized_mode == "basic" else "basic"
+                try:
+                    sec_harmful, sec_harmless = _load_llamaguard_eval_sets(
+                        splits_name=splits_name,
+                        eval_split=eval_split,
+                        mode=secondary_mode,
+                        model_name=model_name,
+                    )
+                    max_harmful_total = int(os.getenv("MAX_HARMFUL", "0") or "0")
+                    max_harmless_total = int(os.getenv("MAX_HARMLESS", "0") or "0")
+                    if max_harmful_total > 0 and len(sec_harmful) > max_harmful_total:
+                        sec_harmful = sec_harmful[:max_harmful_total]
+                    if max_harmless_total > 0 and len(sec_harmless) > max_harmless_total:
+                        sec_harmless = sec_harmless[:max_harmless_total]
+
+                    sec_harmful_q = [d["instruction"] for d in sec_harmful]
+                    sec_harmless_q = [d["instruction"] for d in sec_harmless]
+                    sec_harmful_prompts = apply_chat_template(model.tokenizer, sec_harmful_q)
+                    sec_harmless_prompts = apply_chat_template(model.tokenizer, sec_harmless_q)
+
+                    print(
+                        f"[eval] also generating complementary responses (mode={secondary_mode}): "
+                        f"harmful={len(sec_harmful_q)}, harmless={len(sec_harmless_q)}"
+                    )
+
+                    sec_initial_harmful = _generate_nnsight_with_guard_retry(
+                        model=model,
+                        prompts=sec_harmful_prompts,
+                        max_new_tokens=lg_max_new_tokens,
+                        batch_size=guard_batch_size,
+                        retry_on_oom=True,
+                        log_prefix=f"eval_guard/secondary_{secondary_mode}/initial_harmful",
+                    )
+                    sec_initial_harmless = _generate_nnsight_with_guard_retry(
+                        model=model,
+                        prompts=sec_harmless_prompts,
+                        max_new_tokens=lg_max_new_tokens,
+                        batch_size=guard_batch_size,
+                        retry_on_oom=True,
+                        log_prefix=f"eval_guard/secondary_{secondary_mode}/initial_harmless",
+                    )
+
+                    sec_refined_generations: dict[str, dict[str, list[str]]] = {}
+                    if refined_artifact is not None:
+                        sec_guard_modes = ["attack"]
+                        if _supports_protect_guard_mode(direction_mode):
+                            sec_guard_modes.append("protect")
+                        for guard_mode in sec_guard_modes:
+                            step_fn = _make_refined_step_fn(refined_artifact, guard_mode=guard_mode)
+                            sec_refined_generations[guard_mode] = {
+                                "harmful": _generate_nnsight_with_guard_retry(
+                                    model=model,
+                                    prompts=sec_harmful_prompts,
+                                    max_new_tokens=lg_max_new_tokens,
+                                    batch_size=guard_batch_size,
+                                    intervene_step_fn=step_fn,
+                                    intervene_every_step=True,
+                                    retry_on_oom=True,
+                                    log_prefix=f"eval_guard/secondary_{secondary_mode}/{guard_mode}/harmful",
+                                ),
+                                "harmless": _generate_nnsight_with_guard_retry(
+                                    model=model,
+                                    prompts=sec_harmless_prompts,
+                                    max_new_tokens=lg_max_new_tokens,
+                                    batch_size=guard_batch_size,
+                                    intervene_step_fn=step_fn,
+                                    intervene_every_step=True,
+                                    retry_on_oom=True,
+                                    log_prefix=f"eval_guard/secondary_{secondary_mode}/{guard_mode}/harmless",
+                                ),
+                            }
+
+                    _save_generated_responses(
+                        tb_run_dir=tb_run_dir,
+                        harmful_q=sec_harmful_q,
+                        harmless_q=sec_harmless_q,
+                        initial_harmful=sec_initial_harmful,
+                        initial_harmless=sec_initial_harmless,
+                        refined_generations=sec_refined_generations,
+                        direction_mode=direction_mode,
+                        llamaguard_data_mode=secondary_mode,
+                    )
+                except Exception as sec_e:
+                    print(
+                        f"[eval] Secondary generated_responses write failed for mode={secondary_mode}: "
+                        f"{type(sec_e).__name__}: {sec_e}"
+                    )
 
         # --- MMLU ---
         if args.eval_mmlu:
