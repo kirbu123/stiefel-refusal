@@ -1211,6 +1211,9 @@ class RefusalStiefelRotation(nn.Module):
             torch.zeros(dim, dtype=torch.float32, device=dev),
             requires_grad=False,
         )
+        self.input_norm_scale = nn.Parameter(
+            torch.ones(n_layers, dtype=torch.float32, device=dev)
+        )
 
         # Start from an orthogonal matrix per layer.
         with torch.no_grad():
@@ -1358,9 +1361,17 @@ class RefusalStiefelRotation(nn.Module):
         #     layer.input = layer.input + alpha_scale * (rotated_input - layer.input)
         # else:
             # layer.input = rotated_input
-        
-        norm_correction = layer.input.norm() / rotated_input.norm()
-        layer.input = rotated_input * norm_correction
+
+        start_norm = layer.input.norm()
+        scaled_input = rotated_input * self.input_norm_scale[layer_idx]
+
+        # Keep scaled activations within start_norm ± start_norm => [0, 2 * start_norm].
+        max_norm = start_norm * 2.0
+        scaled_norm = scaled_input.norm()
+        # nnsight can wrap tensors as proxies where `.dtype` is not a real torch.dtype.
+        safe_scaled_norm = torch.clamp(scaled_norm, min=1e-12)
+        clip_factor = torch.clamp(max_norm / safe_scaled_norm, max=1.0)
+        layer.input = scaled_input * clip_factor
 
     def orthogonalize(self):
         """Initialize/force orthogonality without gradients."""
@@ -1392,7 +1403,7 @@ class RefusalStiefelRotation(nn.Module):
         return
 
     def parameters(self):
-        return [self.cayley_param]
+        return [self.cayley_param, self.input_norm_scale]
 
 
 class RefusalStiefelProjRotation(RefusalStiefelRotation):
@@ -1493,6 +1504,9 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         self._dummy_fn = nn.Parameter(
             torch.zeros(dim, dtype=torch.float32, device=dev),
             requires_grad=False,
+        )
+        self.input_norm_scale = nn.Parameter(
+            torch.ones(n_layers, dtype=torch.float32, device=dev)
         )
 
         self.register_buffer("cayley_param", torch.zeros(n_layers, dim, dim, dtype=torch.float32, device=dev))
@@ -1612,7 +1626,7 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
                 self.cayley_param[layer_idx].copy_(self.proj_A[layer_idx] @ self.proj_B[layer_idx])
 
     def parameters(self):
-        return [self.proj_A, self.proj_B]
+        return [self.proj_A, self.proj_B, self.input_norm_scale]
 
     def add(self, direction, alpha, layer_idx, best_layer: int = None):
         start_t = time.perf_counter()

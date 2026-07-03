@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 # variables
 direction_mode="shtiefel_proj_rot" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot", "angular_steering", "householder_pseudo_rotation"
 train_guard_val_gap=0 # 0 disables; otherwise run train guard validation every N dataloader iterations
-num_opt_layers=5 # optimize this many middle layers (plus best layer during intervention)
+num_opt_layers=1 # optimize this many middle layers (plus best layer during intervention)
 llamaguard_data="basic" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
 eval_guard_backends=("llamaguard" "qwen3guard") # any subset of: "llamaguard" "qwen3guard" "wildguard"
 lr=1e-5
@@ -41,7 +41,7 @@ mmlu_store_predictions=false
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=4
+export CUDA_VISIBLE_DEVICES=1
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -91,7 +91,7 @@ cmd=(python -m baselines.rdo_refusal \
   --mmlu_max_new_tokens "${MMLU_MAX_NEW_TOKENS}" \
   --ablation_lambda 1.0 \
   --addition_lambda 0.0 \
-  --retain_lambda 0.0 \
+  --retain_lambda 1.0 \
   --retain_loss \
   # --retain_lambda 0.0 \
 )
