@@ -179,6 +179,13 @@ DEFAULT_CONFIG = {
     'log_steps': 0,
     # 0 = disabled. Run in-training guard validation every N dataloader iterations.
     'train_guard_val_gap': 0,
+    # (activation_rot) Gate/clip scaling bounds: keep the intervened activation norm
+    # within [clip_lower, clip_upper] * start_norm. clip_lower=0 disables the lower bound.
+    'clip_upper': 2.0,
+    'clip_lower': 0.0,
+    # (activation_rot / cayley modes) Log the rotated-vector PCA trajectory every N optimizer
+    # steps and plot a 2D figure to TensorBoard at the end of training. 0 disables.
+    'pca_traj_interval': 50,
 }
 
 def parse_args():
@@ -284,6 +291,24 @@ def parse_args():
         type=int,
         default=DEFAULT_CONFIG["proj_reduce_ratio"],
         help='(shtiefel_proj_rot) Low-rank reduction ratio, where k = hidden_size // proj_reduce_ratio',
+    )
+    parser.add_argument(
+        '--clip_upper',
+        type=float,
+        default=DEFAULT_CONFIG["clip_upper"],
+        help='(activation_rot) Upper norm multiplier: intervened activation norm is clipped to <= clip_upper * start_norm',
+    )
+    parser.add_argument(
+        '--clip_lower',
+        type=float,
+        default=DEFAULT_CONFIG["clip_lower"],
+        help='(activation_rot) Lower norm multiplier: intervened activation norm is grown to >= clip_lower * start_norm; 0 disables',
+    )
+    parser.add_argument(
+        '--pca_traj_interval',
+        type=int,
+        default=DEFAULT_CONFIG["pca_traj_interval"],
+        help='(activation_rot / cayley modes) Collect the rotated-vector PCA trajectory every N optimizer steps; 0 disables',
     )
 
     # Loss weights
@@ -746,6 +771,24 @@ def compute_ce_loss(logits, labels):
 #     labels = labels.view(-1)
 #     return torch.nn.functional.cross_entropy(logits, labels, ignore_index=-100)
 
+def compute_repetition_score(logits, labels):
+    """Cheap repetition metric on teacher-forced predictions (no generation).
+
+    Uses only the logits already computed for the CE loss: takes the argmax
+    predictions over the completion span (the last ``labels`` positions, matching
+    ``compute_ce_loss``'s tail padding) and returns the fraction of those tokens
+    that repeat an earlier predicted token in the span. Higher => more repetitive.
+    Adds an argmax + a small (span x span) equality compare (span ~= a few dozen
+    tokens), so it is negligible next to the cross-entropy over the same logits.
+    """
+    preds = logits.reshape(-1, logits.size(-1)).argmax(dim=-1)  # (B*T,)
+    n_completion = int(labels.reshape(-1).size(0))
+    if n_completion <= 1:
+        return preds.sum() * 0.0  # scalar 0 that keeps device/dtype-safety under nnsight
+    span = preds[-n_completion:]
+    eq = (span.unsqueeze(1) == span.unsqueeze(0)).tril(-1)  # earlier-position matches
+    return eq.any(dim=1).float().mean()
+
 def kl_div_fn(logits_a, logits_b, reduction='batchmean'):
     # Compute log-probabilities for the first distribution
     logits_a = logits_a.to(torch.float64)
@@ -913,11 +956,19 @@ class RefusalDirectionActivationRotation(nn.Module):
     - optimizer updates only the per-layer Cayley params
     """
 
-    def __init__(self, module: Envoy, dim: int, init_vectors: torch.Tensor | None = None) -> None:
+    def __init__(self, module: Envoy, dim: int, init_vectors: torch.Tensor | None = None,
+                 clip_upper: float = 2.0, clip_lower: float = 0.0) -> None:
         super().__init__()
         self.module = module
         self.dim = dim
         self._cached_matrices: list[torch.Tensor | None] | None = None
+        # Guard mode ("attack"/"protect") mirrors RefusalStiefelProjRotation so the
+        # train/eval harness can flip the applied rotation direction.
+        self._guard_mode = "attack"
+        # Gate/clip scaling params (mirrors RefusalStiefelRotation, but configurable):
+        # keep the scaled activation norm within [clip_lower, clip_upper] * start_norm.
+        self._clip_upper = float(clip_upper)
+        self._clip_lower = float(clip_lower)
         dev = _runtime_device()
 
         # Learn a separate orthogonal transform per layer via Cayley parameterization.
@@ -926,6 +977,10 @@ class RefusalDirectionActivationRotation(nn.Module):
         # training/metrics code, but store per-layer parameters in its leading dim.
         self.cayley_param = nn.Parameter(
             torch.randn(n_layers, dim, dim, dtype=torch.float32, device=dev) * 1e-3
+        )
+        # Learnable per-layer scale applied to the rotated activation before clipping.
+        self.input_norm_scale = nn.Parameter(
+            torch.ones(n_layers, dtype=torch.float32, device=dev)
         )
 
         if init_vectors is not None and len(init_vectors) > 0:
@@ -963,11 +1018,17 @@ class RefusalDirectionActivationRotation(nn.Module):
         # Store per-layer orthogonal matrices to avoid recomputing Cayley inverses
         # inside traced generation (can cause nnsight graph blow-up / OOM).
         self._cached_matrices = matrices
-    
+
+    def set_guard_mode(self, mode: str) -> None:
+        mode = str(mode).strip().lower()
+        if mode not in ("attack", "protect"):
+            raise ValueError(f"Unsupported guard mode: {mode}")
+        self._guard_mode = mode
+
     def stack_directions_for_log(self) -> torch.Tensor:
         return self.r0.detach().unsqueeze(0).cpu()
 
-    def _rotate(self, x, layer_idx: int):
+    def _rotate(self, x, layer_idx: int, inverse: bool = False):
         """
         Rotate an activation object.
 
@@ -983,7 +1044,7 @@ class RefusalDirectionActivationRotation(nn.Module):
         if isinstance(x, tuple):
             if len(x) == 0:
                 return x
-            return (self._rotate(x[0], layer_idx),) + x[1:]
+            return (self._rotate(x[0], layer_idx, inverse=inverse),) + x[1:]
 
         # Case 2: nnsight can give a Proxy that behaves like a tuple (indexable),
         # but is not an actual `tuple` instance. Detect by "no dtype" + indexable.
@@ -992,7 +1053,7 @@ class RefusalDirectionActivationRotation(nn.Module):
             try:
                 first = x[0]
                 rest = x[1:]
-                return (self._rotate(first, layer_idx),) + tuple(rest)
+                return (self._rotate(first, layer_idx, inverse=inverse),) + tuple(rest)
             except Exception:
                 # If we can't safely rotate/rebuild, return as-is rather than crashing.
                 return x
@@ -1012,24 +1073,53 @@ class RefusalDirectionActivationRotation(nn.Module):
                 # Last resort: keep M as-is; matmul may still fail, but avoid crashing
                 # due to attribute access on exotic proxy objects.
                 pass
-        return x @ M.T
+        # Mirror RefusalStiefelProjRotation: attack rotates forward (x @ M^T),
+        # protect rotates with the inverse (x @ M); `inverse` flips the two so the
+        # harmless-side `add` undoes the harmful-side `__call__`.
+        use_transpose = self._guard_mode != "protect"
+        if inverse:
+            use_transpose = not use_transpose
+        if use_transpose:
+            return x @ M.T
+        return x @ M
 
-    def __call__(self, direction):
+    def _apply(self, layer, layer_idx: int, inverse: bool):
+        """Rotate, scale, and norm-clip the layer input, then write it back.
+
+        Keeps the written norm within [clip_lower, clip_upper] * start_norm.
+        nnsight-proxy-safe: only uses `.norm()`/`clamp`, like RefusalStiefelRotation._add.
+        """
+        start_norm = layer.input.norm()
+        scaled = self._rotate(layer.input, layer_idx, inverse=inverse) * self.input_norm_scale[layer_idx]
+
+        # Upper bound: only ever shrink (never grow) so the norm stays <= clip_upper * start_norm.
+        scaled_norm = torch.clamp(scaled.norm(), min=1e-12)
+        up_factor = torch.clamp((start_norm * self._clip_upper) / scaled_norm, max=1.0)
+        scaled = scaled * up_factor
+
+        # Lower bound (optional): only ever grow so the norm stays >= clip_lower * start_norm.
+        if self._clip_lower > 0:
+            scaled_norm = torch.clamp(scaled.norm(), min=1e-12)
+            lo_factor = torch.clamp((start_norm * self._clip_lower) / scaled_norm, min=1.0)
+            scaled = scaled * lo_factor
+
+        layer.input = scaled
+
+    def __call__(self, direction, best_layer: int = None):
         # Keep signature compatible with baseline training loop.
-        del direction
+        del direction, best_layer
 
         for layer_idx, layer in enumerate(self.module.layers):
             # Rotate layer input activations. We intentionally avoid rewriting
             # tuple-valued module outputs (common in attention) because nnsight's
             # intervention plumbing may attempt to treat outputs as tensor-like.
-            layer.input = self._rotate(layer.input, layer_idx)
+            self._apply(layer, layer_idx, inverse=False)
 
     def add(self, direction, alpha, layer_idx, best_layer: int = None):
         # Keep signature compatible with baseline training loop.
         # For activation rotation, we rotate the specified layer with its own matrix.
-        del direction, alpha
-        layer = self.module.layers[layer_idx]
-        layer.input = self._rotate(layer.input, layer_idx)
+        del direction, alpha, best_layer
+        self._apply(self.module.layers[layer_idx], layer_idx, inverse=True)
 
     def orthogonalize(self):
         # For activation rotation, orthogonality is enforced by the Cayley transform.
@@ -1041,7 +1131,7 @@ class RefusalDirectionActivationRotation(nn.Module):
         return
 
     def parameters(self):
-        return [self.cayley_param]
+        return [self.cayley_param, self.input_norm_scale]
 
 
 class OrthogonalProjection(torch.autograd.Function):
@@ -2090,7 +2180,11 @@ def refusal_cone_optimization(model, train_dataset,
     elif direction_mode == "rotation":
         operation = RefusalDirectionRotation(model.model, model.config.hidden_size, init_vectors=init_vectors, orthogonal_vectors=orthogonal_vectors)
     elif direction_mode == "activation_rot":
-        operation = RefusalDirectionActivationRotation(model.model, model.config.hidden_size, init_vectors=init_vectors)
+        operation = RefusalDirectionActivationRotation(
+            model.model, model.config.hidden_size, init_vectors=init_vectors,
+            clip_upper=getattr(args, "clip_upper", 2.0),
+            clip_lower=getattr(args, "clip_lower", 0.0),
+        )
     elif direction_mode == "shtiefel_rot":
         operation = RefusalStiefelRotation(
             model.model,
@@ -2189,6 +2283,16 @@ def refusal_cone_optimization(model, train_dataset,
 
     print("Starting training")
 
+    # Rotated-vector trajectory logging: track M_bestlayer(t) @ r0 every N optimizer
+    # steps, then plot its 2D PCA trajectory to TensorBoard at the end of training.
+    pca_traj_interval = int(getattr(args, "pca_traj_interval", 0))
+    collect_traj = (
+        pca_traj_interval > 0
+        and hasattr(operation, "cayley_matrix")
+        and hasattr(operation, "r0")
+    )
+    traj_points, traj_steps = [], []
+
     step_counter = 0
     opt_step_counter = 0
     batch_sample_ablation_loss = 0.0
@@ -2197,6 +2301,7 @@ def refusal_cone_optimization(model, train_dataset,
     batch_basis_ablation_loss = 0.0
     batch_basis_addition_loss = 0.0
     batch_basis_retain_loss = 0.0
+    batch_repetition_score = 0.0
 
     batch_sample_bypass_scores = []
     batch_sample_induce_scores = []
@@ -2320,8 +2425,11 @@ def refusal_cone_optimization(model, train_dataset,
                                 logits = model.lm_head.output[:, :-1]
                                 basis_ablation_loss = compute_ce_loss(logits, ablation_labels) / cone_dim
                                 log = _log_scalar(basis_ablation_loss)
+                                # Cheap repetition metric on the same (harmful/jailbreak) logits.
+                                rep_log = _log_scalar(compute_repetition_score(logits, ablation_labels) / cone_dim)
                             (ablation_lambda * basis_ablation_loss).backward()
                         batch_basis_ablation_loss += log
+                        batch_repetition_score += rep_log
 
                     if addition_lambda > 0:
                         with model.trace() as tracer:
@@ -2449,7 +2557,8 @@ def refusal_cone_optimization(model, train_dataset,
                         "train/basis_retain_loss": batch_basis_retain_loss,
                         "train/basis_bypass_score": basis_bypass_scores,
                         "train/basis_induce_score": basis_induce_scores,
-                        "train/grad_norm": grad_norm
+                        "train/grad_norm": grad_norm,
+                        "train/repetition_penalty": batch_repetition_score,
                     }
 
                     if n_sample > 0:
@@ -2485,6 +2594,12 @@ def refusal_cone_optimization(model, train_dataset,
                     if tb_writer is not None:
                         tensorboard_log_scalars(tb_writer, training_metrics, step_counter)
 
+                    if collect_traj and step_counter % pca_traj_interval == 0:
+                        with torch.no_grad():
+                            M = operation.cayley_matrix(best_layer)          # (dim, dim)
+                            traj_points.append((M @ operation.r0.to(M)).detach().float().cpu())
+                            traj_steps.append(step_counter)
+
                     print("Step", step_counter, "train/basis_vector_bypass_score", [round(s, 2) for s in basis_bypass_scores], "train/basis_vector_induce_score", [round(s, 2) for s in basis_induce_scores])
                     
                     if n_sample > 0:
@@ -2510,6 +2625,7 @@ def refusal_cone_optimization(model, train_dataset,
                     batch_basis_ablation_loss = 0.
                     batch_basis_addition_loss = 0.
                     batch_basis_retain_loss = 0.
+                    batch_repetition_score = 0.
 
                     batch_sample_bypass_scores = []
                     batch_sample_induce_scores = []
@@ -2547,7 +2663,31 @@ def refusal_cone_optimization(model, train_dataset,
             num_opt_layers,
         )
         _write_tb_checkpoint_resources(tb_checkpoint_dir, operation)
-        
+
+    # End-of-training: 2D PCA of the rotated reference vector's trajectory.
+    if tb_writer is not None and len(traj_points) >= 2:
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            mat = torch.stack(traj_points).float()          # (T, dim)
+            mat_c = mat - mat.mean(dim=0, keepdim=True)
+            q = min(2, mat_c.shape[0], mat_c.shape[1])
+            _, _, V = torch.pca_lowrank(mat_c, q=q)
+            proj = (mat_c @ V[:, :2]).numpy()               # (T, 2)
+
+            fig, ax = plt.subplots(figsize=(6, 5))
+            ax.plot(proj[:, 0], proj[:, 1], "-", color="0.7", lw=1, zorder=1)
+            sc = ax.scatter(proj[:, 0], proj[:, 1], c=traj_steps, cmap="viridis", s=18, zorder=2)
+            fig.colorbar(sc, ax=ax, label="training step")
+            ax.set_xlabel("PC1")
+            ax.set_ylabel("PC2")
+            ax.set_title("Rotated activation vector (M @ r0) — PCA trajectory")
+            tb_writer.add_figure("train/rotated_activation_pca_trajectory", fig, global_step=step_counter)
+            plt.close(fig)
+        except Exception as e:
+            print(f"[pca_trajectory] skipped figure logging: {e}")
 
     return {
         "vectors": vectors,
@@ -3284,7 +3424,7 @@ def _normalize_guard_backends(backends) -> list[str]:
 
 
 def _supports_protect_guard_mode(direction_mode: str) -> bool:
-    return str(direction_mode).strip().lower() in {"baseline", "shtiefel_proj_rot"}
+    return str(direction_mode).strip().lower() in {"baseline", "shtiefel_proj_rot", "activation_rot"}
 
 
 def _build_train_guard_step_fn(operation, direction_mode: str, best_layer: int, guard_mode: str = "attack"):
@@ -3652,7 +3792,11 @@ def _evaluate_llamaguard_and_mmlu(
 
         def _build_refined_rotation_model():
             if direction_mode == "activation_rot":
-                return RefusalDirectionActivationRotation(model.model, model.config.hidden_size, init_vectors=[])
+                return RefusalDirectionActivationRotation(
+                    model.model, model.config.hidden_size, init_vectors=[],
+                    clip_upper=getattr(args, "clip_upper", 2.0),
+                    clip_lower=getattr(args, "clip_lower", 0.0),
+                )
             if direction_mode == "shtiefel_rot":
                 return RefusalStiefelRotation(
                     model.model,
