@@ -14,8 +14,8 @@ from pipeline.model_utils.model_factory import construct_model_base
 from pipeline.utils.hook_utils import get_activation_addition_input_pre_hook, get_all_direction_ablation_hooks
 
 from pipeline.submodules.generate_directions import generate_directions
-from pipeline.submodules.select_direction import select_direction, get_refusal_scores
-from pipeline.submodules.evaluate_jailbreak import evaluate_jailbreak
+from pipeline.submodules.select_direction import select_direction
+from pipeline.submodules.evaluate_jailbreak import evaluate_jailbreak, substring_matching_judge_fn
 from pipeline.submodules.evaluate_loss import evaluate_loss
 
 # Base (non-chat) checkpoints never refuse, so the refusal-based filter empties
@@ -57,34 +57,45 @@ def load_and_sample_datasets(cfg):
     harmless_val = load_dataset_split(harmtype='harmless', split='val', instructions_only=True)[:len(harmful_val)]
     return harmful_train, harmless_train, harmful_val, harmless_val
 
+def _refusal_flags(model_base, instructions, batch_size, max_new_tokens=32):
+    """Short greedy completions, flagged True where the response is a refusal."""
+    dataset = [{'instruction': ins, 'category': ''} for ins in instructions]
+    completions = model_base.generate_completions(dataset, max_new_tokens=max_new_tokens, batch_size=batch_size)
+    responses = [c['response'] for c in completions]           # generate_completions preserves input order
+    flags = [substring_matching_judge_fn(r) for r in responses]
+    return flags, responses
+
+def _apply_refusal_filter(model_base, harmful, harmless, bs, tag):
+    h_flags, h_resp = _refusal_flags(model_base, harmful, bs)
+    l_flags, _      = _refusal_flags(model_base, harmless, bs)
+    print(f"[{tag}] harmful refusals: {sum(h_flags)}/{len(h_flags)} | "
+          f"harmless refusals: {sum(l_flags)}/{len(l_flags)}")
+    for ins, r, f in list(zip(harmful, h_resp, h_flags))[:3]:      # self-diagnosing sample
+        print(f"  [harmful refusal={f}] {ins[:70]!r} -> {r[:90]!r}")
+    harmful  = [x for x, f in zip(harmful, h_flags) if f]            # keep refusals
+    harmless = [x for x, f in zip(harmless, l_flags) if not f][:len(harmful)]  # keep non-refusals
+    print(f"[{tag}] kept {len(harmful)} harmful, {len(harmless)} harmless")
+    if len(harmful) == 0:
+        raise SystemExit(
+            f"[{tag}] 0 harmful refusals detected — the model does not refuse this data with the "
+            f"current prompt/template (see sample completions above). Either the chat template is "
+            f"wrong or the model complies; rerun with filtering disabled to use the raw diff-in-means "
+            f"direction.")
+    return harmful, harmless
+
 def filter_data(cfg, model_base, harmful_train, harmless_train, harmful_val, harmless_val):
     """
-    Filter datasets based on refusal scores.
+    Filter datasets by whether the model actually refuses (generation + substring judge).
 
     Returns:
         Filtered datasets: (harmful_train, harmless_train, harmful_val, harmless_val)
     """
-    def filter_examples(dataset, scores, threshold, comparison):
-        return [inst for inst, score in zip(dataset, scores.tolist()) if comparison(score, threshold)]
-
     if cfg.filter_train:
         print("Filtering train dataset")
-        print(f"Number of harmful examples: {len(harmful_train)}")
-        print(f"Number of harmless examples: {len(harmless_train)}")
-        harmful_train_scores = get_refusal_scores(model_base.model, harmful_train, model_base.tokenize_instructions_fn, model_base.refusal_toks)
-
-        harmless_train_scores = get_refusal_scores(model_base.model, harmless_train, model_base.tokenize_instructions_fn, model_base.refusal_toks)
-        print(len([score for score in harmful_train_scores.tolist() if score > 0]))
-        print(len([score for score in harmless_train_scores.tolist() if score < 0]))
-        harmful_train = filter_examples(harmful_train, harmful_train_scores, 0, lambda x, y: x > y)
-        harmless_train = filter_examples(harmless_train, harmless_train_scores, 0, lambda x, y: x < y)[:len(harmful_train)]
-        print(f"Filtered {len(harmful_train)} harmful examples and {len(harmless_train)} harmless examples")
+        harmful_train, harmless_train = _apply_refusal_filter(model_base, harmful_train, harmless_train, cfg.completions_batch_size, "train")
 
     if cfg.filter_val:
-        harmful_val_scores = get_refusal_scores(model_base.model, harmful_val, model_base.tokenize_instructions_fn, model_base.refusal_toks)
-        harmless_val_scores = get_refusal_scores(model_base.model, harmless_val, model_base.tokenize_instructions_fn, model_base.refusal_toks)
-        harmful_val = filter_examples(harmful_val, harmful_val_scores, 0, lambda x, y: x > y)
-        harmless_val = filter_examples(harmless_val, harmless_val_scores, 0, lambda x, y: x < y)
+        harmful_val, harmless_val = _apply_refusal_filter(model_base, harmful_val, harmless_val, cfg.completions_batch_size, "val")
     
     return harmful_train, harmless_train, harmful_val, harmless_val
 
