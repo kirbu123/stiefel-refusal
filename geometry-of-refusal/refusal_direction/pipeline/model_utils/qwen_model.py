@@ -11,47 +11,11 @@ from jaxtyping import Int, Float
 from pipeline.utils.utils import get_orthogonalized_matrix
 from pipeline.model_utils.model_base import ModelBase
 
-# Qwen chat templates are based on
-# - Official examples from Qwen repo: https://github.com/QwenLM/Qwen/blob/5aa84bdfd3237b37f01bc88cd49b3279b9a71d0b/examples/vllm_wrapper.py#L32
-# - Online guidelines: https://github.com/Ki-Seki/chat_prompt_templates?tab=readme-ov-file#qwen-prompt-template
+# Prompts are built with the tokenizer's official chat template
+# (tokenizer.apply_chat_template), not hand-crafted strings, so the exact
+# special tokens / BOS / thinking scaffold match what the model was trained on.
 
 system = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
-QWEN_CHAT_TEMPLATE_WITH_SYSTEM = """<|im_start|>system
-{system}<|im_end|>
-<|im_start|>user
-{instruction}<|im_end|>
-<|im_start|>assistant
-"""
-
-QWEN_CHAT_TEMPLATE = """<|im_start|>user
-{instruction}<|im_end|>
-<|im_start|>assistant
-"""
-
-def format_instruction_qwen_chat(
-    instruction: str,
-    output: str=None,
-    system: str=None,
-    include_trailing_whitespace: bool=True,
-    enable_thinking: bool=True,
-):
-    if system is not None:
-        formatted_instruction = QWEN_CHAT_TEMPLATE_WITH_SYSTEM.format(instruction=instruction, system=system)
-    else:
-        formatted_instruction = QWEN_CHAT_TEMPLATE.format(instruction=instruction)
-
-    if not include_trailing_whitespace:
-        formatted_instruction = formatted_instruction.rstrip()
-
-    if not enable_thinking:
-        # Qwen3 hybrid-reasoning models emit a <think> block first; prefill an
-        # empty one so the scored/generated first token is the actual answer.
-        formatted_instruction += "<think>\n\n</think>\n\n"
-
-    if output is not None:
-        formatted_instruction += output
-
-    return formatted_instruction
 
 def tokenize_instructions_qwen_chat(
     tokenizer: AutoTokenizer,
@@ -61,22 +25,23 @@ def tokenize_instructions_qwen_chat(
     include_trailing_whitespace=True,
     enable_thinking: bool=True,
 ):
-    if outputs is not None:
-        prompts = [
-            format_instruction_qwen_chat(instruction=instruction, output=output, system=system, include_trailing_whitespace=include_trailing_whitespace, enable_thinking=enable_thinking)
-            for instruction, output in zip(instructions, outputs)
-        ]
-    else:
-        prompts = [
-            format_instruction_qwen_chat(instruction=instruction, system=system, include_trailing_whitespace=include_trailing_whitespace, enable_thinking=enable_thinking)
-            for instruction in instructions
-        ]
+    prompts = []
+    for i, instruction in enumerate(instructions):
+        messages = ([{"role": "system", "content": system}] if system is not None else []) \
+                   + [{"role": "user", "content": instruction}]
+        text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=enable_thinking,
+        )
+        if outputs is not None:
+            text += outputs[i]
+        prompts.append(text)
 
     result = tokenizer(
         prompts,
         padding=True,
         truncation=False,
         return_tensors="pt",
+        add_special_tokens=False,   # apply_chat_template already emits BOS/role/special tokens
     )
 
     return result
@@ -123,7 +88,11 @@ class QwenModel(ModelBase):
         return functools.partial(tokenize_instructions_qwen_chat, tokenizer=self.tokenizer, system=system, include_trailing_whitespace=True, enable_thinking=enable_thinking)
 
     def _get_eoi_toks(self):
-        return self.tokenizer.encode(QWEN_CHAT_TEMPLATE.split("{instruction}")[-1])
+        marker = "|||INSTR|||"
+        rendered = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": marker}], tokenize=False, add_generation_prompt=True,
+        )
+        return self.tokenizer.encode(rendered.split(marker)[-1], add_special_tokens=False)
 
     def _get_refusal_toks(self):
         # Derive from the tokenizer so IDs match the model's actual vocab.

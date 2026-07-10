@@ -10,40 +10,9 @@ from jaxtyping import Float
 from pipeline.utils.utils import get_orthogonalized_matrix
 from pipeline.model_utils.model_base import ModelBase
 
-# Olmo chat templates based on:
-# - Olmo-3-1025-7B uses standard chat format similar to Llama
-# - https://huggingface.co/allenai/Olmo-3-1025-7B
-
-OLMO_CHAT_TEMPLATE = """<|user|>
-{instruction}<|assistant|>
-"""
-
-OLMO_CHAT_TEMPLATE_WITH_SYSTEM = """<|system|>
-{system_prompt}<|user|>
-{instruction}<|assistant|>
-"""
-
-def format_instruction_olmo_chat(
-    instruction: str,
-    output: str = None,
-    system: str = None,
-    include_trailing_whitespace: bool = True
-):
-    if system is not None:
-        formatted_instruction = OLMO_CHAT_TEMPLATE_WITH_SYSTEM.format(
-            instruction=instruction, 
-            system_prompt=system
-        )
-    else:
-        formatted_instruction = OLMO_CHAT_TEMPLATE.format(instruction=instruction)
-
-    if not include_trailing_whitespace:
-        formatted_instruction = formatted_instruction.rstrip()
-
-    if output is not None:
-        formatted_instruction += output
-
-    return formatted_instruction
+# Prompts are built with the tokenizer's official chat template
+# (tokenizer.apply_chat_template), not hand-crafted strings, so the exact
+# special tokens / BOS match what the model was trained on.
 
 def tokenize_instructions_olmo_chat(
     tokenizer: AutoTokenizer,
@@ -52,31 +21,23 @@ def tokenize_instructions_olmo_chat(
     system: str = None,
     include_trailing_whitespace: bool = True
 ):
-    if outputs is not None:
-        prompts = [
-            format_instruction_olmo_chat(
-                instruction=instruction, 
-                output=output, 
-                system=system, 
-                include_trailing_whitespace=include_trailing_whitespace
-            )
-            for instruction, output in zip(instructions, outputs)
-        ]
-    else:
-        prompts = [
-            format_instruction_olmo_chat(
-                instruction=instruction, 
-                system=system, 
-                include_trailing_whitespace=include_trailing_whitespace
-            )
-            for instruction in instructions
-        ]
+    prompts = []
+    for i, instruction in enumerate(instructions):
+        messages = ([{"role": "system", "content": system}] if system is not None else []) \
+                   + [{"role": "user", "content": instruction}]
+        text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+        )
+        if outputs is not None:
+            text += outputs[i]
+        prompts.append(text)
 
     result = tokenizer(
         prompts,
         padding=True,
         truncation=False,
         return_tensors="pt",
+        add_special_tokens=False,   # apply_chat_template already emits BOS/role/special tokens
     )
 
     return result
@@ -154,10 +115,12 @@ class OlmoModel(ModelBase):
         )
 
     def _get_eoi_toks(self):
-        """Get the end-of-instruction tokens."""
-        # Get the assistant token part from the template
-        eoi_part = OLMO_CHAT_TEMPLATE.split("{instruction}")[-1]
-        return self.tokenizer.encode(eoi_part, add_special_tokens=False)
+        """Get the end-of-instruction tokens (from the tokenizer's chat template)."""
+        marker = "|||INSTR|||"
+        rendered = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": marker}], tokenize=False, add_generation_prompt=True,
+        )
+        return self.tokenizer.encode(rendered.split(marker)[-1], add_special_tokens=False)
 
     def _get_refusal_toks(self):
         """Get the refusal tokens (derived from the tokenizer for the right vocab)."""
