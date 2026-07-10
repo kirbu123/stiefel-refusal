@@ -28,13 +28,12 @@ QWEN_CHAT_TEMPLATE = """<|im_start|>user
 <|im_start|>assistant
 """
 
-QWEN_REFUSAL_TOKS = [40, 2121] # ['I', 'As']
-
 def format_instruction_qwen_chat(
     instruction: str,
     output: str=None,
     system: str=None,
     include_trailing_whitespace: bool=True,
+    enable_thinking: bool=True,
 ):
     if system is not None:
         formatted_instruction = QWEN_CHAT_TEMPLATE_WITH_SYSTEM.format(instruction=instruction, system=system)
@@ -43,7 +42,12 @@ def format_instruction_qwen_chat(
 
     if not include_trailing_whitespace:
         formatted_instruction = formatted_instruction.rstrip()
-    
+
+    if not enable_thinking:
+        # Qwen3 hybrid-reasoning models emit a <think> block first; prefill an
+        # empty one so the scored/generated first token is the actual answer.
+        formatted_instruction += "<think>\n\n</think>\n\n"
+
     if output is not None:
         formatted_instruction += output
 
@@ -55,15 +59,16 @@ def tokenize_instructions_qwen_chat(
     outputs: List[str]=None,
     system: str=None,
     include_trailing_whitespace=True,
+    enable_thinking: bool=True,
 ):
     if outputs is not None:
         prompts = [
-            format_instruction_qwen_chat(instruction=instruction, output=output, system=system, include_trailing_whitespace=include_trailing_whitespace)
+            format_instruction_qwen_chat(instruction=instruction, output=output, system=system, include_trailing_whitespace=include_trailing_whitespace, enable_thinking=enable_thinking)
             for instruction, output in zip(instructions, outputs)
         ]
     else:
         prompts = [
-            format_instruction_qwen_chat(instruction=instruction, system=system, include_trailing_whitespace=include_trailing_whitespace)
+            format_instruction_qwen_chat(instruction=instruction, system=system, include_trailing_whitespace=include_trailing_whitespace, enable_thinking=enable_thinking)
             for instruction in instructions
         ]
 
@@ -114,13 +119,15 @@ class QwenModel(ModelBase):
         return tokenizer
 
     def _get_tokenize_instructions_fn(self):
-        return functools.partial(tokenize_instructions_qwen_chat, tokenizer=self.tokenizer, system=system, include_trailing_whitespace=True)
+        enable_thinking = 'qwen3' not in self.model_name_or_path.lower()
+        return functools.partial(tokenize_instructions_qwen_chat, tokenizer=self.tokenizer, system=system, include_trailing_whitespace=True, enable_thinking=enable_thinking)
 
     def _get_eoi_toks(self):
         return self.tokenizer.encode(QWEN_CHAT_TEMPLATE.split("{instruction}")[-1])
 
     def _get_refusal_toks(self):
-        return QWEN_REFUSAL_TOKS
+        # Derive from the tokenizer so IDs match the model's actual vocab.
+        return [self.tokenizer.encode(w, add_special_tokens=False)[0] for w in ("I", "As")]
 
     def _get_model_block_modules(self):
         return self.model.model.layers

@@ -23,9 +23,6 @@ OLMO_CHAT_TEMPLATE_WITH_SYSTEM = """<|system|>
 {instruction}<|assistant|>
 """
 
-# Common refusal tokens for Olmo models
-OLMO_REFUSAL_TOKS = [40]  # 'I'
-
 def format_instruction_olmo_chat(
     instruction: str,
     output: str = None,
@@ -163,8 +160,8 @@ class OlmoModel(ModelBase):
         return self.tokenizer.encode(eoi_part, add_special_tokens=False)
 
     def _get_refusal_toks(self):
-        """Get the refusal tokens."""
-        return OLMO_REFUSAL_TOKS
+        """Get the refusal tokens (derived from the tokenizer for the right vocab)."""
+        return [self.tokenizer.encode("I", add_special_tokens=False)[0]]
 
     def _get_model_block_modules(self):
         """Get the transformer block modules."""
