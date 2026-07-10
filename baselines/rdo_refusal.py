@@ -144,6 +144,7 @@ DEFAULT_CONFIG = {
     'ablation_lambda': 1,             # Weight for the ablation loss
     'addition_lambda': 0.2,           # Weight for the addition loss
     'retain_lambda': 1,               # Weight for the retain loss
+    'repetition_lambda': 1.0,         # Weight for the differentiable repetition-penalty loss
     
     # Miscellaneous
     'target_generation_batch_size': 512,  # Batch size for generating targets
@@ -318,6 +319,8 @@ def parse_args():
                     help='Weight for the addition loss')
     parser.add_argument('--retain_lambda', type=float, default=DEFAULT_CONFIG['retain_lambda'],
                     help='Weight for the retain loss')
+    parser.add_argument('--repetition_lambda', type=float, default=DEFAULT_CONFIG['repetition_lambda'],
+                    help='Weight for the differentiable repetition-penalty loss')
     
     # Miscellaneous
     parser.add_argument('--target_generation_batch_size', type=int, default=DEFAULT_CONFIG['target_generation_batch_size'],
@@ -788,6 +791,24 @@ def compute_repetition_score(logits, labels):
     span = preds[-n_completion:]
     eq = (span.unsqueeze(1) == span.unsqueeze(0)).tril(-1)  # earlier-position matches
     return eq.any(dim=1).float().mean()
+
+def compute_repetition_loss(logits, labels):
+    """Differentiable soft repetition penalty over the completion span.
+
+    Softmax analog of ``compute_repetition_score`` (no argmax, so gradients flow):
+    for each completion position t, the expected collision of its next-token
+    distribution with all earlier positions', ``<p_t, sum_{s<t} p_s>``, averaged
+    over the span. Higher => more repetitive. O(L*V) via an exclusive cumsum.
+    """
+    logits = logits.reshape(-1, logits.size(-1))
+    n_completion = int(labels.reshape(-1).size(0))
+    if n_completion <= 1:
+        return logits.sum() * 0.0  # grad/device/dtype-safe scalar 0 under nnsight
+    span = logits[-n_completion:].float()          # (L, V)
+    p = torch.softmax(span, dim=-1)                # (L, V)
+    prefix = torch.cumsum(p, dim=0) - p            # exclusive prefix: sum_{s<t} p_s
+    collide = (p * prefix).sum(dim=-1)             # (L,) expected earlier-collisions at t
+    return collide.mean()
 
 def kl_div_fn(logits_a, logits_b, reduction='batchmean'):
     # Compute log-probabilities for the first distribution
@@ -2126,6 +2147,61 @@ def _write_tb_checkpoint_resources(tb_checkpoint_dir: str, operation) -> None:
         f.write("\n".join(lines) + "\n")
 
 
+def _rotated_reference_vector(operation, layer_idx):
+    """Return M(layer_idx) @ r0 on CPU/float for any rotation mode, or None.
+
+    Mirrors the mode-agnostic rotation dispatch used by _build_sparse_rotation_cache:
+    cayley modes expose cayley_matrix, Stiefel modes expose matrix. Robust to
+    RefusalDirectionRotation.cayley_matrix() which takes no layer_idx.
+    """
+    if not hasattr(operation, "r0"):
+        return None
+    if hasattr(operation, "cayley_matrix"):
+        try:
+            M = operation.cayley_matrix(layer_idx)
+        except TypeError:
+            M = operation.cayley_matrix()
+    elif hasattr(operation, "matrix"):
+        M = operation.matrix(layer_idx)
+    else:
+        return None
+    if M is None:
+        return None
+    return (M @ operation.r0.to(M)).detach().float().cpu()
+
+
+def _log_pca_trajectory(tb_writer, traj_points, traj_steps, step):
+    """Render the rotated reference vector's 2D PCA trajectory to TensorBoard.
+
+    No-op unless we have at least 2 points. Safe to call repeatedly during training;
+    re-logging with an increasing global_step produces a scrubbable sequence of frames.
+    """
+    if tb_writer is None or len(traj_points) < 2:
+        return
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        mat = torch.stack(traj_points).float()          # (T, dim)
+        mat_c = mat - mat.mean(dim=0, keepdim=True)
+        q = min(2, mat_c.shape[0], mat_c.shape[1])
+        _, _, V = torch.pca_lowrank(mat_c, q=q)
+        proj = (mat_c @ V[:, :2]).numpy()               # (T, 2)
+
+        fig, ax = plt.subplots(figsize=(6, 5))
+        ax.plot(proj[:, 0], proj[:, 1], "-", color="0.7", lw=1, zorder=1)
+        sc = ax.scatter(proj[:, 0], proj[:, 1], c=traj_steps, cmap="viridis", s=18, zorder=2)
+        fig.colorbar(sc, ax=ax, label="optimizer step")
+        ax.set_xlabel("PC1")
+        ax.set_ylabel("PC2")
+        ax.set_title("Rotated reference vector (M @ r0) — PCA trajectory")
+        tb_writer.add_figure("train/rotated_activation_pca_trajectory", fig, global_step=step)
+        plt.close(fig)
+    except Exception as e:
+        print(f"[pca_trajectory] skipped figure logging: {e}")
+
+
 def _build_optimizer(optimizer_name: str, params, lr: float):
     """Construct the optimizer selected by --optimizer."""
     if optimizer_name == "Adam":
@@ -2151,9 +2227,10 @@ def refusal_cone_optimization(model, train_dataset,
                               fixed_basis_vectors=[], 
                               ablation_lambda=DEFAULT_CONFIG['ablation_lambda'], 
                               alpha=alpha,  # Keep alpha as it's defined globally
-                              addition_lambda=DEFAULT_CONFIG['addition_lambda'], 
-                              retain_lambda=DEFAULT_CONFIG['retain_lambda'], 
-                              patience=DEFAULT_CONFIG['patience'], 
+                              addition_lambda=DEFAULT_CONFIG['addition_lambda'],
+                              retain_lambda=DEFAULT_CONFIG['retain_lambda'],
+                              repetition_lambda=DEFAULT_CONFIG['repetition_lambda'],
+                              patience=DEFAULT_CONFIG['patience'],
                               init_vectors=[], 
                               n_lr_reduce=DEFAULT_CONFIG['n_lr_reduce'], 
                               orthogonal_vectors=[],
@@ -2284,12 +2361,13 @@ def refusal_cone_optimization(model, train_dataset,
     print("Starting training")
 
     # Rotated-vector trajectory logging: track M_bestlayer(t) @ r0 every N optimizer
-    # steps, then plot its 2D PCA trajectory to TensorBoard at the end of training.
+    # steps and plot its 2D PCA trajectory to TensorBoard (incrementally + at the end).
+    # Covers all rotation modes: cayley modes expose cayley_matrix, Stiefel modes matrix.
     pca_traj_interval = int(getattr(args, "pca_traj_interval", 0))
     collect_traj = (
         pca_traj_interval > 0
-        and hasattr(operation, "cayley_matrix")
         and hasattr(operation, "r0")
+        and (hasattr(operation, "cayley_matrix") or hasattr(operation, "matrix"))
     )
     traj_points, traj_steps = [], []
 
@@ -2302,6 +2380,7 @@ def refusal_cone_optimization(model, train_dataset,
     batch_basis_addition_loss = 0.0
     batch_basis_retain_loss = 0.0
     batch_repetition_score = 0.0
+    batch_repetition_loss = 0.0
 
     batch_sample_bypass_scores = []
     batch_sample_induce_scores = []
@@ -2418,7 +2497,7 @@ def refusal_cone_optimization(model, train_dataset,
                 
             if optimize_basis:
                 for fn_vector in operation.fn_vectors:
-                    if ablation_lambda > 0:
+                    if ablation_lambda > 0 or repetition_lambda > 0:
                         with model.trace() as tracer:
                             with tracer.invoke(ablation_prompt):
                                 operation(fn_vector)
@@ -2427,9 +2506,19 @@ def refusal_cone_optimization(model, train_dataset,
                                 log = _log_scalar(basis_ablation_loss)
                                 # Cheap repetition metric on the same (harmful/jailbreak) logits.
                                 rep_log = _log_scalar(compute_repetition_score(logits, ablation_labels) / cone_dim)
-                            (ablation_lambda * basis_ablation_loss).backward()
+                                # Differentiable repetition penalty on the same logits.
+                                repetition_loss = compute_repetition_loss(logits, ablation_labels) / cone_dim
+                                rep_loss_log = _log_scalar(repetition_loss)
+                                # Single backward on the weighted sum (grad of sum = sum of grads);
+                                # avoids a second .backward() on the same nnsight graph.
+                                total_ablation_loss = (
+                                    ablation_lambda * basis_ablation_loss
+                                    + repetition_lambda * repetition_loss
+                                )
+                            total_ablation_loss.backward()
                         batch_basis_ablation_loss += log
                         batch_repetition_score += rep_log
+                        batch_repetition_loss += rep_loss_log
 
                     if addition_lambda > 0:
                         with model.trace() as tracer:
@@ -2534,8 +2623,9 @@ def refusal_cone_optimization(model, train_dataset,
                     batch_basis_ablation_loss /= accumulation_steps
                     batch_basis_addition_loss /= accumulation_steps
                     batch_basis_retain_loss /= accumulation_steps
+                    batch_repetition_loss /= accumulation_steps
 
-                    train_loss = batch_sample_ablation_loss + batch_sample_addition_loss + batch_sample_retain_loss + batch_basis_ablation_loss + batch_basis_addition_loss + batch_basis_retain_loss
+                    train_loss = batch_sample_ablation_loss + batch_sample_addition_loss + batch_sample_retain_loss + batch_basis_ablation_loss + batch_basis_addition_loss + batch_basis_retain_loss + batch_repetition_loss
                     train_losses.append(train_loss)
 
                     batch_basis_bypass_scores = [s.value for s in batch_basis_bypass_scores]
@@ -2559,6 +2649,7 @@ def refusal_cone_optimization(model, train_dataset,
                         "train/basis_induce_score": basis_induce_scores,
                         "train/grad_norm": grad_norm,
                         "train/repetition_penalty": batch_repetition_score,
+                        "train/repetition_loss": batch_repetition_loss,
                     }
 
                     if n_sample > 0:
@@ -2594,11 +2685,20 @@ def refusal_cone_optimization(model, train_dataset,
                     if tb_writer is not None:
                         tensorboard_log_scalars(tb_writer, training_metrics, step_counter)
 
-                    if collect_traj and step_counter % pca_traj_interval == 0:
+                    # Collect on OPTIMIZER steps (first step + every pca_traj_interval),
+                    # not raw micro-steps: the enclosing block already requires
+                    # step_counter % accumulation_steps == 0, so gating the raw counter
+                    # by pca_traj_interval would only fire on common multiples and often
+                    # never accumulate >=2 points. Re-render as points arrive.
+                    if collect_traj and (
+                        opt_step_counter == 1 or opt_step_counter % pca_traj_interval == 0
+                    ):
                         with torch.no_grad():
-                            M = operation.cayley_matrix(best_layer)          # (dim, dim)
-                            traj_points.append((M @ operation.r0.to(M)).detach().float().cpu())
-                            traj_steps.append(step_counter)
+                            v = _rotated_reference_vector(operation, best_layer)
+                        if v is not None:
+                            traj_points.append(v)
+                            traj_steps.append(opt_step_counter)
+                            _log_pca_trajectory(tb_writer, traj_points, traj_steps, opt_step_counter)
 
                     print("Step", step_counter, "train/basis_vector_bypass_score", [round(s, 2) for s in basis_bypass_scores], "train/basis_vector_induce_score", [round(s, 2) for s in basis_induce_scores])
                     
@@ -2626,6 +2726,7 @@ def refusal_cone_optimization(model, train_dataset,
                     batch_basis_addition_loss = 0.
                     batch_basis_retain_loss = 0.
                     batch_repetition_score = 0.
+                    batch_repetition_loss = 0.
 
                     batch_sample_bypass_scores = []
                     batch_sample_induce_scores = []
@@ -2664,30 +2765,24 @@ def refusal_cone_optimization(model, train_dataset,
         )
         _write_tb_checkpoint_resources(tb_checkpoint_dir, operation)
 
-    # End-of-training: 2D PCA of the rotated reference vector's trajectory.
-    if tb_writer is not None and len(traj_points) >= 2:
-        try:
-            import matplotlib
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
+    # End-of-training: capture the final trained rotation (so short runs still get
+    # >=2 points and the trajectory ends at the final state), dump the raw trajectory
+    # for offline re-plotting, and render the final 2D PCA figure.
+    if collect_traj:
+        with torch.no_grad():
+            v = _rotated_reference_vector(operation, best_layer)
+        if v is not None and (not traj_steps or traj_steps[-1] != opt_step_counter):
+            traj_points.append(v)
+            traj_steps.append(opt_step_counter)
 
-            mat = torch.stack(traj_points).float()          # (T, dim)
-            mat_c = mat - mat.mean(dim=0, keepdim=True)
-            q = min(2, mat_c.shape[0], mat_c.shape[1])
-            _, _, V = torch.pca_lowrank(mat_c, q=q)
-            proj = (mat_c @ V[:, :2]).numpy()               # (T, 2)
+    if tb_checkpoint_dir is not None and traj_points:
+        os.makedirs(tb_checkpoint_dir, exist_ok=True)
+        torch.save(
+            {"points": torch.stack(traj_points), "steps": traj_steps},
+            os.path.join(tb_checkpoint_dir, "pca_trajectory.pt"),
+        )
 
-            fig, ax = plt.subplots(figsize=(6, 5))
-            ax.plot(proj[:, 0], proj[:, 1], "-", color="0.7", lw=1, zorder=1)
-            sc = ax.scatter(proj[:, 0], proj[:, 1], c=traj_steps, cmap="viridis", s=18, zorder=2)
-            fig.colorbar(sc, ax=ax, label="training step")
-            ax.set_xlabel("PC1")
-            ax.set_ylabel("PC2")
-            ax.set_title("Rotated activation vector (M @ r0) — PCA trajectory")
-            tb_writer.add_figure("train/rotated_activation_pca_trajectory", fig, global_step=step_counter)
-            plt.close(fig)
-        except Exception as e:
-            print(f"[pca_trajectory] skipped figure logging: {e}")
+    _log_pca_trajectory(tb_writer, traj_points, traj_steps, step_counter)
 
     return {
         "vectors": vectors,
@@ -2722,6 +2817,7 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
         "proj_reduce_ratio": getattr(args, "proj_reduce_ratio", DEFAULT_CONFIG.get("proj_reduce_ratio", 10)),
         "log_steps": getattr(args, "log_steps", DEFAULT_CONFIG["log_steps"]),
         "train_guard_val_gap": getattr(args, "train_guard_val_gap", DEFAULT_CONFIG["train_guard_val_gap"]),
+        "repetition_lambda": getattr(args, "repetition_lambda", DEFAULT_CONFIG["repetition_lambda"]),
     }
     train_kwargs.update(kwargs) # Apply any user-provided overrides
 
@@ -4350,6 +4446,10 @@ def train_refusal_cone(group_name, run_name, init_vectors, **kwargs):
     train_kwargs.setdefault(
         "train_guard_val_gap",
         getattr(args, "train_guard_val_gap", DEFAULT_CONFIG["train_guard_val_gap"]),
+    )
+    train_kwargs.setdefault(
+        "repetition_lambda",
+        getattr(args, "repetition_lambda", DEFAULT_CONFIG["repetition_lambda"]),
     )
 
     run_config = vars(args).copy()
