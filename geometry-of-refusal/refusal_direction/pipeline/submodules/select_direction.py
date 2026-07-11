@@ -306,6 +306,30 @@ def select_direction(
     with open(f"{artifact_dir}/direction_evaluations_filtered.json", 'w') as f:
         json.dump(json_output_filtered_scores, f, indent=4)
 
+    # Fallback: if the requested thresholds removed every candidate (e.g. a model
+    # whose directions don't induce refusal > 0.5, or whose ablation KL exceeds
+    # the threshold), progressively relax so we still return the best-bypassing
+    # direction instead of crashing. Models that pass the strict filter (non-empty
+    # above) never enter this block, so their selected direction is unchanged.
+    if len(filtered_scores) == 0:
+        for kl_thr, induce_thr in [(None, induce_refusal_threshold), (None, None)]:
+            for source_pos in range(-n_pos, 0):
+                for source_layer in range(n_layer):
+                    refusal_score = ablation_refusal_scores[source_pos, source_layer].item()
+                    steering_score = steering_refusal_scores[source_pos, source_layer].item()
+                    kl_div_score = ablation_kl_div_scores[source_pos, source_layer].item()
+                    if filter_fn(refusal_score=refusal_score, steering_score=steering_score,
+                                 kl_div_score=kl_div_score, layer=source_layer, n_layer=n_layer,
+                                 kl_threshold=kl_thr, induce_refusal_threshold=induce_thr,
+                                 prune_layer_percentage=prune_layer_percentage):
+                        continue
+                    filtered_scores.append((-refusal_score, source_pos, source_layer))
+            if filtered_scores:
+                print(f"[select_direction] strict thresholds filtered everything; relaxed to "
+                      f"kl_threshold={kl_thr}, induce_refusal_threshold={induce_thr} "
+                      f"({len(filtered_scores)} candidates kept).")
+                break
+
     assert len(filtered_scores) > 0, "All scores have been filtered out!"
 
     # sorted in descending order

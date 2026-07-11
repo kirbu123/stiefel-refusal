@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # variables
-model="Qwen/Qwen3-8B-Base" # "allenai/Olmo-3-1025-7B" "Qwen/Qwen3-8B-Base" "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+model="allenai/Olmo-3-1025-7B" # "allenai/Olmo-3-1025-7B" "Qwen/Qwen3-8B-Base" "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 direction_mode="baseline" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot", "angular_steering", "householder_pseudo_rotation"
 train_guard_val_gap=0 # 0 disables; otherwise run train guard validation every N dataloader iterations
 num_opt_layers=1 # optimize this many middle layers (plus best layer during intervention)
@@ -42,7 +42,7 @@ mmlu_store_predictions=false
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=5
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -60,7 +60,7 @@ export GUARD_TRAIN_BATCH_SIZE="${GUARD_TRAIN_BATCH_SIZE:-$eval_batch_size}"
 export MAX_HARMFUL="${MAX_HARMFUL}" # 250
 export MAX_HARMLESS="${MAX_HARMLESS}" # 250
 
-export HF_TOKEN="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"
+export HF_TOKEN="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"
 
 # ---- Default command ----
 cmd=(python -m baselines.rdo_refusal \

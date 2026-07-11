@@ -487,6 +487,31 @@ def apply_chat_template(tokenizer, instructions: list[str]):
         prompts = [GEMMA_CHAT_TEMPLATE.format(instruction=inst) for inst in instructions]
     elif "qwen2.5" in MODEL_PATH.lower() or "distill-qwen" in MODEL_PATH.lower():
         prompts = [QWEN25_CHAT_TEMPLATE.format(instruction=inst) for inst in instructions]
+    elif "qwen3" in MODEL_PATH.lower():
+        prompts = [
+            tokenizer.apply_chat_template(
+                [
+                    {
+                        "role": "system",
+                        "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
+                    },
+                    {"role": "user", "content": inst},
+                ],
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+            for inst in instructions
+        ]
+    elif "olmo" in MODEL_PATH.lower():
+        prompts = [
+            tokenizer.apply_chat_template(
+                [{"role": "user", "content": inst}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            for inst in instructions
+        ]
     else:
         raise ValueError(f"Model {MODEL_PATH} not supported, need to configure chat template")
     return prompts
@@ -521,8 +546,15 @@ if "gemma" in MODEL_PATH.lower():
     refusal_tokens = [235285]
 elif "qwen2.5" in MODEL_PATH.lower() or "distill-qwen" in MODEL_PATH.lower():
     refusal_tokens = [40, 2121]
+elif "qwen3" in MODEL_PATH.lower():
+    refusal_tokens = [
+        model.tokenizer.encode(token, add_special_tokens=False)[0]
+        for token in ("I", "As")
+    ]
 elif "llama-3" in MODEL_PATH.lower():
     refusal_tokens = [40]
+elif "olmo" in MODEL_PATH.lower():
+    refusal_tokens = [model.tokenizer.encode("I", add_special_tokens=False)[0]]
 else:
     raise ValueError(f"Model {MODEL_PATH} not supported, need to configure refusal tokens")
 
