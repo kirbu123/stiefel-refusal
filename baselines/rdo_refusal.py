@@ -38,6 +38,10 @@ from evaluate.evaluation_llamaguard import get_llamaguard_evaluator, unload_llam
 from evaluate.evaluation_qwen3guard import get_qwen3guard_evaluator, unload_qwen3guard_evaluator
 from evaluate.evaluation_wildguard import get_wildguard_evaluator, unload_wildguard_evaluator
 from evaluate import mmlu as mmlu_eval
+from baselines.additive_rotation_ops import (
+    additive_subspace_rotation,
+    dense_additive_rotation_matrix,
+)
 
 dotenv.load_dotenv(override=True)
 
@@ -126,7 +130,7 @@ DEFAULT_CONFIG = {
     'effective_batch_size': 16,       # Effective batch size (uses gradient accumulation)
     'patience': 5,                    # Patience for early stopping
     'n_lr_reduce': 2,                 # Number of learning rate reductions before stopping
-    'direction_mode': 'baseline',    # 'baseline' (RefusalCone) | 'rotation' (Cayley orthogonal M @ r0; cone_dim must be 1) | 'angular_steering' (adaptive angular rotation) | 'householder_pseudo_rotation' (HPR-style norm-preserving edit)
+    'direction_mode': 'baseline',    # Refusal direction/intervention implementation selected by --direction_mode
 
     # Cone parameters
     'min_cone_dim': 2,                # Minimum dimension of the refusal cone (number of basis vectors)
@@ -137,7 +141,7 @@ DEFAULT_CONFIG = {
     'optimize_basis': True,           # Whether to optimize the basis vectors directly
     'init_mode': "random", # "diag_permutation", "ab_orthogonal"  # Method for initializing the rotation matrices
     'orth_method': "svd",  # Orthogonalization method for Stiefel modes: "qr" or "svd"
-    'proj_reduce_ratio': 10,  # Reduction ratio for shtiefel_proj_rot low-rank factors (k = dim // ratio)
+    'proj_reduce_ratio': 10,  # Reduction ratio for projected/additive low-rank factors (k = dim // ratio)
     'retain_loss': False, # Whether to use KL divergence for the retain loss
 
     # Loss weights
@@ -180,7 +184,7 @@ DEFAULT_CONFIG = {
     'log_steps': 0,
     # 0 = disabled. Run in-training guard validation every N dataloader iterations.
     'train_guard_val_gap': 0,
-    # (activation_rot) Gate/clip scaling bounds: keep the intervened activation norm
+    # (activation modes) Gate/clip scaling bounds: keep the intervened activation norm
     # within [clip_lower, clip_upper] * start_norm. clip_lower=0 disables the lower bound.
     'clip_upper': 2.0,
     'clip_lower': 0.0,
@@ -253,14 +257,14 @@ def parse_args():
         help='Run in-training guard validation every N dataloader iterations; 0 disables',
     )
     parser.add_argument('--direction_mode', type=str, default=DEFAULT_CONFIG['direction_mode'],
-                    choices=['baseline', 'rotation', 'activation_rot', 'shtiefel_rot', 'shtiefel_proj_rot', 'angular_steering', 'householder_pseudo_rotation'],
+                    choices=['baseline', 'rotation', 'activation_rot', 'activation_additive_rot', 'shtiefel_rot', 'shtiefel_proj_rot', 'shtiefel_additive_rot', 'angular_steering', 'householder_pseudo_rotation'],
                     help='baseline: original RefusalCone. rotation: learn orthogonal M (Cayley), r=M@r0; requires cone_dim=1')
     parser.add_argument(
         '--num_opt_layers',
         type=int,
         default=DEFAULT_CONFIG['num_opt_layers'],
         help=(
-            '(shtiefel_rot, shtiefel_proj_rot, angular_steering, householder_pseudo_rotation) Number of middle layers to optimize '
+            '(shtiefel_rot, shtiefel_proj_rot, shtiefel_additive_rot, angular_steering, householder_pseudo_rotation) Number of middle layers to optimize '
             '(layers 0 and last are always excluded from optimized indices).'
         ),
     )
@@ -291,19 +295,19 @@ def parse_args():
         '--proj_reduce_ratio',
         type=int,
         default=DEFAULT_CONFIG["proj_reduce_ratio"],
-        help='(shtiefel_proj_rot) Low-rank reduction ratio, where k = hidden_size // proj_reduce_ratio',
+        help='(projected/additive modes) Low-rank reduction ratio, where k = hidden_size // proj_reduce_ratio',
     )
     parser.add_argument(
         '--clip_upper',
         type=float,
         default=DEFAULT_CONFIG["clip_upper"],
-        help='(activation_rot) Upper norm multiplier: intervened activation norm is clipped to <= clip_upper * start_norm',
+        help='(activation modes) Upper norm multiplier: intervened activation norm is clipped to <= clip_upper * start_norm',
     )
     parser.add_argument(
         '--clip_lower',
         type=float,
         default=DEFAULT_CONFIG["clip_lower"],
-        help='(activation_rot) Lower norm multiplier: intervened activation norm is grown to >= clip_lower * start_norm; 0 disables',
+        help='(activation modes) Lower norm multiplier: intervened activation norm is grown to >= clip_lower * start_norm; 0 disables',
     )
     parser.add_argument(
         '--pca_traj_interval',
@@ -1217,6 +1221,138 @@ class OrthogonalProjection(torch.autograd.Function):
         return grad_W
 
 
+class RefusalDirectionActivationAdditiveRotation(RefusalDirectionActivationRotation):
+    """Rotate only a learned low-rank activation subspace."""
+
+    def __init__(
+        self,
+        module: Envoy,
+        dim: int,
+        init_vectors: torch.Tensor | None = None,
+        clip_upper: float = 2.0,
+        clip_lower: float = 0.0,
+        proj_reduce_ratio: int = 10,
+    ) -> None:
+        super().__init__(
+            module,
+            dim,
+            init_vectors=init_vectors,
+            clip_upper=clip_upper,
+            clip_lower=clip_lower,
+        )
+        ratio = int(proj_reduce_ratio)
+        if ratio < 1:
+            raise ValueError(f"proj_reduce_ratio must be >= 1, got {proj_reduce_ratio}")
+        self.k = dim // ratio
+        if self.k < 1:
+            raise ValueError(
+                f"dim // proj_reduce_ratio must be >= 1; dim={dim}, ratio={ratio}"
+            )
+        self.proj_reduce_ratio = ratio
+
+        n_layers = len(self.module.layers)
+        dev = _runtime_device()
+        basis = torch.randn(n_layers, dim, self.k, dtype=torch.float32, device=dev)
+        self.basis_param = nn.Parameter(basis)
+        self.cayley_param = nn.Parameter(
+            torch.randn(n_layers, self.k, self.k, dtype=torch.float32, device=dev) * 1e-3
+        )
+        self._imported_dense: torch.Tensor | None = None
+        self._use_imported_dense = False
+        self.orthogonalize()
+
+    def _basis(self, layer_idx: int) -> torch.Tensor:
+        return OrthogonalProjection.apply(self.basis_param[layer_idx])
+
+    def checkpoint_matrix(self) -> torch.Tensor:
+        if self._use_imported_dense and self._imported_dense is not None:
+            return self._imported_dense
+        with torch.no_grad():
+            matrices = [
+                dense_additive_rotation_matrix(
+                    self._basis(i),
+                    RefusalDirectionActivationRotation.cayley_matrix(self, i),
+                ) * self.input_norm_scale[i]
+                for i in range(len(self.module.layers))
+            ]
+            return torch.stack(matrices, dim=0)
+
+    def cayley_matrix(self, layer_idx: int) -> torch.Tensor:
+        if self._cached_matrices is not None:
+            return self._cached_matrices[layer_idx]
+        if self._use_imported_dense and self._imported_dense is not None:
+            return self._imported_dense[layer_idx]
+        return dense_additive_rotation_matrix(
+            self._basis(layer_idx),
+            RefusalDirectionActivationRotation.cayley_matrix(self, layer_idx),
+        )
+
+    def import_cayley_checkpoint(self, dense_matrices: torch.Tensor) -> None:
+        expected = (len(self.module.layers), self.dim, self.dim)
+        if tuple(dense_matrices.shape) != expected:
+            raise ValueError(
+                f"Expected additive checkpoint shape {expected}, got "
+                f"{tuple(dense_matrices.shape)}"
+            )
+        self._imported_dense = dense_matrices.to(
+            device=self.cayley_param.device,
+            dtype=self.cayley_param.dtype,
+        )
+        self._use_imported_dense = True
+
+    def _rotate(self, x, layer_idx: int, inverse: bool = False):
+        if isinstance(x, tuple):
+            if not x:
+                return x
+            return (self._rotate(x[0], layer_idx, inverse=inverse),) + x[1:]
+        if not hasattr(x, "dtype") and hasattr(x, "__getitem__"):
+            try:
+                return (
+                    self._rotate(x[0], layer_idx, inverse=inverse),
+                ) + tuple(x[1:])
+            except Exception:
+                return x
+
+        use_transpose = self._guard_mode != "protect"
+        if inverse:
+            use_transpose = not use_transpose
+
+        if self._cached_matrices is not None or self._use_imported_dense:
+            matrix = self.cayley_matrix(layer_idx)
+            try:
+                matrix = matrix.to(x)
+            except Exception:
+                matrix = matrix.to(device=x.device, dtype=x.dtype)
+            return x @ (matrix.T if use_transpose else matrix)
+
+        basis = self._basis(layer_idx)
+        rotation = RefusalDirectionActivationRotation.cayley_matrix(self, layer_idx)
+        try:
+            basis = basis.to(x)
+            rotation = rotation.to(x)
+        except Exception:
+            basis = basis.to(device=x.device, dtype=x.dtype)
+            rotation = rotation.to(device=x.device, dtype=x.dtype)
+        return additive_subspace_rotation(
+            x,
+            basis,
+            rotation,
+            use_transpose=use_transpose,
+        )
+
+    def orthogonalize(self):
+        with torch.no_grad():
+            for layer_idx in range(self.basis_param.shape[0]):
+                U, _, Vh = torch.linalg.svd(
+                    self.basis_param[layer_idx],
+                    full_matrices=False,
+                )
+                self.basis_param[layer_idx].copy_(U @ Vh)
+
+    def parameters(self):
+        return [self.basis_param, self.cayley_param, self.input_norm_scale]
+
+
 def _layer_scores_from_refusal_directions(
     refusal_dirs: torch.Tensor | np.ndarray | list | tuple,
     n_layers: int,
@@ -1796,6 +1932,93 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         }
 
 
+class RefusalStiefelAdditiveRotation(RefusalStiefelProjRotation):
+    """Apply the projected Stiefel map only inside its learned subspace."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # The parent performs additional initialization after its first retraction.
+        self.orthogonalize()
+
+    def _subspace_factors(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        basis = OrthogonalProjection.apply(self.proj_A[layer_idx])
+        right = OrthogonalProjection.apply(self.proj_B[layer_idx])
+        rotation = OrthogonalProjection.apply(right @ basis)
+        return basis, rotation
+
+    def matrix(self, layer_idx: int) -> torch.Tensor:
+        if layer_idx not in self._optimized_layer_idxs:
+            return self._identity_matrix
+        if self._cached_matrices is not None:
+            matrix = self._cached_matrices[layer_idx]
+            return self._identity_matrix if matrix is None else matrix
+        if self._use_composed_cayley:
+            return self.cayley_param[layer_idx]
+        basis, rotation = self._subspace_factors(layer_idx)
+        return dense_additive_rotation_matrix(basis, rotation)
+
+    def checkpoint_matrix(self) -> torch.Tensor:
+        with torch.no_grad():
+            return torch.stack(
+                [
+                    self.matrix(layer_idx) * self.input_norm_scale[layer_idx]
+                    for layer_idx in range(len(self.module.layers))
+                ],
+                dim=0,
+            )
+
+    def _rotate(self, x, layer_idx: int, inverse: bool = False):
+        if isinstance(x, tuple):
+            if not x:
+                return x
+            return (self._rotate(x[0], layer_idx, inverse=inverse),) + x[1:]
+        if not hasattr(x, "dtype") and hasattr(x, "__getitem__"):
+            try:
+                return (
+                    self._rotate(x[0], layer_idx, inverse=inverse),
+                ) + tuple(x[1:])
+            except Exception:
+                return x
+
+        use_transpose = self._guard_mode != "protect"
+        if inverse:
+            use_transpose = not use_transpose
+
+        if self._cached_matrices is not None or self._use_composed_cayley:
+            matrix = self.matrix(layer_idx)
+            try:
+                matrix = matrix.to(x)
+            except Exception:
+                matrix = matrix.to(device=x.device, dtype=x.dtype)
+            return x @ (matrix.T if use_transpose else matrix)
+
+        basis, rotation = self._subspace_factors(layer_idx)
+        try:
+            basis = basis.to(x)
+            rotation = rotation.to(x)
+        except Exception:
+            basis = basis.to(device=x.device, dtype=x.dtype)
+            rotation = rotation.to(device=x.device, dtype=x.dtype)
+        return additive_subspace_rotation(
+            x,
+            basis,
+            rotation,
+            use_transpose=use_transpose,
+        )
+
+    def orthogonalize(self):
+        super().orthogonalize()
+        with torch.no_grad():
+            for layer_idx in range(self.proj_A.shape[0]):
+                if layer_idx not in self._optimized_layer_idxs:
+                    self.cayley_param[layer_idx].copy_(self._identity_matrix)
+                    continue
+                basis, rotation = self._subspace_factors(layer_idx)
+                self.cayley_param[layer_idx].copy_(
+                    dense_additive_rotation_matrix(basis, rotation)
+                )
+
+
 class RefusalAngularSteeringRotation(RefusalStiefelRotation):
     """
     Adaptive Angular Steering on top of per-layer Stiefel rotations.
@@ -2105,9 +2328,15 @@ def _save_progress_operation_checkpoint(
         payload["frozen_layer_indices"] = frozen
     if direction_mode == "baseline":
         payload["fn_vectors"] = torch.stack(operation.fn_vectors, dim=0).detach().cpu()
-    elif direction_mode == "shtiefel_proj_rot":
+    elif direction_mode in {"shtiefel_proj_rot", "shtiefel_additive_rot"}:
         payload["proj_A"] = operation.proj_A.detach().cpu()
         payload["proj_B"] = operation.proj_B.detach().cpu()
+        if direction_mode == "shtiefel_additive_rot":
+            payload["input_norm_scale"] = operation.input_norm_scale.detach().cpu()
+    elif direction_mode == "activation_additive_rot":
+        payload["basis_param"] = operation.basis_param.detach().cpu()
+        payload["cayley_param"] = operation.cayley_param.detach().cpu()
+        payload["input_norm_scale"] = operation.input_norm_scale.detach().cpu()
     else:
         payload["cayley_param"] = operation.cayley_param.detach().cpu()
     torch.save(payload, os.path.join(progress_dir, f"iters_{iters_steps:08d}.pt"))
@@ -2147,10 +2376,17 @@ def _write_tb_checkpoint_layer_artifacts(
     }
     if frozen is not None:
         state["frozen_layer_indices"] = frozen
-    if direction_mode == "shtiefel_proj_rot" and active:
+    if direction_mode in {"shtiefel_proj_rot", "shtiefel_additive_rot"} and active:
         idx = torch.tensor(active, dtype=torch.long, device=operation.proj_A.device)
         state["proj_A"] = operation.proj_A.index_select(0, idx).detach().cpu()
         state["proj_B"] = operation.proj_B.index_select(0, idx).detach().cpu()
+        if direction_mode == "shtiefel_additive_rot":
+            state["input_norm_scale"] = operation.input_norm_scale.index_select(0, idx).detach().cpu()
+    elif direction_mode == "activation_additive_rot" and active:
+        idx = torch.tensor(active, dtype=torch.long, device=operation.basis_param.device)
+        state["basis_param"] = operation.basis_param.index_select(0, idx).detach().cpu()
+        state["cayley_param"] = operation.cayley_param.index_select(0, idx).detach().cpu()
+        state["input_norm_scale"] = operation.input_norm_scale.index_select(0, idx).detach().cpu()
     elif direction_mode in ("shtiefel_rot", "activation_rot", "angular_steering", "householder_pseudo_rotation") and active:
         cp = operation.cayley_param
         if cp.dim() == 3:
@@ -2294,6 +2530,15 @@ def refusal_cone_optimization(model, train_dataset,
             clip_upper=getattr(args, "clip_upper", 2.0),
             clip_lower=getattr(args, "clip_lower", 0.0),
         )
+    elif direction_mode == "activation_additive_rot":
+        operation = RefusalDirectionActivationAdditiveRotation(
+            model.model,
+            model.config.hidden_size,
+            init_vectors=init_vectors,
+            clip_upper=getattr(args, "clip_upper", 2.0),
+            clip_lower=getattr(args, "clip_lower", 0.0),
+            proj_reduce_ratio=proj_reduce_ratio,
+        )
     elif direction_mode == "shtiefel_rot":
         operation = RefusalStiefelRotation(
             model.model,
@@ -2326,6 +2571,17 @@ def refusal_cone_optimization(model, train_dataset,
         )
     elif direction_mode == "shtiefel_proj_rot":
         operation = RefusalStiefelProjRotation(
+            model.model,
+            model.config.hidden_size,
+            init_vectors=init_vectors,
+            init_mode=args.init_mode,
+            orth_method=args.orth_method,
+            proj_reduce_ratio=proj_reduce_ratio,
+            num_opt_layers=num_opt_layers,
+            best_layer=best_layer,
+        )
+    elif direction_mode == "shtiefel_additive_rot":
+        operation = RefusalStiefelAdditiveRotation(
             model.model,
             model.config.hidden_size,
             init_vectors=init_vectors,
@@ -2622,14 +2878,14 @@ def refusal_cone_optimization(model, train_dataset,
                         for fn_vector in operation.fn_vectors:
                             fn_vector.grad.div_(accumulation_steps)
                     else:
-                        p0 = operation.cayley_param
-                        if p0.grad is not None:
-                            p0.grad.div_(accumulation_steps)
+                        for param in operation.parameters():
+                            if param.grad is not None:
+                                param.grad.div_(accumulation_steps)
 
                     torch.nn.utils.clip_grad_norm_(operation.parameters(), 10.0)
                     if direction_mode == "baseline":
                         grad_norm = operation.fn_vectors[-1].grad.norm().item()
-                    elif direction_mode == "shtiefel_proj_rot":
+                    else:
                         grad_norm = float(
                             sum(
                                 (p.grad.norm().item() ** 2 for p in operation.parameters() if p.grad is not None),
@@ -2637,8 +2893,6 @@ def refusal_cone_optimization(model, train_dataset,
                             )
                             ** 0.5
                         )
-                    else:
-                        grad_norm = operation.cayley_param.grad.norm().item()
                     optimizer.step()
                     opt_step_counter += 1
                     optimizer.zero_grad()
@@ -2669,7 +2923,12 @@ def refusal_cone_optimization(model, train_dataset,
                         vectors.append(torch.stack(operation.fn_vectors, dim=0).detach().cpu().data.clone())
                     else:
                         vectors.append(operation.stack_directions_for_log())
-                        cayley_params.append(operation.cayley_param.detach().cpu().data.clone())
+                        checkpoint_matrix = (
+                            operation.checkpoint_matrix()
+                            if hasattr(operation, "checkpoint_matrix")
+                            else operation.cayley_param
+                        )
+                        cayley_params.append(checkpoint_matrix.detach().cpu().data.clone())
                     bypass_scores.append(basis_bypass_scores)
 
                     training_metrics = {
@@ -3187,7 +3446,7 @@ def _extract_refined_artifact(training_results: dict, direction_mode: str):
     """
     Return an object representing the learned "refined" intervention.
     - baseline/rotation: a vector direction (Tensor [d_model])
-    - activation_rot / shtiefel_rot / angular_steering / householder_pseudo_rotation: per-layer cayley_param (Tensor [n_layers, d, d])
+    - rotation modes: per-layer dense intervention matrix (Tensor [n_layers, d, d])
     """
     if training_results is None:
         return None
@@ -3552,7 +3811,13 @@ def _normalize_guard_backends(backends) -> list[str]:
 
 
 def _supports_protect_guard_mode(direction_mode: str) -> bool:
-    return str(direction_mode).strip().lower() in {"baseline", "shtiefel_proj_rot", "activation_rot"}
+    return str(direction_mode).strip().lower() in {
+        "baseline",
+        "shtiefel_proj_rot",
+        "shtiefel_additive_rot",
+        "activation_rot",
+        "activation_additive_rot",
+    }
 
 
 def _build_train_guard_step_fn(operation, direction_mode: str, best_layer: int, guard_mode: str = "attack"):
@@ -3925,6 +4190,19 @@ def _evaluate_llamaguard_and_mmlu(
                     clip_upper=getattr(args, "clip_upper", 2.0),
                     clip_lower=getattr(args, "clip_lower", 0.0),
                 )
+            if direction_mode == "activation_additive_rot":
+                return RefusalDirectionActivationAdditiveRotation(
+                    model.model,
+                    model.config.hidden_size,
+                    init_vectors=[],
+                    clip_upper=getattr(args, "clip_upper", 2.0),
+                    clip_lower=getattr(args, "clip_lower", 0.0),
+                    proj_reduce_ratio=getattr(
+                        args,
+                        "proj_reduce_ratio",
+                        DEFAULT_CONFIG.get("proj_reduce_ratio", 10),
+                    ),
+                )
             if direction_mode == "shtiefel_rot":
                 return RefusalStiefelRotation(
                     model.model,
@@ -3963,6 +4241,21 @@ def _evaluate_llamaguard_and_mmlu(
                     init_mode=args.init_mode,
                     orth_method=args.orth_method,
                     proj_reduce_ratio=getattr(args, "proj_reduce_ratio", DEFAULT_CONFIG.get("proj_reduce_ratio", 10)),
+                    num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
+                    best_layer=best_layer,
+                )
+            if direction_mode == "shtiefel_additive_rot":
+                return RefusalStiefelAdditiveRotation(
+                    model.model,
+                    model.config.hidden_size,
+                    init_vectors=[],
+                    init_mode=args.init_mode,
+                    orth_method=args.orth_method,
+                    proj_reduce_ratio=getattr(
+                        args,
+                        "proj_reduce_ratio",
+                        DEFAULT_CONFIG.get("proj_reduce_ratio", 10),
+                    ),
                     num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
                     best_layer=best_layer,
                 )

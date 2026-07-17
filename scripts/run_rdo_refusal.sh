@@ -3,10 +3,9 @@ set -euo pipefail
 
 # Run from repo root
 cd "$(dirname "$0")/.."
-
-# variables
-model="allenai/Olmo-3-1025-7B" # "allenai/Olmo-3-1025-7B" "Qwen/Qwen3-8B-Base" "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
-direction_mode="baseline" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot", "angular_steering", "householder_pseudo_rotation"
+# variablesallenai/Olmo-3-7B-Instruct
+model="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B" # "allenai/OLMo-2-0425-1B-Instruct" "allenai/Olmo-3-1025-7B" "Qwen/Qwen3-8B-Base" "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+direction_mode="activation_additive_rot" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot", "shtiefel_additive_rot", "activation_additive_rot", "angular_steering", "householder_pseudo_rotation"
 train_guard_val_gap=0 # 0 disables; otherwise run train guard validation every N dataloader iterations
 num_opt_layers=1 # optimize this many middle layers (plus best layer during intervention)
 llamaguard_data="basic" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
@@ -18,7 +17,7 @@ result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave 
 log_steps=0
 init_mode="diag_permutation" # "random", "diag_permutation", or "ab_orthogonal"
 orth_method="svd" # "qr" or "svd"
-proj_reduce_ratio=100 # used when direction_mode="shtiefel_proj_rot" (k = hidden_size / ratio)
+proj_reduce_ratio=100 # used by projected/additive modes (k = hidden_size / ratio)
 
 # LlamaGuard eval config
 eval_max_new_tokens=256 # inportant param for llama guard eval
@@ -42,7 +41,7 @@ mmlu_store_predictions=false
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=5
+export CUDA_VISIBLE_DEVICES=6
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -60,7 +59,7 @@ export GUARD_TRAIN_BATCH_SIZE="${GUARD_TRAIN_BATCH_SIZE:-$eval_batch_size}"
 export MAX_HARMFUL="${MAX_HARMFUL}" # 250
 export MAX_HARMLESS="${MAX_HARMLESS}" # 250
 
-export HF_TOKEN="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"
+export HF_TOKEN="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"
 
 # ---- Default command ----
 cmd=(python -m baselines.rdo_refusal \
@@ -90,9 +89,9 @@ cmd=(python -m baselines.rdo_refusal \
   --mmlu_max_new_tokens "${MMLU_MAX_NEW_TOKENS}" \
   --ablation_lambda 1.0 \
   --addition_lambda 0.2 \
-  --retain_lambda 5.0 \
+  --retain_lambda 1.0 \
   --retain_loss \
-  --repetition_lambda 5.0 \
+  --repetition_lambda 1.0 \
   # --retain_lambda 0.0 \
 )
 
