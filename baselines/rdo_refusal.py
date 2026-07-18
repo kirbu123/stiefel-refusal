@@ -3406,8 +3406,11 @@ def _eval_payload_to_major_metrics_rows(payload: dict) -> list[dict]:
         block = payload["llamaguard"]
         for harm_kind in ("harmful", "harmless"):
             split_block = block.get(harm_kind) or {}
-            for phase in ("initial", "refined"):
-                stats = split_block.get(phase) or {}
+            for phase in ("initial", "refined_attack", "refined_protect"):
+                source_phase = phase
+                if phase == "refined_attack" and not split_block.get(phase):
+                    source_phase = "refined"
+                stats = split_block.get(source_phase) or {}
                 for metric_name in ("n", "mean_score", "mean_unsafe_probability", "pct_unsafe"):
                     metric_val = stats.get(metric_name)
                     if metric_val is None:
@@ -3425,8 +3428,11 @@ def _eval_payload_to_major_metrics_rows(payload: dict) -> list[dict]:
 
     # MMLU major metrics
     mmlu = payload.get("mmlu") or {}
-    for phase in ("initial", "refined"):
-        phase_stats = mmlu.get(phase) or {}
+    for phase in ("initial", "refined_attack", "refined_protect"):
+        source_phase = phase
+        if phase == "refined_attack" and not mmlu.get(phase):
+            source_phase = "refined"
+        phase_stats = mmlu.get(source_phase) or {}
         for metric_name in ("accuracy", "correct", "total", "invalid_predictions"):
             metric_val = phase_stats.get(metric_name)
             if metric_val is None:
@@ -3441,31 +3447,40 @@ def _eval_payload_to_major_metrics_rows(payload: dict) -> list[dict]:
                     "value": metric_val,
                 }
             )
-    if mmlu.get("delta_accuracy") is not None:
-        rows.append(
-            {
-                "benchmark": "mmlu",
-                "backend": "",
-                "group": "",
-                "phase": "delta",
-                "metric": "accuracy",
-                "value": mmlu.get("delta_accuracy"),
-            }
-        )
-    delta_metrics = mmlu.get("delta_metrics") or {}
-    for metric_name, metric_val in delta_metrics.items():
-        if metric_val is None:
-            continue
-        rows.append(
-            {
-                "benchmark": "mmlu",
-                "backend": "",
-                "group": "",
-                "phase": "delta",
-                "metric": metric_name,
-                "value": metric_val,
-            }
-        )
+    for mode_name in ("attack", "protect"):
+        delta_accuracy_key = f"delta_accuracy_{mode_name}"
+        delta_metrics_key = f"delta_metrics_{mode_name}"
+        delta_accuracy = mmlu.get(delta_accuracy_key)
+        delta_metrics = mmlu.get(delta_metrics_key) or {}
+        if mode_name == "attack":
+            if delta_accuracy is None:
+                delta_accuracy = mmlu.get("delta_accuracy")
+            if not delta_metrics:
+                delta_metrics = mmlu.get("delta_metrics") or {}
+        if delta_accuracy is not None:
+            rows.append(
+                {
+                    "benchmark": "mmlu",
+                    "backend": "",
+                    "group": "",
+                    "phase": f"delta_{mode_name}",
+                    "metric": "accuracy",
+                    "value": delta_accuracy,
+                }
+            )
+        for metric_name, metric_val in delta_metrics.items():
+            if metric_val is None:
+                continue
+            rows.append(
+                {
+                    "benchmark": "mmlu",
+                    "backend": "",
+                    "group": "",
+                    "phase": f"delta_{mode_name}",
+                    "metric": metric_name,
+                    "value": metric_val,
+                }
+            )
 
     # Locality/capability benchmark metrics
     locality_metrics = payload.get("locality_metrics") or {}
@@ -4388,6 +4403,8 @@ def _evaluate_end_metrics(
             def step_fn(_model: LanguageModel):
                 if hasattr(refined_rotation_model, "module"):
                     refined_rotation_model.module = _model.model
+                if hasattr(refined_rotation_model, "set_guard_mode"):
+                    refined_rotation_model.set_guard_mode(guard_mode)
                 refined_rotation_model(direction=None)
 
             return step_fn
@@ -4578,13 +4595,11 @@ def _evaluate_end_metrics(
                         backend_block = {
                             "harmful": {
                                 "initial": _aggregate_llamaguard(initial_harmful_results),
-                                "refined": _aggregate_llamaguard(refined_results_by_mode["attack"]["harmful"]) if "attack" in refined_results_by_mode else None,
                                 "refined_attack": _aggregate_llamaguard(refined_results_by_mode["attack"]["harmful"]) if "attack" in refined_results_by_mode else None,
                                 "refined_protect": _aggregate_llamaguard(refined_results_by_mode["protect"]["harmful"]) if "protect" in refined_results_by_mode else None,
                             },
                             "harmless": {
                                 "initial": _aggregate_llamaguard(initial_harmless_results),
-                                "refined": _aggregate_llamaguard(refined_results_by_mode["attack"]["harmless"]) if "attack" in refined_results_by_mode else None,
                                 "refined_attack": _aggregate_llamaguard(refined_results_by_mode["attack"]["harmless"]) if "attack" in refined_results_by_mode else None,
                                 "refined_protect": _aggregate_llamaguard(refined_results_by_mode["protect"]["harmless"]) if "protect" in refined_results_by_mode else None,
                             },
@@ -4592,11 +4607,9 @@ def _evaluate_end_metrics(
                         guard_metrics[backend] = backend_block
 
                         _log_guard(backend, "harmful_initial", backend_block["harmful"]["initial"])
-                        _log_guard(backend, "harmful_refined", backend_block["harmful"]["refined"])
                         _log_guard(backend, "harmful_refined_attack", backend_block["harmful"]["refined_attack"])
                         _log_guard(backend, "harmful_refined_protect", backend_block["harmful"]["refined_protect"])
                         _log_guard(backend, "harmless_initial", backend_block["harmless"]["initial"])
-                        _log_guard(backend, "harmless_refined", backend_block["harmless"]["refined"])
                         _log_guard(backend, "harmless_refined_attack", backend_block["harmless"]["refined_attack"])
                         _log_guard(backend, "harmless_refined_protect", backend_block["harmless"]["refined_protect"])
                     except Exception as be:
@@ -4762,58 +4775,58 @@ def _evaluate_end_metrics(
             entries = prepared["entries"]
             prompts = [e["prompt"] for e in entries]
             chat_prompts = apply_chat_template(model.tokenizer, prompts)
-            initial_rows = []
-            refined_rows = []
-            mmlu_warning = None
+            initial_rows: list[dict] = []
+            refined_rows_by_mode: dict[str, list[dict]] = {
+                "attack": [],
+                "protect": [],
+            }
+            mmlu_warnings: list[str] = []
+
+            def _mmlu_rows_from_responses(responses: list[str]) -> list[dict]:
+                predictions = [mmlu_eval.parse_choice_letter(response) for response in responses]
+                return [
+                    {
+                        "index": entry["index"],
+                        "subject": entry["subject"],
+                        "question": entry["question"],
+                        "correct_letter": entry["correct_letter"],
+                        "predicted_letter": prediction,
+                        "is_correct": prediction == entry["correct_letter"],
+                        "raw_response": response,
+                        "choice_scores": None,
+                    }
+                    for entry, prediction, response in zip(entries, predictions, responses)
+                ]
 
             if normalized["answer_mode"] == "logits":
                 initial_rows = mmlu_eval._predict_with_logits(model, entries)
                 if refined_artifact is not None:
-                    # Refined logits-mode with intervention is not yet wired through nnsight;
-                    # use generate-mode predictions for refined so eval still runs.
-                    mmlu_warning = (
+                    mmlu_warnings.append(
                         "answer_mode=logits requested, but refined logits-mode with intervention "
-                        "is not supported in rdo_refusal; refined metrics use generate-mode parsing."
+                        "is not supported in rdo_refusal; refined attack/protect metrics use "
+                        "generate-mode parsing."
                     )
-                    step_fn = _make_refined_step_fn(refined_artifact)
-                    refined_resp = _generate_nnsight(
-                        model,
-                        chat_prompts,
-                        max_new_tokens=normalized["max_new_tokens"],
-                        batch_size=eval_batch_size,
-                        intervene_step_fn=step_fn,
-                        intervene_every_step=True,
-                    )
-                    refined_pred = [mmlu_eval.parse_choice_letter(r) for r in refined_resp]
-                    for e, p, r in zip(entries, refined_pred, refined_resp):
-                        refined_rows.append({
-                            "index": e["index"],
-                            "subject": e["subject"],
-                            "question": e["question"],
-                            "correct_letter": e["correct_letter"],
-                            "predicted_letter": p,
-                            "is_correct": p == e["correct_letter"],
-                            "raw_response": r,
-                            "choice_scores": None,
-                        })
             else:
-                initial_resp = _generate_nnsight(model, chat_prompts, max_new_tokens=normalized["max_new_tokens"], batch_size=eval_batch_size)
-                initial_pred = [mmlu_eval.parse_choice_letter(r) for r in initial_resp]
-                for e, p, r in zip(entries, initial_pred, initial_resp):
-                    initial_rows.append({
-                        "index": e["index"],
-                        "subject": e["subject"],
-                        "question": e["question"],
-                        "correct_letter": e["correct_letter"],
-                        "predicted_letter": p,
-                        "is_correct": p == e["correct_letter"],
-                        "raw_response": r,
-                        "choice_scores": None,
-                    })
+                initial_responses = _generate_nnsight(
+                    model,
+                    chat_prompts,
+                    max_new_tokens=normalized["max_new_tokens"],
+                    batch_size=eval_batch_size,
+                )
+                initial_rows = _mmlu_rows_from_responses(initial_responses)
 
-                if refined_artifact is not None:
-                    step_fn = _make_refined_step_fn(refined_artifact)
-                    refined_resp = _generate_nnsight(
+            if refined_artifact is not None:
+                refined_modes = ["attack"]
+                if _supports_protect_guard_mode(direction_mode):
+                    refined_modes.append("protect")
+                else:
+                    mmlu_warnings.append(
+                        f"direction_mode={direction_mode} does not support a distinct protect "
+                        "transform; refined_protect is null."
+                    )
+                for mode_name in refined_modes:
+                    step_fn = _make_refined_step_fn(refined_artifact, guard_mode=mode_name)
+                    refined_responses = _generate_nnsight(
                         model,
                         chat_prompts,
                         max_new_tokens=normalized["max_new_tokens"],
@@ -4821,64 +4834,106 @@ def _evaluate_end_metrics(
                         intervene_step_fn=step_fn,
                         intervene_every_step=True,
                     )
-                    refined_pred = [mmlu_eval.parse_choice_letter(r) for r in refined_resp]
-                    for e, p, r in zip(entries, refined_pred, refined_resp):
-                        refined_rows.append({
-                            "index": e["index"],
-                            "subject": e["subject"],
-                            "question": e["question"],
-                            "correct_letter": e["correct_letter"],
-                            "predicted_letter": p,
-                            "is_correct": p == e["correct_letter"],
-                            "raw_response": r,
-                            "choice_scores": None,
-                        })
+                    refined_rows_by_mode[mode_name] = _mmlu_rows_from_responses(refined_responses)
 
             initial_summary = mmlu_eval.summarize_mmlu_predictions(initial_rows, prepared["config_snapshot"])
-            refined_summary = mmlu_eval.summarize_mmlu_predictions(refined_rows, prepared["config_snapshot"]) if refined_rows else None
-            delta_metrics = _compute_mmlu_delta_metrics(initial_rows, refined_rows)
+            refined_summaries = {
+                mode_name: (
+                    mmlu_eval.summarize_mmlu_predictions(rows, prepared["config_snapshot"])
+                    if rows
+                    else None
+                )
+                for mode_name, rows in refined_rows_by_mode.items()
+            }
+            delta_metrics_by_mode = {
+                mode_name: _compute_mmlu_delta_metrics(initial_rows, rows)
+                for mode_name, rows in refined_rows_by_mode.items()
+            }
 
             mmlu_block = {
                 "config": mmlu_eval.get_mmlu_config_snapshot(normalized),
                 "initial": initial_summary,
-                "refined": refined_summary,
-                "delta_accuracy": (refined_summary["accuracy"] - initial_summary["accuracy"]) if refined_summary else None,
-                "delta_metrics": delta_metrics,
+                "refined_attack": refined_summaries["attack"],
+                "refined_protect": refined_summaries["protect"],
+                "delta_accuracy_attack": (
+                    refined_summaries["attack"]["accuracy"] - initial_summary["accuracy"]
+                    if refined_summaries["attack"]
+                    else None
+                ),
+                "delta_accuracy_protect": (
+                    refined_summaries["protect"]["accuracy"] - initial_summary["accuracy"]
+                    if refined_summaries["protect"]
+                    else None
+                ),
+                "delta_metrics_attack": delta_metrics_by_mode["attack"],
+                "delta_metrics_protect": delta_metrics_by_mode["protect"],
                 "preview": {
                     "initial": initial_rows[: mmlu_eval.PREDICTION_PREVIEW_LIMIT],
-                    "refined": refined_rows[: mmlu_eval.PREDICTION_PREVIEW_LIMIT] if refined_rows else None,
+                    "refined_attack": (
+                        refined_rows_by_mode["attack"][: mmlu_eval.PREDICTION_PREVIEW_LIMIT]
+                        if refined_rows_by_mode["attack"]
+                        else None
+                    ),
+                    "refined_protect": (
+                        refined_rows_by_mode["protect"][: mmlu_eval.PREDICTION_PREVIEW_LIMIT]
+                        if refined_rows_by_mode["protect"]
+                        else None
+                    ),
                 }
             }
-            if mmlu_warning is not None:
-                mmlu_block["warning"] = mmlu_warning
+            if normalized.get("store_predictions"):
+                mmlu_block["predictions"] = {
+                    "initial": initial_rows,
+                    "refined_attack": refined_rows_by_mode["attack"] or None,
+                    "refined_protect": refined_rows_by_mode["protect"] or None,
+                }
+            if mmlu_warnings:
+                mmlu_block["warnings"] = mmlu_warnings
             payload["mmlu"] = mmlu_block
 
             eval_writer.add_scalar("eval/mmlu/initial_accuracy", initial_summary["accuracy"], 0)
-            if refined_summary is not None:
-                eval_writer.add_scalar("eval/mmlu/refined_accuracy", refined_summary["accuracy"], 0)
-                eval_writer.add_scalar("eval/mmlu/delta_accuracy", refined_summary["accuracy"] - initial_summary["accuracy"], 0)
-            if delta_metrics is not None:
-                for metric_name in (
-                    "prediction_change_rate",
-                    "prediction_change_count",
-                    "correct_to_incorrect_count",
-                    "incorrect_to_correct_count",
-                    "invalid_to_valid_count",
-                    "valid_to_invalid_count",
-                    "delta_invalid_predictions",
-                ):
-                    metric_val = delta_metrics.get(metric_name)
-                    if metric_val is not None:
-                        eval_writer.add_scalar(f"eval/mmlu/{metric_name}", metric_val, 0)
+            for mode_name in ("attack", "protect"):
+                summary = refined_summaries[mode_name]
+                if summary is None:
+                    continue
+                eval_writer.add_scalar(
+                    f"eval/mmlu/refined_{mode_name}_accuracy",
+                    summary["accuracy"],
+                    0,
+                )
+                eval_writer.add_scalar(
+                    f"eval/mmlu/delta_{mode_name}_accuracy",
+                    summary["accuracy"] - initial_summary["accuracy"],
+                    0,
+                )
+                for metric_name, metric_value in (delta_metrics_by_mode[mode_name] or {}).items():
+                    if metric_value is not None:
+                        eval_writer.add_scalar(
+                            f"eval/mmlu/delta_{mode_name}_{metric_name}",
+                            metric_value,
+                            0,
+                        )
 
         # --- Locality/capability benchmarks ---
         locality_metrics: dict[str, dict] = {}
         locality_errors: dict[str, dict] = {}
-        refined_step_fn = (
-            _make_refined_step_fn(refined_artifact, guard_mode="attack")
-            if refined_artifact is not None
-            else None
-        )
+        locality_warnings: list[str] = []
+        refined_step_fns = {"attack": None, "protect": None}
+        if refined_artifact is not None:
+            refined_step_fns["attack"] = _make_refined_step_fn(
+                refined_artifact,
+                guard_mode="attack",
+            )
+            if _supports_protect_guard_mode(direction_mode):
+                refined_step_fns["protect"] = _make_refined_step_fn(
+                    refined_artifact,
+                    guard_mode="protect",
+                )
+            else:
+                locality_warnings.append(
+                    f"direction_mode={direction_mode} does not support a distinct protect "
+                    "transform; refined_protect is null."
+                )
 
         def _record_locality_error(benchmark: str, exc: Exception) -> None:
             locality_errors[benchmark] = {
@@ -4897,28 +4952,44 @@ def _evaluate_end_metrics(
                     **config_snapshot,
                 )
                 initial_rows = _score_ppl_windows(windows)
-                refined_rows = (
-                    _score_ppl_windows(windows, step_fn=refined_step_fn)
-                    if refined_step_fn is not None
-                    else None
-                )
+                refined_rows_by_mode = {
+                    mode_name: (
+                        _score_ppl_windows(windows, step_fn=step_fn)
+                        if step_fn is not None
+                        else None
+                    )
+                    for mode_name, step_fn in refined_step_fns.items()
+                }
                 initial_summary = rdo_locality.summarize_token_losses(initial_rows)
-                refined_summary = (
-                    rdo_locality.summarize_token_losses(refined_rows)
-                    if refined_rows is not None
-                    else None
-                )
+                refined_summaries = {
+                    mode_name: (
+                        rdo_locality.summarize_token_losses(rows)
+                        if rows is not None
+                        else None
+                    )
+                    for mode_name, rows in refined_rows_by_mode.items()
+                }
                 block = rdo_locality.build_metric_block(
                     config=config_snapshot,
                     metric_name="perplexity",
                     initial=initial_summary,
-                    refined=refined_summary,
+                    refined_attack=refined_summaries["attack"],
+                    refined_protect=refined_summaries["protect"],
                 )
                 locality_metrics["ppl"] = block
                 eval_writer.add_scalar("eval/locality/ppl/initial_perplexity", initial_summary["perplexity"], 0)
-                if refined_summary is not None:
-                    eval_writer.add_scalar("eval/locality/ppl/refined_perplexity", refined_summary["perplexity"], 0)
-                    eval_writer.add_scalar("eval/locality/ppl/delta_perplexity", block["delta"], 0)
+                for mode_name, summary in refined_summaries.items():
+                    if summary is not None:
+                        eval_writer.add_scalar(
+                            f"eval/locality/ppl/refined_{mode_name}_perplexity",
+                            summary["perplexity"],
+                            0,
+                        )
+                        eval_writer.add_scalar(
+                            f"eval/locality/ppl/delta_{mode_name}_perplexity",
+                            block[f"delta_{mode_name}"],
+                            0,
+                        )
             except Exception as exc:
                 _record_locality_error("ppl", exc)
 
@@ -4933,24 +5004,30 @@ def _evaluate_end_metrics(
                     entries,
                     lambda prompt, completion: _score_completion(prompt, completion),
                 )
-                refined_summary = None
-                refined_predictions = None
-                if refined_step_fn is not None:
-                    refined_summary, refined_predictions = rdo_locality.evaluate_arc_entries(
+                refined_summaries = {"attack": None, "protect": None}
+                refined_predictions = {"attack": None, "protect": None}
+                for mode_name, step_fn in refined_step_fns.items():
+                    if step_fn is None:
+                        continue
+                    summary, predictions = rdo_locality.evaluate_arc_entries(
                         entries,
-                        lambda prompt, completion: _score_completion(
+                        lambda prompt, completion, active_step_fn=step_fn: _score_completion(
                             prompt,
                             completion,
-                            step_fn=refined_step_fn,
+                            step_fn=active_step_fn,
                         ),
                     )
+                    refined_summaries[mode_name] = summary
+                    refined_predictions[mode_name] = predictions
                 block = rdo_locality.build_metric_block(
                     config=config_snapshot,
                     metric_name="accuracy",
                     initial=initial_summary,
-                    refined=refined_summary,
+                    refined_attack=refined_summaries["attack"],
+                    refined_protect=refined_summaries["protect"],
                     initial_predictions=initial_predictions,
-                    refined_predictions=refined_predictions,
+                    refined_attack_predictions=refined_predictions["attack"],
+                    refined_protect_predictions=refined_predictions["protect"],
                     store_predictions=bool(locality_cfg.get("store_predictions")),
                 )
                 locality_metrics[benchmark] = block
@@ -4959,17 +5036,18 @@ def _evaluate_end_metrics(
                     initial_summary["accuracy"],
                     0,
                 )
-                if refined_summary is not None:
-                    eval_writer.add_scalar(
-                        f"eval/locality/{benchmark}/refined_accuracy",
-                        refined_summary["accuracy"],
-                        0,
-                    )
-                    eval_writer.add_scalar(
-                        f"eval/locality/{benchmark}/delta_accuracy",
-                        block["delta"],
-                        0,
-                    )
+                for mode_name, summary in refined_summaries.items():
+                    if summary is not None:
+                        eval_writer.add_scalar(
+                            f"eval/locality/{benchmark}/refined_{mode_name}_accuracy",
+                            summary["accuracy"],
+                            0,
+                        )
+                        eval_writer.add_scalar(
+                            f"eval/locality/{benchmark}/delta_{mode_name}_accuracy",
+                            block[f"delta_{mode_name}"],
+                            0,
+                        )
             except Exception as exc:
                 _record_locality_error(benchmark, exc)
 
@@ -4990,29 +5068,35 @@ def _evaluate_end_metrics(
                     entries,
                     initial_responses,
                 )
-                refined_summary = None
-                refined_predictions = None
-                if refined_step_fn is not None:
+                refined_summaries = {"attack": None, "protect": None}
+                refined_predictions = {"attack": None, "protect": None}
+                for mode_name, step_fn in refined_step_fns.items():
+                    if step_fn is None:
+                        continue
                     refined_responses = _generate_nnsight(
                         model,
                         prompts,
                         max_new_tokens=max_new_tokens,
                         batch_size=eval_batch_size,
-                        intervene_step_fn=refined_step_fn,
+                        intervene_step_fn=step_fn,
                         intervene_every_step=True,
                     )
-                    refined_summary, refined_predictions = rdo_locality.summarize_gsm8k_responses(
+                    summary, predictions = rdo_locality.summarize_gsm8k_responses(
                         entries,
                         refined_responses,
                     )
+                    refined_summaries[mode_name] = summary
+                    refined_predictions[mode_name] = predictions
                 block_config = {**config_snapshot, "max_new_tokens": max_new_tokens}
                 block = rdo_locality.build_metric_block(
                     config=block_config,
                     metric_name="exact_match",
                     initial=initial_summary,
-                    refined=refined_summary,
+                    refined_attack=refined_summaries["attack"],
+                    refined_protect=refined_summaries["protect"],
                     initial_predictions=initial_predictions,
-                    refined_predictions=refined_predictions,
+                    refined_attack_predictions=refined_predictions["attack"],
+                    refined_protect_predictions=refined_predictions["protect"],
                     store_predictions=bool(locality_cfg.get("store_predictions")),
                 )
                 locality_metrics["gsm8k"] = block
@@ -5021,17 +5105,18 @@ def _evaluate_end_metrics(
                     initial_summary["exact_match"],
                     0,
                 )
-                if refined_summary is not None:
-                    eval_writer.add_scalar(
-                        "eval/locality/gsm8k/refined_exact_match",
-                        refined_summary["exact_match"],
-                        0,
-                    )
-                    eval_writer.add_scalar(
-                        "eval/locality/gsm8k/delta_exact_match",
-                        block["delta"],
-                        0,
-                    )
+                for mode_name, summary in refined_summaries.items():
+                    if summary is not None:
+                        eval_writer.add_scalar(
+                            f"eval/locality/gsm8k/refined_{mode_name}_exact_match",
+                            summary["exact_match"],
+                            0,
+                        )
+                        eval_writer.add_scalar(
+                            f"eval/locality/gsm8k/delta_{mode_name}_exact_match",
+                            block[f"delta_{mode_name}"],
+                            0,
+                        )
             except Exception as exc:
                 _record_locality_error("gsm8k", exc)
 
@@ -5039,6 +5124,8 @@ def _evaluate_end_metrics(
             payload["locality_metrics"] = locality_metrics
         if locality_errors:
             payload["locality_errors"] = locality_errors
+        if locality_warnings:
+            payload["locality_warnings"] = locality_warnings
 
         out_prefix = os.path.join(tb_run_dir, f"eval_metrics_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         out_json_path = f"{out_prefix}.json"

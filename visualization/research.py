@@ -211,7 +211,74 @@ def _rows_from_eval_csv(path: Path) -> list[dict[str, Any]]:
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Missing required columns in {path}: {sorted(missing)}")
-    return df.to_dict(orient="records")
+    records = df.to_dict(orient="records")
+    canonical_keys = {
+        (
+            str(row.get("benchmark", "")),
+            str(row.get("backend", "")),
+            str(row.get("group", "")),
+            str(row.get("phase", "")),
+            str(row.get("metric", "")),
+        )
+        for row in records
+        if str(row.get("phase", "")) not in ("refined", "delta")
+    }
+    normalized: list[dict[str, Any]] = []
+    for row in records:
+        phase = str(row.get("phase", ""))
+        if phase == "refined":
+            row = {**row, "phase": "refined_attack"}
+        elif phase == "delta":
+            row = {**row, "phase": "delta_attack"}
+        key = (
+            str(row.get("benchmark", "")),
+            str(row.get("backend", "")),
+            str(row.get("group", "")),
+            str(row.get("phase", "")),
+            str(row.get("metric", "")),
+        )
+        if phase in ("refined", "delta") and key in canonical_keys:
+            continue
+        normalized.append(row)
+    return normalized
+
+
+def _locality_rows_from_payload(locality_metrics: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for benchmark, block in locality_metrics.items():
+        for phase in ("initial", "refined_attack", "refined_protect"):
+            source_phase = phase
+            if phase == "refined_attack" and not block.get(phase):
+                source_phase = "refined"
+            for metric, value in (block.get(source_phase) or {}).items():
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    rows.append(
+                        {
+                            "benchmark": benchmark,
+                            "backend": "",
+                            "group": "",
+                            "phase": phase,
+                            "metric": metric,
+                            "value": value,
+                        }
+                    )
+        metric_name = block.get("metric_name")
+        for mode_name in ("attack", "protect"):
+            delta = block.get(f"delta_{mode_name}")
+            if mode_name == "attack" and delta is None:
+                delta = block.get("delta")
+            if metric_name and delta is not None:
+                rows.append(
+                    {
+                        "benchmark": benchmark,
+                        "backend": "",
+                        "group": "",
+                        "phase": f"delta_{mode_name}",
+                        "metric": metric_name,
+                        "value": delta,
+                    }
+                )
+    return rows
 
 
 def _rows_from_eval_json(path: Path) -> list[dict[str, Any]]:
@@ -223,7 +290,11 @@ def _rows_from_eval_json(path: Path) -> list[dict[str, Any]]:
     for backend, backend_block in guard_metrics.items():
         for group in ("harmful", "harmless"):
             split_block = (backend_block or {}).get(group) or {}
-            for phase, stats in split_block.items():
+            for phase in ("initial", "refined_attack", "refined_protect"):
+                source_phase = phase
+                if phase == "refined_attack" and not split_block.get(phase):
+                    source_phase = "refined"
+                stats = split_block.get(source_phase) or {}
                 stats = stats or {}
                 for metric in MAJOR_GUARD_METRICS:
                     value = stats.get(metric)
@@ -245,8 +316,11 @@ def _rows_from_eval_json(path: Path) -> list[dict[str, Any]]:
         block = payload.get("llamaguard") or {}
         for group in ("harmful", "harmless"):
             split_block = block.get(group) or {}
-            for phase in ("initial", "refined"):
-                stats = split_block.get(phase) or {}
+            for phase in ("initial", "refined_attack", "refined_protect"):
+                source_phase = phase
+                if phase == "refined_attack" and not split_block.get(phase):
+                    source_phase = "refined"
+                stats = split_block.get(source_phase) or {}
                 for metric in MAJOR_GUARD_METRICS:
                     value = stats.get(metric)
                     if value is None:
@@ -263,8 +337,11 @@ def _rows_from_eval_json(path: Path) -> list[dict[str, Any]]:
                     )
 
     mmlu = payload.get("mmlu") or {}
-    for phase in ("initial", "refined"):
-        phase_stats = mmlu.get(phase) or {}
+    for phase in ("initial", "refined_attack", "refined_protect"):
+        source_phase = phase
+        if phase == "refined_attack" and not mmlu.get(phase):
+            source_phase = "refined"
+        phase_stats = mmlu.get(source_phase) or {}
         for metric in ("accuracy", "correct", "total", "invalid_predictions"):
             value = phase_stats.get(metric)
             if value is None:
@@ -279,30 +356,39 @@ def _rows_from_eval_json(path: Path) -> list[dict[str, Any]]:
                     "value": value,
                 }
             )
-    if mmlu.get("delta_accuracy") is not None:
-        rows.append(
-            {
-                "benchmark": "mmlu",
-                "backend": "",
-                "group": "",
-                "phase": "delta",
-                "metric": "accuracy",
-                "value": mmlu.get("delta_accuracy"),
-            }
-        )
-    for metric, value in (mmlu.get("delta_metrics") or {}).items():
-        if value is None:
-            continue
-        rows.append(
-            {
-                "benchmark": "mmlu",
-                "backend": "",
-                "group": "",
-                "phase": "delta",
-                "metric": metric,
-                "value": value,
-            }
-        )
+    for mode_name in ("attack", "protect"):
+        delta_accuracy = mmlu.get(f"delta_accuracy_{mode_name}")
+        delta_metrics = mmlu.get(f"delta_metrics_{mode_name}") or {}
+        if mode_name == "attack":
+            if delta_accuracy is None:
+                delta_accuracy = mmlu.get("delta_accuracy")
+            if not delta_metrics:
+                delta_metrics = mmlu.get("delta_metrics") or {}
+        if delta_accuracy is not None:
+            rows.append(
+                {
+                    "benchmark": "mmlu",
+                    "backend": "",
+                    "group": "",
+                    "phase": f"delta_{mode_name}",
+                    "metric": "accuracy",
+                    "value": delta_accuracy,
+                }
+            )
+        for metric, value in delta_metrics.items():
+            if value is not None:
+                rows.append(
+                    {
+                        "benchmark": "mmlu",
+                        "backend": "",
+                        "group": "",
+                        "phase": f"delta_{mode_name}",
+                        "metric": metric,
+                        "value": value,
+                    }
+                )
+
+    rows.extend(_locality_rows_from_payload(payload.get("locality_metrics") or {}))
     return rows
 
 
@@ -316,6 +402,8 @@ def _metric_col_name(metric_row: dict[str, Any]) -> str | None:
         return f"guard__{backend}__{group}__{phase}__{metric}"
     if benchmark == "mmlu":
         return f"mmlu__{phase}__{metric}"
+    if benchmark in ("ppl", "arc_easy", "arc_challenge", "gsm8k"):
+        return f"{benchmark}__{phase}__{metric}"
     return None
 
 

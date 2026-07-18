@@ -78,17 +78,24 @@ class RdoLocalityTests(unittest.TestCase):
         self.assertEqual(summary["exact_match"], 1.0)
         self.assertEqual(predictions[0]["predicted_answer"], "1234")
 
-    def test_metric_block_and_csv_rows_include_delta(self):
+    def test_metric_block_and_csv_rows_include_tri_mode_deltas(self):
         block = rdo_locality.build_metric_block(
             config={"split": "validation"},
             metric_name="accuracy",
             initial={"accuracy": 0.75, "correct": 3, "total": 4},
-            refined={"accuracy": 0.5, "correct": 2, "total": 4},
+            refined_attack={"accuracy": 0.5, "correct": 2, "total": 4},
+            refined_protect={"accuracy": 1.0, "correct": 4, "total": 4},
         )
-        self.assertEqual(block["delta"], -0.25)
+        self.assertEqual(block["delta_attack"], -0.25)
+        self.assertEqual(block["delta_protect"], 0.25)
+        self.assertNotIn("refined", block)
 
         rows = rdo_locality.metrics_to_csv_rows({"arc_easy": block})
-        delta_rows = [row for row in rows if row["phase"] == "delta"]
+        self.assertEqual(
+            {row["phase"] for row in rows},
+            {"initial", "refined_attack", "refined_protect", "delta_attack", "delta_protect"},
+        )
+        delta_rows = [row for row in rows if row["phase"].startswith("delta_")]
         self.assertEqual(
             delta_rows,
             [
@@ -96,12 +103,31 @@ class RdoLocalityTests(unittest.TestCase):
                     "benchmark": "arc_easy",
                     "backend": "",
                     "group": "",
-                    "phase": "delta",
+                    "phase": "delta_attack",
                     "metric": "accuracy",
                     "value": -0.25,
+                },
+                {
+                    "benchmark": "arc_easy",
+                    "backend": "",
+                    "group": "",
+                    "phase": "delta_protect",
+                    "metric": "accuracy",
+                    "value": 0.25,
                 }
             ],
         )
+
+    def test_metric_block_keeps_null_protect_phase(self):
+        block = rdo_locality.build_metric_block(
+            config={},
+            metric_name="perplexity",
+            initial={"perplexity": 10.0},
+            refined_attack={"perplexity": 12.0},
+            refined_protect=None,
+        )
+        self.assertIsNone(block["refined_protect"])
+        self.assertIsNone(block["delta_protect"])
 
 
 if __name__ == "__main__":

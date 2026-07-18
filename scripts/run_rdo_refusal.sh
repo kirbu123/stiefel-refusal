@@ -17,7 +17,7 @@ result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave 
 log_steps=0
 init_mode="diag_permutation" # "random", "diag_permutation", or "ab_orthogonal"
 orth_method="svd" # "qr" or "svd"
-proj_reduce_ratio=35 # used by projected/additive modes (k = hidden_size / ratio)
+proj_reduce_ratio=100 # used by projected/additive modes (k = hidden_size / ratio)
 
 # LlamaGuard eval config
 eval_max_new_tokens=256 # inportant param for llama guard eval

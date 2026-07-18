@@ -280,29 +280,44 @@ def build_metric_block(
     config: dict[str, Any],
     metric_name: str,
     initial: dict[str, Any],
-    refined: dict[str, Any] | None,
+    refined_attack: dict[str, Any] | None,
+    refined_protect: dict[str, Any] | None,
     initial_predictions: list[dict[str, Any]] | None = None,
-    refined_predictions: list[dict[str, Any]] | None = None,
+    refined_attack_predictions: list[dict[str, Any]] | None = None,
+    refined_protect_predictions: list[dict[str, Any]] | None = None,
     store_predictions: bool = False,
 ) -> dict[str, Any]:
     initial_value = initial.get(metric_name)
-    refined_value = refined.get(metric_name) if refined else None
+    attack_value = refined_attack.get(metric_name) if refined_attack else None
+    protect_value = refined_protect.get(metric_name) if refined_protect else None
     block: dict[str, Any] = {
         "config": config,
         "metric_name": metric_name,
         "initial": initial,
-        "refined": refined,
-        "delta": (refined_value - initial_value) if initial_value is not None and refined_value is not None else None,
+        "refined_attack": refined_attack,
+        "refined_protect": refined_protect,
+        "delta_attack": (attack_value - initial_value) if initial_value is not None and attack_value is not None else None,
+        "delta_protect": (protect_value - initial_value) if initial_value is not None and protect_value is not None else None,
     }
     if initial_predictions is not None:
         block["preview"] = {
             "initial": initial_predictions[:PREDICTION_PREVIEW_LIMIT],
-            "refined": refined_predictions[:PREDICTION_PREVIEW_LIMIT] if refined_predictions is not None else None,
+            "refined_attack": (
+                refined_attack_predictions[:PREDICTION_PREVIEW_LIMIT]
+                if refined_attack_predictions is not None
+                else None
+            ),
+            "refined_protect": (
+                refined_protect_predictions[:PREDICTION_PREVIEW_LIMIT]
+                if refined_protect_predictions is not None
+                else None
+            ),
         }
         if store_predictions:
             block["predictions"] = {
                 "initial": initial_predictions,
-                "refined": refined_predictions,
+                "refined_attack": refined_attack_predictions,
+                "refined_protect": refined_protect_predictions,
             }
     return block
 
@@ -312,7 +327,7 @@ def metrics_to_csv_rows(locality_metrics: dict[str, dict[str, Any]]) -> list[dic
     rows: list[dict[str, Any]] = []
     for benchmark, block in locality_metrics.items():
         metric_name = block.get("metric_name")
-        for phase in ("initial", "refined"):
+        for phase in ("initial", "refined_attack", "refined_protect"):
             for stat_name, stat_value in (block.get(phase) or {}).items():
                 if not isinstance(stat_value, (int, float)) or isinstance(stat_value, bool):
                     continue
@@ -326,15 +341,17 @@ def metrics_to_csv_rows(locality_metrics: dict[str, dict[str, Any]]) -> list[dic
                         "value": stat_value,
                     }
                 )
-        if metric_name and block.get("delta") is not None:
-            rows.append(
-                {
-                    "benchmark": benchmark,
-                    "backend": "",
-                    "group": "",
-                    "phase": "delta",
-                    "metric": metric_name,
-                    "value": block["delta"],
-                }
-            )
+        for mode in ("attack", "protect"):
+            delta_key = f"delta_{mode}"
+            if metric_name and block.get(delta_key) is not None:
+                rows.append(
+                    {
+                        "benchmark": benchmark,
+                        "backend": "",
+                        "group": "",
+                        "phase": delta_key,
+                        "metric": metric_name,
+                        "value": block[delta_key],
+                    }
+                )
     return rows

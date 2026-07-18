@@ -98,11 +98,11 @@ class WildGuardEvaluator:
         if token:
             login(token=token)
             print("  HuggingFace authentication successful")
-        else:
-            print(
-                "  Warning: HF_TOKEN is not set. Set it via the HF_TOKEN "
-                "environment variable after accepting WildGuard access terms."
-            )
+        # else:
+        #     print(
+        #         "  Warning: HF_TOKEN is not set. Set it via the HF_TOKEN "
+        #         "environment variable after accepting WildGuard access terms."
+        #     )
 
         _ensure_sentencepiece_available()
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, token=token)
