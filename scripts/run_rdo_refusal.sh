@@ -9,7 +9,7 @@ direction_mode="activation_additive_rot" # "shtiefel_rot", "activation_rot", "ba
 train_guard_val_gap=0 # 0 disables; otherwise run train guard validation every N dataloader iterations
 num_opt_layers=1 # optimize this many middle layers (plus best layer during intervention)
 llamaguard_data="basic" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
-eval_guard_backends=("llamaguard" "qwen3guard") # any subset of: "llamaguard" "qwen3guard" "wildguard"
+eval_guard_backends=("llamaguard" "qwen3guard" "wildguard") # any subset of: "llamaguard" "qwen3guard" "wildguard"
 lr=1e-5
 optimizer="AdamW" # "Adam", "AdamW", "SGD"
 max_iters=10000
@@ -17,7 +17,7 @@ result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave 
 log_steps=0
 init_mode="diag_permutation" # "random", "diag_permutation", or "ab_orthogonal"
 orth_method="svd" # "qr" or "svd"
-proj_reduce_ratio=100 # used by projected/additive modes (k = hidden_size / ratio)
+proj_reduce_ratio=35 # used by projected/additive modes (k = hidden_size / ratio)
 
 # LlamaGuard eval config
 eval_max_new_tokens=256 # inportant param for llama guard eval
@@ -26,7 +26,7 @@ MAX_HARMFUL=200 # 200
 MAX_HARMLESS=200 # 200
 
 # MMLU eval config
-enable_mmlu_eval=false # true
+enable_mmlu_eval=true # true
 mmlu_dataset="cais/mmlu"
 mmlu_subset="all"
 mmlu_split="test" # train|val|test
@@ -38,16 +38,51 @@ mmlu_sample_seed=42
 mmlu_max_new_tokens=8
 mmlu_store_predictions=false
 
+# Locality/capability eval config (independent on/off switches)
+enable_ppl_eval=true
+enable_arc_easy_eval=true
+enable_arc_challenge_eval=true
+enable_gsm8k_eval=true
+locality_store_predictions=false
+
+# WikiText-2 PPL
+ppl_dataset="Salesforce/wikitext"
+ppl_subset="wikitext-2-raw-v1"
+ppl_split="test"
+ppl_max_length=512
+ppl_stride=256
+ppl_max_windows=100
+
+# ARC-Easy / ARC-Challenge
+arc_dataset="allenai/ai2_arc"
+arc_split="validation"
+arc_sample_size=100
+arc_sample_seed=42
+
+# GSM8K
+gsm8k_dataset="openai/gsm8k"
+gsm8k_subset="main"
+gsm8k_split="test"
+gsm8k_sample_size=100
+gsm8k_sample_seed=42
+gsm8k_max_new_tokens=512
+
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=6
+export CUDA_VISIBLE_DEVICES=5
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
 export MMLU_SAMPLE_SIZE="${MMLU_SAMPLE_SIZE:-$mmlu_sample_size}"
 export MMLU_MAX_NEW_TOKENS="${MMLU_MAX_NEW_TOKENS:-$mmlu_max_new_tokens}"
 export MMLU_STORE_PREDICTIONS="${MMLU_STORE_PREDICTIONS:-$mmlu_store_predictions}"
+export PPL_MAX_WINDOWS="${PPL_MAX_WINDOWS:-$ppl_max_windows}"
+export PPL_MAX_LENGTH="${PPL_MAX_LENGTH:-$ppl_max_length}"
+export PPL_STRIDE="${PPL_STRIDE:-$ppl_stride}"
+export ARC_SAMPLE_SIZE="${ARC_SAMPLE_SIZE:-$arc_sample_size}"
+export GSM8K_SAMPLE_SIZE="${GSM8K_SAMPLE_SIZE:-$gsm8k_sample_size}"
+export GSM8K_MAX_NEW_TOKENS="${GSM8K_MAX_NEW_TOKENS:-$gsm8k_max_new_tokens}"
 
 # LlamaGuard: we only need the first generated token to compute P(unsafe).
 export LLAMAGUARD_MAX_NEW_TOKENS="${LLAMAGUARD_MAX_NEW_TOKENS:-100}"
@@ -87,11 +122,27 @@ cmd=(python -m baselines.rdo_refusal \
   --mmlu_sample_size "${MMLU_SAMPLE_SIZE}" \
   --mmlu_sample_seed "${mmlu_sample_seed}" \
   --mmlu_max_new_tokens "${MMLU_MAX_NEW_TOKENS}" \
+  --ppl_dataset "${ppl_dataset}" \
+  --ppl_subset "${ppl_subset}" \
+  --ppl_split "${ppl_split}" \
+  --ppl_max_length "${PPL_MAX_LENGTH}" \
+  --ppl_stride "${PPL_STRIDE}" \
+  --ppl_max_windows "${PPL_MAX_WINDOWS}" \
+  --arc_dataset "${arc_dataset}" \
+  --arc_split "${arc_split}" \
+  --arc_sample_size "${ARC_SAMPLE_SIZE}" \
+  --arc_sample_seed "${arc_sample_seed}" \
+  --gsm8k_dataset "${gsm8k_dataset}" \
+  --gsm8k_subset "${gsm8k_subset}" \
+  --gsm8k_split "${gsm8k_split}" \
+  --gsm8k_sample_size "${GSM8K_SAMPLE_SIZE}" \
+  --gsm8k_sample_seed "${gsm8k_sample_seed}" \
+  --gsm8k_max_new_tokens "${GSM8K_MAX_NEW_TOKENS}" \
   --ablation_lambda 1.0 \
-  --addition_lambda 0.2 \
+  --addition_lambda 0.0 \
   --retain_lambda 1.0 \
   --retain_loss \
-  --repetition_lambda 1.0 \
+  --repetition_lambda 0.0 \
   # --retain_lambda 0.0 \
 )
 
@@ -108,8 +159,28 @@ if [[ "${enable_mmlu_eval}" == "true" ]]; then
   cmd+=(--eval_mmlu)
 fi
 
+if [[ "${enable_ppl_eval}" == "true" ]]; then
+  cmd+=(--eval_ppl)
+fi
+
+if [[ "${enable_arc_easy_eval}" == "true" ]]; then
+  cmd+=(--eval_arc_easy)
+fi
+
+if [[ "${enable_arc_challenge_eval}" == "true" ]]; then
+  cmd+=(--eval_arc_challenge)
+fi
+
+if [[ "${enable_gsm8k_eval}" == "true" ]]; then
+  cmd+=(--eval_gsm8k)
+fi
+
 if [[ "${MMLU_STORE_PREDICTIONS}" == "true" ]]; then
   cmd+=(--mmlu_store_predictions)
+fi
+
+if [[ "${locality_store_predictions}" == "true" ]]; then
+  cmd+=(--locality_store_predictions)
 fi
 
 # Optional eval flags:
@@ -120,7 +191,8 @@ fi
 
 # ---- Optional eval flags ----
 # Add these if you want metrics after training:
-#   --eval_llamaguard --eval_mmlu
+#   --eval_llamaguard --eval_mmlu --eval_ppl
+#   --eval_arc_easy --eval_arc_challenge --eval_gsm8k
 #
 # LlamaGuard requires HF access if using a gated model:
 # export HF_TOKEN="..."

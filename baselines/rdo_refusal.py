@@ -38,6 +38,7 @@ from evaluate.evaluation_llamaguard import get_llamaguard_evaluator, unload_llam
 from evaluate.evaluation_qwen3guard import get_qwen3guard_evaluator, unload_qwen3guard_evaluator
 from evaluate.evaluation_wildguard import get_wildguard_evaluator, unload_wildguard_evaluator
 from evaluate import mmlu as mmlu_eval
+from evaluate import rdo_locality
 from baselines.additive_rotation_ops import (
     additive_subspace_rotation,
     dense_additive_rotation_matrix,
@@ -159,6 +160,10 @@ DEFAULT_CONFIG = {
     # Evaluation
     'eval_llamaguard': False,
     'eval_mmlu': False,
+    'eval_ppl': False,
+    'eval_arc_easy': False,
+    'eval_arc_challenge': False,
+    'eval_gsm8k': False,
     'eval_split': "val",              # {train,val,test} -> data/{splits}_splits/*_{eval_split}.json
     'llamaguard_data': "rdo",         # rdo -> split jsons, basic -> cached basic-refusal eval targets
     'eval_guard_backend': ['llamaguard'],  # Guard evaluator backends: llamaguard | qwen3guard | wildguard
@@ -176,6 +181,25 @@ DEFAULT_CONFIG = {
     'mmlu_sample_seed': 42,
     'mmlu_max_new_tokens': 8,
     'mmlu_store_predictions': False,
+
+    # Locality/capability evaluation
+    'ppl_dataset': rdo_locality.WIKITEXT_DATASET,
+    'ppl_subset': rdo_locality.WIKITEXT_SUBSET,
+    'ppl_split': "test",
+    'ppl_max_length': 512,
+    'ppl_stride': 256,
+    'ppl_max_windows': 100,
+    'arc_dataset': rdo_locality.ARC_DATASET,
+    'arc_split': "validation",
+    'arc_sample_size': 100,
+    'arc_sample_seed': 42,
+    'gsm8k_dataset': rdo_locality.GSM8K_DATASET,
+    'gsm8k_subset': "main",
+    'gsm8k_split': "test",
+    'gsm8k_sample_size': 100,
+    'gsm8k_sample_seed': 42,
+    'gsm8k_max_new_tokens': 512,
+    'locality_store_predictions': False,
 
     # Optimization parameters
     'num_opt_layers': 1,
@@ -341,6 +365,14 @@ def parse_args():
                     help='Evaluate initial and refined generations with LlamaGuard on harmful/harmless eval split')
     parser.add_argument('--eval_mmlu', action='store_true',
                     help='Evaluate initial and refined generations on MMLU (generate-mode by default)')
+    parser.add_argument('--eval_ppl', action='store_true',
+                    help='Evaluate initial and refined WikiText-2 perplexity')
+    parser.add_argument('--eval_arc_easy', action='store_true',
+                    help='Evaluate initial and refined ARC-Easy accuracy')
+    parser.add_argument('--eval_arc_challenge', action='store_true',
+                    help='Evaluate initial and refined ARC-Challenge accuracy')
+    parser.add_argument('--eval_gsm8k', action='store_true',
+                    help='Evaluate initial and refined GSM8K exact match')
     parser.add_argument(
         '--result_path',
         type=str,
@@ -380,6 +412,26 @@ def parse_args():
     parser.add_argument('--mmlu_max_new_tokens', type=int, default=DEFAULT_CONFIG['mmlu_max_new_tokens'])
     parser.add_argument('--mmlu_store_predictions', action='store_true',
                     help='Store full MMLU predictions in the output JSON (can be large)')
+
+    # Locality/capability benchmarks
+    parser.add_argument('--ppl_dataset', type=str, default=DEFAULT_CONFIG['ppl_dataset'])
+    parser.add_argument('--ppl_subset', type=str, default=DEFAULT_CONFIG['ppl_subset'])
+    parser.add_argument('--ppl_split', type=str, default=DEFAULT_CONFIG['ppl_split'])
+    parser.add_argument('--ppl_max_length', type=int, default=DEFAULT_CONFIG['ppl_max_length'])
+    parser.add_argument('--ppl_stride', type=int, default=DEFAULT_CONFIG['ppl_stride'])
+    parser.add_argument('--ppl_max_windows', type=int, default=DEFAULT_CONFIG['ppl_max_windows'])
+    parser.add_argument('--arc_dataset', type=str, default=DEFAULT_CONFIG['arc_dataset'])
+    parser.add_argument('--arc_split', type=str, default=DEFAULT_CONFIG['arc_split'])
+    parser.add_argument('--arc_sample_size', type=int, default=DEFAULT_CONFIG['arc_sample_size'])
+    parser.add_argument('--arc_sample_seed', type=int, default=DEFAULT_CONFIG['arc_sample_seed'])
+    parser.add_argument('--gsm8k_dataset', type=str, default=DEFAULT_CONFIG['gsm8k_dataset'])
+    parser.add_argument('--gsm8k_subset', type=str, default=DEFAULT_CONFIG['gsm8k_subset'])
+    parser.add_argument('--gsm8k_split', type=str, default=DEFAULT_CONFIG['gsm8k_split'])
+    parser.add_argument('--gsm8k_sample_size', type=int, default=DEFAULT_CONFIG['gsm8k_sample_size'])
+    parser.add_argument('--gsm8k_sample_seed', type=int, default=DEFAULT_CONFIG['gsm8k_sample_seed'])
+    parser.add_argument('--gsm8k_max_new_tokens', type=int, default=DEFAULT_CONFIG['gsm8k_max_new_tokens'])
+    parser.add_argument('--locality_store_predictions', action='store_true',
+                    help='Store full ARC/GSM8K predictions in eval JSON')
     
     return parser.parse_args()
 
@@ -3180,7 +3232,16 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
         finally:
             tb_writer.close()
         print(f"TensorBoard log dir: {tb_run_dir}")
-    if args.eval_llamaguard or args.eval_mmlu:
+    if any(
+        (
+            args.eval_llamaguard,
+            args.eval_mmlu,
+            args.eval_ppl,
+            args.eval_arc_easy,
+            args.eval_arc_challenge,
+            args.eval_gsm8k,
+        )
+    ):
         refined = _extract_refined_artifact(results, args.direction_mode)
         mmlu_cfg = {
             "enabled": True,
@@ -3195,7 +3256,42 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
             "max_new_tokens": args.mmlu_max_new_tokens,
             "store_predictions": bool(args.mmlu_store_predictions),
         }
-        _evaluate_llamaguard_and_mmlu(
+        locality_cfg = {
+            "ppl": {
+                "enabled": bool(args.eval_ppl),
+                "dataset": args.ppl_dataset,
+                "subset": args.ppl_subset,
+                "split": args.ppl_split,
+                "max_length": args.ppl_max_length,
+                "stride": args.ppl_stride,
+                "max_windows": args.ppl_max_windows,
+            },
+            "arc_easy": {
+                "enabled": bool(args.eval_arc_easy),
+                "dataset": args.arc_dataset,
+                "split": args.arc_split,
+                "sample_size": args.arc_sample_size,
+                "sample_seed": args.arc_sample_seed,
+            },
+            "arc_challenge": {
+                "enabled": bool(args.eval_arc_challenge),
+                "dataset": args.arc_dataset,
+                "split": args.arc_split,
+                "sample_size": args.arc_sample_size,
+                "sample_seed": args.arc_sample_seed,
+            },
+            "gsm8k": {
+                "enabled": bool(args.eval_gsm8k),
+                "dataset": args.gsm8k_dataset,
+                "subset": args.gsm8k_subset,
+                "split": args.gsm8k_split,
+                "sample_size": args.gsm8k_sample_size,
+                "sample_seed": args.gsm8k_sample_seed,
+                "max_new_tokens": args.gsm8k_max_new_tokens,
+            },
+            "store_predictions": bool(args.locality_store_predictions),
+        }
+        _evaluate_end_metrics(
             tb_run_dir=tb_run_dir,
             model=model,
             refined_artifact=refined,
@@ -3208,6 +3304,7 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
             eval_max_new_tokens=args.eval_max_new_tokens,
             eval_batch_size=args.eval_batch_size,
             mmlu_cfg=mmlu_cfg,
+            locality_cfg=locality_cfg,
         )
     return results
 
@@ -3369,6 +3466,10 @@ def _eval_payload_to_major_metrics_rows(payload: dict) -> list[dict]:
                 "value": metric_val,
             }
         )
+
+    # Locality/capability benchmark metrics
+    locality_metrics = payload.get("locality_metrics") or {}
+    rows.extend(rdo_locality.metrics_to_csv_rows(locality_metrics))
 
     return rows
 
@@ -4153,7 +4254,7 @@ def _save_generated_responses(
     print(f"Saved generated responses to {responses_dir}")
 
 
-def _evaluate_llamaguard_and_mmlu(
+def _evaluate_end_metrics(
     *,
     tb_run_dir: str,
     model: LanguageModel,
@@ -4167,10 +4268,11 @@ def _evaluate_llamaguard_and_mmlu(
     eval_max_new_tokens: int,
     eval_batch_size: int,
     mmlu_cfg: dict,
+    locality_cfg: dict,
 ):
     """
-    Runs LlamaGuard on harmful+harmless {eval_split} and MMLU on initial/refined.
-    Saves JSON artifacts under tb_run_dir and logs a few scalars to TensorBoard.
+    Run enabled guard, MMLU, and locality benchmarks on initial/refined models.
+    Save JSON/CSV artifacts under tb_run_dir and log scalars to TensorBoard.
     """
     eval_writer = SummaryWriter(log_dir=tb_run_dir)
     try:
@@ -4289,6 +4391,70 @@ def _evaluate_llamaguard_and_mmlu(
                 refined_rotation_model(direction=None)
 
             return step_fn
+
+        def _forward_logits(input_ids: list[int], step_fn=None) -> torch.Tensor:
+            """Run one teacher-forced sequence and return CPU float logits."""
+            ids = torch.tensor([input_ids], dtype=torch.long, device=_runtime_device())
+            inputs = {
+                "input_ids": ids,
+                "attention_mask": torch.ones_like(ids),
+            }
+            with torch.no_grad():
+                with model.trace() as tracer:
+                    with tracer.invoke(inputs):
+                        if step_fn is not None:
+                            step_fn(model)
+                        saved_logits = model.lm_head.output.save()
+            return saved_logits.value.detach().to(dtype=torch.float32, device="cpu")
+
+        def _score_ppl_windows(windows: list[dict], step_fn=None) -> list[dict]:
+            rows = []
+            for window in windows:
+                input_ids = window["input_ids"]
+                target_start = int(window["target_start"])
+                logits = _forward_logits(input_ids, step_fn=step_fn)
+                target_ids = torch.tensor(input_ids[target_start:], dtype=torch.long)
+                target_logits = logits[0, target_start - 1 : len(input_ids) - 1]
+                nll_sum = torch.nn.functional.cross_entropy(
+                    target_logits,
+                    target_ids,
+                    reduction="sum",
+                )
+                rows.append(
+                    {
+                        "begin": window["begin"],
+                        "end": window["end"],
+                        "n_tokens": int(target_ids.numel()),
+                        "nll_sum": float(nll_sum.item()),
+                    }
+                )
+            return rows
+
+        def _score_completion(prompt: str, completion: str, step_fn=None) -> float:
+            prompt_ids = model.tokenizer(
+                prompt,
+                add_special_tokens=False,
+                return_token_type_ids=False,
+            )["input_ids"]
+            full_ids = model.tokenizer(
+                prompt + completion,
+                add_special_tokens=False,
+                return_token_type_ids=False,
+            )["input_ids"]
+            if full_ids and isinstance(full_ids[0], list):
+                full_ids = full_ids[0]
+            if prompt_ids and isinstance(prompt_ids[0], list):
+                prompt_ids = prompt_ids[0]
+            prompt_len = len(prompt_ids)
+            if len(full_ids) <= prompt_len:
+                return float("-inf")
+            logits = _forward_logits(full_ids, step_fn=step_fn)
+            candidate_ids = torch.tensor(full_ids[prompt_len:], dtype=torch.long)
+            candidate_logits = logits[0, prompt_len - 1 : len(full_ids) - 1]
+            log_probs = torch.nn.functional.log_softmax(candidate_logits, dim=-1)
+            return float(
+                log_probs.gather(1, candidate_ids.unsqueeze(1)).sum().item()
+            )
 
         # --- LlamaGuard ---
         if args.eval_llamaguard:
@@ -4704,6 +4870,175 @@ def _evaluate_llamaguard_and_mmlu(
                     metric_val = delta_metrics.get(metric_name)
                     if metric_val is not None:
                         eval_writer.add_scalar(f"eval/mmlu/{metric_name}", metric_val, 0)
+
+        # --- Locality/capability benchmarks ---
+        locality_metrics: dict[str, dict] = {}
+        locality_errors: dict[str, dict] = {}
+        refined_step_fn = (
+            _make_refined_step_fn(refined_artifact, guard_mode="attack")
+            if refined_artifact is not None
+            else None
+        )
+
+        def _record_locality_error(benchmark: str, exc: Exception) -> None:
+            locality_errors[benchmark] = {
+                "type": type(exc).__name__,
+                "message": str(exc),
+                "traceback": traceback.format_exc(),
+            }
+            print(f"[eval/{benchmark}] failed: {type(exc).__name__}: {exc}")
+
+        ppl_config = locality_cfg.get("ppl") or {}
+        if ppl_config.get("enabled"):
+            try:
+                config_snapshot = {key: value for key, value in ppl_config.items() if key != "enabled"}
+                windows = rdo_locality.prepare_wikitext_windows(
+                    model.tokenizer,
+                    **config_snapshot,
+                )
+                initial_rows = _score_ppl_windows(windows)
+                refined_rows = (
+                    _score_ppl_windows(windows, step_fn=refined_step_fn)
+                    if refined_step_fn is not None
+                    else None
+                )
+                initial_summary = rdo_locality.summarize_token_losses(initial_rows)
+                refined_summary = (
+                    rdo_locality.summarize_token_losses(refined_rows)
+                    if refined_rows is not None
+                    else None
+                )
+                block = rdo_locality.build_metric_block(
+                    config=config_snapshot,
+                    metric_name="perplexity",
+                    initial=initial_summary,
+                    refined=refined_summary,
+                )
+                locality_metrics["ppl"] = block
+                eval_writer.add_scalar("eval/locality/ppl/initial_perplexity", initial_summary["perplexity"], 0)
+                if refined_summary is not None:
+                    eval_writer.add_scalar("eval/locality/ppl/refined_perplexity", refined_summary["perplexity"], 0)
+                    eval_writer.add_scalar("eval/locality/ppl/delta_perplexity", block["delta"], 0)
+            except Exception as exc:
+                _record_locality_error("ppl", exc)
+
+        for benchmark in ("arc_easy", "arc_challenge"):
+            arc_config = locality_cfg.get(benchmark) or {}
+            if not arc_config.get("enabled"):
+                continue
+            try:
+                config_snapshot = {key: value for key, value in arc_config.items() if key != "enabled"}
+                entries = rdo_locality.prepare_arc_entries(benchmark, **config_snapshot)
+                initial_summary, initial_predictions = rdo_locality.evaluate_arc_entries(
+                    entries,
+                    lambda prompt, completion: _score_completion(prompt, completion),
+                )
+                refined_summary = None
+                refined_predictions = None
+                if refined_step_fn is not None:
+                    refined_summary, refined_predictions = rdo_locality.evaluate_arc_entries(
+                        entries,
+                        lambda prompt, completion: _score_completion(
+                            prompt,
+                            completion,
+                            step_fn=refined_step_fn,
+                        ),
+                    )
+                block = rdo_locality.build_metric_block(
+                    config=config_snapshot,
+                    metric_name="accuracy",
+                    initial=initial_summary,
+                    refined=refined_summary,
+                    initial_predictions=initial_predictions,
+                    refined_predictions=refined_predictions,
+                    store_predictions=bool(locality_cfg.get("store_predictions")),
+                )
+                locality_metrics[benchmark] = block
+                eval_writer.add_scalar(
+                    f"eval/locality/{benchmark}/initial_accuracy",
+                    initial_summary["accuracy"],
+                    0,
+                )
+                if refined_summary is not None:
+                    eval_writer.add_scalar(
+                        f"eval/locality/{benchmark}/refined_accuracy",
+                        refined_summary["accuracy"],
+                        0,
+                    )
+                    eval_writer.add_scalar(
+                        f"eval/locality/{benchmark}/delta_accuracy",
+                        block["delta"],
+                        0,
+                    )
+            except Exception as exc:
+                _record_locality_error(benchmark, exc)
+
+        gsm8k_config = locality_cfg.get("gsm8k") or {}
+        if gsm8k_config.get("enabled"):
+            try:
+                config_snapshot = {key: value for key, value in gsm8k_config.items() if key != "enabled"}
+                max_new_tokens = int(config_snapshot.pop("max_new_tokens"))
+                entries = rdo_locality.prepare_gsm8k_entries(**config_snapshot)
+                prompts = apply_chat_template(model.tokenizer, [entry["prompt"] for entry in entries])
+                initial_responses = _generate_nnsight(
+                    model,
+                    prompts,
+                    max_new_tokens=max_new_tokens,
+                    batch_size=eval_batch_size,
+                )
+                initial_summary, initial_predictions = rdo_locality.summarize_gsm8k_responses(
+                    entries,
+                    initial_responses,
+                )
+                refined_summary = None
+                refined_predictions = None
+                if refined_step_fn is not None:
+                    refined_responses = _generate_nnsight(
+                        model,
+                        prompts,
+                        max_new_tokens=max_new_tokens,
+                        batch_size=eval_batch_size,
+                        intervene_step_fn=refined_step_fn,
+                        intervene_every_step=True,
+                    )
+                    refined_summary, refined_predictions = rdo_locality.summarize_gsm8k_responses(
+                        entries,
+                        refined_responses,
+                    )
+                block_config = {**config_snapshot, "max_new_tokens": max_new_tokens}
+                block = rdo_locality.build_metric_block(
+                    config=block_config,
+                    metric_name="exact_match",
+                    initial=initial_summary,
+                    refined=refined_summary,
+                    initial_predictions=initial_predictions,
+                    refined_predictions=refined_predictions,
+                    store_predictions=bool(locality_cfg.get("store_predictions")),
+                )
+                locality_metrics["gsm8k"] = block
+                eval_writer.add_scalar(
+                    "eval/locality/gsm8k/initial_exact_match",
+                    initial_summary["exact_match"],
+                    0,
+                )
+                if refined_summary is not None:
+                    eval_writer.add_scalar(
+                        "eval/locality/gsm8k/refined_exact_match",
+                        refined_summary["exact_match"],
+                        0,
+                    )
+                    eval_writer.add_scalar(
+                        "eval/locality/gsm8k/delta_exact_match",
+                        block["delta"],
+                        0,
+                    )
+            except Exception as exc:
+                _record_locality_error("gsm8k", exc)
+
+        if locality_metrics:
+            payload["locality_metrics"] = locality_metrics
+        if locality_errors:
+            payload["locality_errors"] = locality_errors
 
         out_prefix = os.path.join(tb_run_dir, f"eval_metrics_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         out_json_path = f"{out_prefix}.json"
