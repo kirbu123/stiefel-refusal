@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate r-ablation tables and plots from RDO TensorBoard run directories."""
+"""Generate k_proj ablation tables and plots from RDO TensorBoard runs."""
 
 from __future__ import annotations
 
@@ -52,8 +52,8 @@ PHASE_COLORS = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Plot guard, MMLU, PPL, ARC, and GSM8K metrics against "
-            "r = numerator / proj_reduce_ratio."
+            "Plot guard, MMLU, PPL, ARC, and GSM8K metrics against the "
+            "direct low-rank projection width k_proj."
         )
     )
     parser.add_argument(
@@ -64,14 +64,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=PROJECT_ROOT / "results" / "rdo_refusal" / "analysis" / "ablation_study_r",
+        default=PROJECT_ROOT / "results" / "rdo_refusal" / "analysis" / "ablation_study_k_proj",
         help="Output directory for tables, plots, and diagnostics",
     )
     parser.add_argument(
-        "--r-numerator",
+        "--legacy-projection-dim",
         type=float,
         default=3500.0,
-        help="Numerator in r = numerator / proj_reduce_ratio (default: 3500)",
+        help=(
+            "Projection dimension used only to derive k_proj for legacy runs "
+            "that store proj_reduce_ratio (default: 3500)"
+        ),
     )
     parser.add_argument("--dpi", type=int, default=300, help="PNG resolution")
     return parser.parse_args()
@@ -88,7 +91,7 @@ def _json_safe(value: Any) -> Any:
 
 
 def _family_payload(hparams: dict[str, Any]) -> dict[str, Any]:
-    excluded = set(VOLATILE_PRR_FAMILY_KEYS)
+    excluded = set(VOLATILE_PRR_FAMILY_KEYS) | {"k_proj"}
     return {
         key: _json_safe(value)
         for key, value in sorted(hparams.items())
@@ -135,7 +138,7 @@ def _paired_json_payload(eval_path: Path) -> dict[str, Any]:
 
 def load_experiments(
     experiment_dir: Path,
-    r_numerator: float,
+    legacy_projection_dim: float = 3500.0,
 ) -> tuple[pd.DataFrame, dict[str, dict[str, Any]], dict[str, Any]]:
     if not experiment_dir.is_dir():
         raise FileNotFoundError(f"Experiment directory does not exist: {experiment_dir}")
@@ -154,9 +157,20 @@ def load_experiments(
     for run_dir in run_dirs:
         try:
             hparams = json.loads((run_dir / "hparams.json").read_text(encoding="utf-8"))
-            prr = float(hparams.get("proj_reduce_ratio"))
-            if not math.isfinite(prr) or prr <= 0:
-                raise ValueError("missing or invalid proj_reduce_ratio")
+            k_proj_source = "k_proj"
+            legacy_prr = None
+            if hparams.get("k_proj") is not None:
+                k_proj = float(hparams["k_proj"])
+            elif hparams.get("proj_reduce_ratio") is not None:
+                legacy_prr = float(hparams["proj_reduce_ratio"])
+                if not math.isfinite(legacy_prr) or legacy_prr <= 0:
+                    raise ValueError("invalid legacy proj_reduce_ratio")
+                k_proj = legacy_projection_dim / legacy_prr
+                k_proj_source = "legacy_proj_reduce_ratio"
+            else:
+                raise ValueError("missing k_proj")
+            if not math.isfinite(k_proj) or k_proj <= 0:
+                raise ValueError("invalid k_proj")
             eval_path, eval_format = _choose_latest_eval_file(run_dir)
             if eval_path is None or eval_format is None:
                 raise FileNotFoundError("no eval_metrics file")
@@ -168,8 +182,6 @@ def load_experiments(
             payload = _family_payload(hparams)
             family_id = _family_id(payload)
             families.setdefault(family_id, payload)
-            r_value = r_numerator / prr
-
             kept = 0
             for row in metric_rows:
                 if not _is_plotted_metric(row):
@@ -185,8 +197,9 @@ def load_experiments(
                         "family_id": family_id,
                         "run_dir": str(run_dir),
                         "eval_file": str(eval_path),
-                        "proj_reduce_ratio": prr,
-                        "r": r_value,
+                        "k_proj": k_proj,
+                        "k_proj_source": k_proj_source,
+                        "legacy_proj_reduce_ratio": legacy_prr,
                         "benchmark": _clean_field(row.get("benchmark", "")),
                         "backend": _clean_field(row.get("backend", "")),
                         "group": _clean_field(row.get("group", "")),
@@ -226,8 +239,7 @@ def aggregate_metrics(records: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     group_columns = [
         "family_id",
-        "proj_reduce_ratio",
-        "r",
+        "k_proj",
         "benchmark",
         "backend",
         "group",
@@ -240,7 +252,9 @@ def aggregate_metrics(records: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
     aggregated["std"] = aggregated["std"].fillna(0.0)
-    return aggregated.sort_values(["family_id", "benchmark", "backend", "group", "metric", "r", "phase"])
+    return aggregated.sort_values(
+        ["family_id", "benchmark", "backend", "group", "metric", "k_proj", "phase"]
+    )
 
 
 def _series_title(benchmark: str, backend: str, group: str, metric: str) -> str:
@@ -266,7 +280,6 @@ def plot_family(
     family_dir: Path,
     *,
     dpi: int,
-    r_numerator: float,
 ) -> list[str]:
     plot_dir = family_dir / "plots"
     table_dir = family_dir / "tables"
@@ -286,8 +299,8 @@ def plot_family(
 
         fig, axis = plt.subplots(figsize=(7.2, 4.6))
         for phase in available_phases:
-            phase_df = series_df[series_df["phase"] == phase].sort_values("r")
-            x_values = phase_df["r"].to_numpy(dtype=float)
+            phase_df = series_df[series_df["phase"] == phase].sort_values("k_proj")
+            x_values = phase_df["k_proj"].to_numpy(dtype=float)
             means = phase_df["mean"].to_numpy(dtype=float)
             stds = phase_df["std"].to_numpy(dtype=float)
             axis.plot(
@@ -308,9 +321,7 @@ def plot_family(
                     linewidth=0,
                 )
 
-        axis.set_xlabel(
-            rf"$r = {r_numerator:g} / \mathrm{{proj\_reduce\_ratio}}$"
-        )
+        axis.set_xlabel(r"Projection width $k_{\mathrm{proj}}$")
         axis.set_ylabel(_series_ylabel(benchmark, metric))
         axis.set_title(_series_title(benchmark, backend, group, metric))
         axis.grid(True, alpha=0.25)
@@ -343,7 +354,7 @@ def main() -> int:
 
     records, families, diagnostics = load_experiments(
         args.experiment_dir.resolve(),
-        args.r_numerator,
+        args.legacy_projection_dim,
     )
     if records.empty:
         raise RuntimeError("No supported metrics were found in the experiment directory")
@@ -365,15 +376,13 @@ def main() -> int:
             family_df,
             family_dir,
             dpi=args.dpi,
-            r_numerator=args.r_numerator,
         )
         generated_plots.extend(family_plots)
         family_summaries.append(
             {
                 "family_id": str(family_id),
-                "r_values": sorted(float(value) for value in family_df["r"].unique()),
-                "proj_reduce_ratios": sorted(
-                    float(value) for value in family_df["proj_reduce_ratio"].unique()
+                "k_proj_values": sorted(
+                    float(value) for value in family_df["k_proj"].unique()
                 ),
                 "plots": len(family_plots),
             }
@@ -387,7 +396,10 @@ def main() -> int:
         encoding="utf-8",
     )
     summary = {
-        "r_formula": f"r = {args.r_numerator:g} / proj_reduce_ratio",
+        "x_parameter": "k_proj",
+        "legacy_conversion": (
+            f"k_proj = {args.legacy_projection_dim:g} / proj_reduce_ratio"
+        ),
         "families": family_summaries,
         "generated_plot_files": generated_plots,
     }

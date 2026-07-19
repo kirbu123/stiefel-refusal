@@ -142,7 +142,7 @@ DEFAULT_CONFIG = {
     'optimize_basis': True,           # Whether to optimize the basis vectors directly
     'init_mode': "random", # "diag_permutation", "ab_orthogonal"  # Method for initializing the rotation matrices
     'orth_method': "svd",  # Orthogonalization method for Stiefel modes: "qr" or "svd"
-    'proj_reduce_ratio': 10,  # Reduction ratio for projected/additive low-rank factors (k = dim // ratio)
+    'k_proj': 35,  # Direct projected/additive low-rank subspace width
     'retain_loss': False, # Whether to use KL divergence for the retain loss
 
     # Loss weights
@@ -316,10 +316,10 @@ def parse_args():
                     choices=['qr', 'svd'],
                     help='Orthogonalization method for Stiefel modes')
     parser.add_argument(
-        '--proj_reduce_ratio',
+        '--k_proj',
         type=int,
-        default=DEFAULT_CONFIG["proj_reduce_ratio"],
-        help='(projected/additive modes) Low-rank reduction ratio, where k = hidden_size // proj_reduce_ratio',
+        default=DEFAULT_CONFIG["k_proj"],
+        help='(projected/additive modes) Direct low-rank projection width (1 <= k_proj <= hidden_size)',
     )
     parser.add_argument(
         '--clip_upper',
@@ -442,15 +442,15 @@ MODEL_PATH = args.model
 
 
 def _tb_dir_frz_suffix(train_kwargs: dict | None = None) -> str:
-    """Short TensorBoard dirname segment: nol=num_opt_layers, prr=proj_reduce_ratio, im=init_mode, om=orth_method."""
+    """Short TensorBoard dirname segment: nol=num_opt_layers, kp=k_proj, im=init_mode, om=orth_method."""
     k = train_kwargs or {}
     nol = int(k.get("num_opt_layers", getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1))))
-    prr = int(k.get("proj_reduce_ratio", getattr(args, "proj_reduce_ratio", DEFAULT_CONFIG.get("proj_reduce_ratio", 10))))
+    k_proj = int(k.get("k_proj", getattr(args, "k_proj", DEFAULT_CONFIG.get("k_proj", 35))))
     im = k.get("init_mode", getattr(args, "init_mode", DEFAULT_CONFIG.get("init_mode", "random")))
     om = k.get("orth_method", getattr(args, "orth_method", DEFAULT_CONFIG.get("orth_method", "svd")))
     im = str(im).replace(os.sep, "_").replace("/", "_").replace(" ", "_")
     om = str(om).replace(os.sep, "_").replace("/", "_").replace(" ", "_")
-    return f"nol={nol}_prr={prr}_im={im}_om={om}"
+    return f"nol={nol}_kp={k_proj}_im={im}_om={om}"
 
 
 # Apply configuration values
@@ -1283,7 +1283,7 @@ class RefusalDirectionActivationAdditiveRotation(RefusalDirectionActivationRotat
         init_vectors: torch.Tensor | None = None,
         clip_upper: float = 2.0,
         clip_lower: float = 0.0,
-        proj_reduce_ratio: int = 10,
+        k_proj: int = 35,
     ) -> None:
         super().__init__(
             module,
@@ -1292,15 +1292,10 @@ class RefusalDirectionActivationAdditiveRotation(RefusalDirectionActivationRotat
             clip_upper=clip_upper,
             clip_lower=clip_lower,
         )
-        ratio = int(proj_reduce_ratio)
-        if ratio < 1:
-            raise ValueError(f"proj_reduce_ratio must be >= 1, got {proj_reduce_ratio}")
-        self.k = dim // ratio
-        if self.k < 1:
-            raise ValueError(
-                f"dim // proj_reduce_ratio must be >= 1; dim={dim}, ratio={ratio}"
-            )
-        self.proj_reduce_ratio = ratio
+        self.k = int(k_proj)
+        if self.k < 1 or self.k > dim:
+            raise ValueError(f"k_proj must be in [1, {dim}], got {k_proj}")
+        self.k_proj = self.k
 
         n_layers = len(self.module.layers)
         dev = _runtime_device()
@@ -1740,7 +1735,7 @@ class RefusalStiefelRotation(nn.Module):
 class RefusalStiefelProjRotation(RefusalStiefelRotation):
     """
     Low-rank Stiefel-style rotation: per layer M = QA @ QB with QA (dim × k),
-    QB (k × dim), k = dim // proj_reduce_ratio. Each factor is projected with
+    QB (k × dim), where k is configured directly by ``k_proj``. Each factor is projected with
     ``OrthogonalProjection`` in the forward (same autograd rule as RefusalStiefelRotation).
 
     Reuses ``RefusalStiefelRotation`` for ``fn_vectors``, ``__call__``, ``add``,
@@ -1759,7 +1754,7 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         init_vectors: torch.Tensor | None = None,
         init_mode: str = "diag_permutation",
         orth_method: str = "svd",
-        proj_reduce_ratio: int = 10,
+        k_proj: int = 35,
         num_opt_layers: int = 1,
         best_layer: int = None,
     ) -> None:
@@ -1786,13 +1781,10 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
             raise ValueError(f"Invalid orth_method: {orth_method}")
         self.orth_method = orth_method
 
-        r = int(proj_reduce_ratio)
-        if r < 1:
-            raise ValueError(f"proj_reduce_ratio must be >= 1, got {proj_reduce_ratio}")
-        k = dim // r
-        if k < 1:
-            raise ValueError(f"dim // proj_reduce_ratio must be >= 1; dim={dim}, ratio={r}")
-        self.proj_reduce_ratio = r
+        k = int(k_proj)
+        if k < 1 or k > dim:
+            raise ValueError(f"k_proj must be in [1, {dim}], got {k_proj}")
+        self.k_proj = k
         self.k = k
 
         if init_mode == "random":
@@ -2555,7 +2547,7 @@ def refusal_cone_optimization(model, train_dataset,
                               n_lr_reduce=DEFAULT_CONFIG['n_lr_reduce'], 
                               orthogonal_vectors=[],
                               num_opt_layers: int = DEFAULT_CONFIG.get('num_opt_layers', 1),
-                              proj_reduce_ratio: int = DEFAULT_CONFIG.get('proj_reduce_ratio', 10),
+                              k_proj: int = DEFAULT_CONFIG.get('k_proj', 35),
                               tb_writer=None,
                               tb_checkpoint_dir=None,
                               direction_mode=DEFAULT_CONFIG['direction_mode'],
@@ -2589,7 +2581,7 @@ def refusal_cone_optimization(model, train_dataset,
             init_vectors=init_vectors,
             clip_upper=getattr(args, "clip_upper", 2.0),
             clip_lower=getattr(args, "clip_lower", 0.0),
-            proj_reduce_ratio=proj_reduce_ratio,
+            k_proj=k_proj,
         )
     elif direction_mode == "shtiefel_rot":
         operation = RefusalStiefelRotation(
@@ -2628,7 +2620,7 @@ def refusal_cone_optimization(model, train_dataset,
             init_vectors=init_vectors,
             init_mode=args.init_mode,
             orth_method=args.orth_method,
-            proj_reduce_ratio=proj_reduce_ratio,
+            k_proj=k_proj,
             num_opt_layers=num_opt_layers,
             best_layer=best_layer,
         )
@@ -2639,7 +2631,7 @@ def refusal_cone_optimization(model, train_dataset,
             init_vectors=init_vectors,
             init_mode=args.init_mode,
             orth_method=args.orth_method,
-            proj_reduce_ratio=proj_reduce_ratio,
+            k_proj=k_proj,
             num_opt_layers=num_opt_layers,
             best_layer=best_layer,
         )
@@ -3157,7 +3149,7 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
         "direction_mode": args.direction_mode,
         "optimizer_name": args.optimizer,
         "num_opt_layers": getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
-        "proj_reduce_ratio": getattr(args, "proj_reduce_ratio", DEFAULT_CONFIG.get("proj_reduce_ratio", 10)),
+        "k_proj": getattr(args, "k_proj", DEFAULT_CONFIG.get("k_proj", 35)),
         "log_steps": getattr(args, "log_steps", DEFAULT_CONFIG["log_steps"]),
         "train_guard_val_gap": getattr(args, "train_guard_val_gap", DEFAULT_CONFIG["train_guard_val_gap"]),
         "repetition_lambda": getattr(args, "repetition_lambda", DEFAULT_CONFIG["repetition_lambda"]),
@@ -4314,10 +4306,10 @@ def _evaluate_end_metrics(
                     init_vectors=[],
                     clip_upper=getattr(args, "clip_upper", 2.0),
                     clip_lower=getattr(args, "clip_lower", 0.0),
-                    proj_reduce_ratio=getattr(
+                    k_proj=getattr(
                         args,
-                        "proj_reduce_ratio",
-                        DEFAULT_CONFIG.get("proj_reduce_ratio", 10),
+                        "k_proj",
+                        DEFAULT_CONFIG.get("k_proj", 35),
                     ),
                 )
             if direction_mode == "shtiefel_rot":
@@ -4357,7 +4349,7 @@ def _evaluate_end_metrics(
                     init_vectors=[],
                     init_mode=args.init_mode,
                     orth_method=args.orth_method,
-                    proj_reduce_ratio=getattr(args, "proj_reduce_ratio", DEFAULT_CONFIG.get("proj_reduce_ratio", 10)),
+                    k_proj=getattr(args, "k_proj", DEFAULT_CONFIG.get("k_proj", 35)),
                     num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
                     best_layer=best_layer,
                 )
@@ -4368,10 +4360,10 @@ def _evaluate_end_metrics(
                     init_vectors=[],
                     init_mode=args.init_mode,
                     orth_method=args.orth_method,
-                    proj_reduce_ratio=getattr(
+                    k_proj=getattr(
                         args,
-                        "proj_reduce_ratio",
-                        DEFAULT_CONFIG.get("proj_reduce_ratio", 10),
+                        "k_proj",
+                        DEFAULT_CONFIG.get("k_proj", 35),
                     ),
                     num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
                     best_layer=best_layer,
@@ -5183,8 +5175,8 @@ def train_refusal_cone(group_name, run_name, init_vectors, **kwargs):
         getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
     )
     train_kwargs.setdefault(
-        "proj_reduce_ratio",
-        getattr(args, "proj_reduce_ratio", DEFAULT_CONFIG.get("proj_reduce_ratio", 10)),
+        "k_proj",
+        getattr(args, "k_proj", DEFAULT_CONFIG.get("k_proj", 35)),
     )
     train_kwargs.setdefault(
         "log_steps",

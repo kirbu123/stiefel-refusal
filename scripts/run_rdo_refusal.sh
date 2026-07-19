@@ -17,7 +17,7 @@ result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave 
 log_steps=0
 init_mode="diag_permutation" # "random", "diag_permutation", or "ab_orthogonal"
 orth_method="svd" # "qr" or "svd"
-proj_reduce_ratio=100 # used by projected/additive modes (k = hidden_size / ratio)
+k_proj="${K_PROJ:-35}" # direct low-rank projection width; override with K_PROJ
 
 # LlamaGuard eval config
 eval_max_new_tokens=256 # inportant param for llama guard eval
@@ -70,7 +70,7 @@ gsm8k_max_new_tokens=512
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=5
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-5}"
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -106,7 +106,7 @@ cmd=(python -m baselines.rdo_refusal \
   --optimizer "${optimizer}" \
   --eval_llamaguard \
   --num_opt_layers "${num_opt_layers}" \
-  --proj_reduce_ratio "${proj_reduce_ratio}" \
+  --k_proj "${k_proj}" \
   --init_mode "${init_mode}" \
   --orth_method "${orth_method}" \
   --log_steps "${log_steps}" \

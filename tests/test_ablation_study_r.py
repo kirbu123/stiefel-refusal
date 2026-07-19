@@ -25,7 +25,7 @@ class AblationStudyRTests(unittest.TestCase):
                     "model_id": "model",
                     "direction_mode": "activation_additive_rot",
                     "num_opt_layers": 1,
-                    "proj_reduce_ratio": 35,
+                    "k_proj": 100,
                     "init_mode": "diag_permutation",
                     "orth_method": "svd",
                 }
@@ -53,12 +53,12 @@ class AblationStudyRTests(unittest.TestCase):
             root = Path(tmp_dir)
             self._write_run(root, "run_a", 0.6)
             self._write_run(root, "run_b", 0.8)
-            records, families, diagnostics = ablation.load_experiments(root, 3500.0)
+            records, families, diagnostics = ablation.load_experiments(root)
             aggregated = ablation.aggregate_metrics(records)
 
         self.assertEqual(diagnostics["runs_loaded"], 2)
         self.assertEqual(len(families), 1)
-        self.assertEqual(set(records["r"]), {100.0})
+        self.assertEqual(set(records["k_proj"]), {100.0})
         attack = aggregated[
             (aggregated["benchmark"] == "guard")
             & (aggregated["phase"] == "refined_attack")
