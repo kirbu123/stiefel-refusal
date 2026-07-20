@@ -42,6 +42,8 @@ from evaluate import rdo_locality
 from baselines.additive_rotation_ops import (
     additive_subspace_rotation,
     dense_additive_rotation_matrix,
+    infer_non_identity_layers,
+    select_activation_additive_layers,
 )
 
 dotenv.load_dotenv(override=True)
@@ -288,8 +290,10 @@ def parse_args():
         type=int,
         default=DEFAULT_CONFIG['num_opt_layers'],
         help=(
-            '(shtiefel_rot, shtiefel_proj_rot, shtiefel_additive_rot, angular_steering, householder_pseudo_rotation) Number of middle layers to optimize '
-            '(layers 0 and last are always excluded from optimized indices).'
+            'Number of layers to optimize for layer-selective modes. For activation_additive_rot '
+            'and shtiefel_additive_rot, nol=0 selects all layers and is logged as the model layer '
+            'count; positive values select that many middle layers. '
+            'Other supported modes use standard middle-layer selection.'
         ),
     )
 
@@ -436,8 +440,15 @@ def parse_args():
     return parser.parse_args()
 
 args = parse_args()
-if int(getattr(args, "num_opt_layers", 1)) <= 0:
-    raise AssertionError(f"--num_opt_layers must be >= 1, got {args.num_opt_layers}")
+_requested_num_opt_layers = int(getattr(args, "num_opt_layers", 1))
+if _requested_num_opt_layers < 0:
+    raise AssertionError(f"--num_opt_layers must be >= 0, got {args.num_opt_layers}")
+_all_layer_nol_modes = {"activation_additive_rot", "shtiefel_additive_rot"}
+if _requested_num_opt_layers == 0 and args.direction_mode not in _all_layer_nol_modes:
+    raise AssertionError(
+        "--num_opt_layers=0 (all layers) is supported only for "
+        "direction_mode=activation_additive_rot or shtiefel_additive_rot"
+    )
 MODEL_PATH = args.model
 
 
@@ -470,6 +481,15 @@ else:
 
 model = LanguageModel(MODEL_PATH, cache_dir=os.getenv("HUGGINGFACE_CACHE_DIR"), device_map='auto', torch_dtype=dtype)
 model.requires_grad_(False)
+args.optimize_all_layers = (
+    args.direction_mode in _all_layer_nol_modes and _requested_num_opt_layers == 0
+)
+if args.optimize_all_layers:
+    args.num_opt_layers = len(model.model.layers)
+    print(
+        f"[{args.direction_mode}] --num_opt_layers=0 selects all layers; "
+        f"logging effective num_opt_layers={args.num_opt_layers}"
+    )
 
 
 def _runtime_device() -> torch.device:
@@ -1284,6 +1304,8 @@ class RefusalDirectionActivationAdditiveRotation(RefusalDirectionActivationRotat
         clip_upper: float = 2.0,
         clip_lower: float = 0.0,
         k_proj: int = 35,
+        num_opt_layers: int = 1,
+        best_layer: int | None = None,
     ) -> None:
         super().__init__(
             module,
@@ -1298,6 +1320,21 @@ class RefusalDirectionActivationAdditiveRotation(RefusalDirectionActivationRotat
         self.k_proj = self.k
 
         n_layers = len(self.module.layers)
+        requested_num_opt_layers = int(num_opt_layers)
+        self.num_opt_layers = n_layers if requested_num_opt_layers == 0 else requested_num_opt_layers
+        layer_scores = _layer_scores_from_refusal_directions(
+            globals().get("refusal_directions"),
+            n_layers,
+        )
+        if best_layer is None or not (0 < int(best_layer) < n_layers - 1):
+            middle = list(range(1, n_layers - 1))
+            best_layer = max(middle, key=lambda idx: float(layer_scores[idx]))
+        self._optimized_layer_idxs = select_activation_additive_layers(
+            n_layers=n_layers,
+            num_opt_layers=self.num_opt_layers,
+            best_layer=int(best_layer),
+            layer_scores=layer_scores,
+        )
         dev = _runtime_device()
         basis = torch.randn(n_layers, dim, self.k, dtype=torch.float32, device=dev)
         self.basis_param = nn.Parameter(basis)
@@ -1316,17 +1353,24 @@ class RefusalDirectionActivationAdditiveRotation(RefusalDirectionActivationRotat
             return self._imported_dense
         with torch.no_grad():
             matrices = [
-                dense_additive_rotation_matrix(
-                    self._basis(i),
-                    RefusalDirectionActivationRotation.cayley_matrix(self, i),
-                ) * self.input_norm_scale[i]
+                (
+                    dense_additive_rotation_matrix(
+                        self._basis(i),
+                        RefusalDirectionActivationRotation.cayley_matrix(self, i),
+                    ) * self.input_norm_scale[i]
+                    if i in self._optimized_layer_idxs
+                    else self._identity_matrix
+                )
                 for i in range(len(self.module.layers))
             ]
             return torch.stack(matrices, dim=0)
 
     def cayley_matrix(self, layer_idx: int) -> torch.Tensor:
+        if layer_idx not in self._optimized_layer_idxs:
+            return self._identity_matrix
         if self._cached_matrices is not None:
-            return self._cached_matrices[layer_idx]
+            matrix = self._cached_matrices[layer_idx]
+            return self._identity_matrix if matrix is None else matrix
         if self._use_imported_dense and self._imported_dense is not None:
             return self._imported_dense[layer_idx]
         return dense_additive_rotation_matrix(
@@ -1346,6 +1390,8 @@ class RefusalDirectionActivationAdditiveRotation(RefusalDirectionActivationRotat
             dtype=self.cayley_param.dtype,
         )
         self._use_imported_dense = True
+        active_from_checkpoint = infer_non_identity_layers(self._imported_dense)
+        self._optimized_layer_idxs.update(active_from_checkpoint)
 
     def _rotate(self, x, layer_idx: int, inverse: bool = False):
         if isinstance(x, tuple):
@@ -1360,6 +1406,8 @@ class RefusalDirectionActivationAdditiveRotation(RefusalDirectionActivationRotat
             except Exception:
                 return x
 
+        if layer_idx not in self._optimized_layer_idxs:
+            return x
         use_transpose = self._guard_mode != "protect"
         if inverse:
             use_transpose = not use_transpose
@@ -1387,9 +1435,18 @@ class RefusalDirectionActivationAdditiveRotation(RefusalDirectionActivationRotat
             use_transpose=use_transpose,
         )
 
+    def _apply(self, layer, layer_idx: int, inverse: bool):
+        if layer_idx not in self._optimized_layer_idxs:
+            return
+        super()._apply(layer, layer_idx, inverse)
+
     def orthogonalize(self):
         with torch.no_grad():
             for layer_idx in range(self.basis_param.shape[0]):
+                if layer_idx not in self._optimized_layer_idxs:
+                    self.cayley_param[layer_idx].zero_()
+                    self.input_norm_scale[layer_idx].fill_(1.0)
+                    continue
                 U, _, Vh = torch.linalg.svd(
                     self.basis_param[layer_idx],
                     full_matrices=False,
@@ -1979,8 +2036,11 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
 class RefusalStiefelAdditiveRotation(RefusalStiefelProjRotation):
     """Apply the projected Stiefel map only inside its learned subspace."""
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args, optimize_all_layers: bool = False, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        if optimize_all_layers:
+            self._optimized_layer_idxs = set(range(len(self.module.layers)))
+            self.num_opt_layers = len(self.module.layers)
         # The parent performs additional initialization after its first retraction.
         self.orthogonalize()
 
@@ -2582,6 +2642,8 @@ def refusal_cone_optimization(model, train_dataset,
             clip_upper=getattr(args, "clip_upper", 2.0),
             clip_lower=getattr(args, "clip_lower", 0.0),
             k_proj=k_proj,
+            num_opt_layers=num_opt_layers,
+            best_layer=best_layer,
         )
     elif direction_mode == "shtiefel_rot":
         operation = RefusalStiefelRotation(
@@ -2634,6 +2696,7 @@ def refusal_cone_optimization(model, train_dataset,
             k_proj=k_proj,
             num_opt_layers=num_opt_layers,
             best_layer=best_layer,
+            optimize_all_layers=bool(getattr(args, "optimize_all_layers", False)),
         )
     else:
         raise ValueError(f"Invalid direction_mode: {direction_mode}")
@@ -4311,6 +4374,12 @@ def _evaluate_end_metrics(
                         "k_proj",
                         DEFAULT_CONFIG.get("k_proj", 35),
                     ),
+                    num_opt_layers=getattr(
+                        args,
+                        "num_opt_layers",
+                        DEFAULT_CONFIG.get("num_opt_layers", 1),
+                    ),
+                    best_layer=best_layer,
                 )
             if direction_mode == "shtiefel_rot":
                 return RefusalStiefelRotation(
@@ -4367,6 +4436,7 @@ def _evaluate_end_metrics(
                     ),
                     num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
                     best_layer=best_layer,
+                    optimize_all_layers=bool(getattr(args, "optimize_all_layers", False)),
                 )
             return None
 

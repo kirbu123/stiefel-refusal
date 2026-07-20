@@ -5,6 +5,8 @@ import torch
 from baselines.additive_rotation_ops import (
     additive_subspace_rotation,
     dense_additive_rotation_matrix,
+    infer_non_identity_layers,
+    select_activation_additive_layers,
 )
 
 
@@ -76,6 +78,72 @@ class TestAdditiveRotationOps(unittest.TestCase):
 
         self.assertIsNotNone(basis.grad)
         self.assertIsNotNone(rotation.grad)
+
+    def test_nol_zero_selects_all_layers(self):
+        selected = select_activation_additive_layers(
+            n_layers=6,
+            num_opt_layers=0,
+            best_layer=3,
+            layer_scores=[0.0] * 6,
+        )
+
+        self.assertEqual(selected, set(range(6)))
+
+    def test_nol_one_selects_only_best_layer(self):
+        selected = select_activation_additive_layers(
+            n_layers=6,
+            num_opt_layers=1,
+            best_layer=3,
+            layer_scores=[0.0] * 6,
+        )
+
+        self.assertEqual(selected, {3})
+
+    def test_effective_all_layer_count_selects_all_layers(self):
+        selected = select_activation_additive_layers(
+            n_layers=6,
+            num_opt_layers=6,
+            best_layer=3,
+            layer_scores=[0.0] * 6,
+        )
+
+        self.assertEqual(selected, set(range(6)))
+
+    def test_nol_selects_exact_ranked_middle_layers(self):
+        selected = select_activation_additive_layers(
+            n_layers=7,
+            num_opt_layers=3,
+            best_layer=3,
+            layer_scores=[0.0, 1.0, 8.0, 0.1, 7.0, 2.0, 0.0],
+        )
+
+        self.assertEqual(selected, {2, 3, 4})
+
+    def test_nol_caps_selection_to_middle_layers(self):
+        selected = select_activation_additive_layers(
+            n_layers=5,
+            num_opt_layers=99,
+            best_layer=2,
+            layer_scores=[0.0] * 5,
+        )
+
+        self.assertEqual(selected, {1, 2, 3})
+
+    def test_nol_rejects_negative_value(self):
+        with self.assertRaises(ValueError):
+            select_activation_additive_layers(
+                n_layers=5,
+                num_opt_layers=-1,
+                best_layer=2,
+                layer_scores=[0.0] * 5,
+            )
+
+    def test_checkpoint_active_layer_inference(self):
+        matrices = torch.eye(3).repeat(4, 1, 1)
+        matrices[1, 0, 0] = 2.0
+        matrices[3, 1, 2] = 0.5
+
+        self.assertEqual(infer_non_identity_layers(matrices), {1, 3})
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 model="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B" # "allenai/OLMo-2-0425-1B-Instruct" "allenai/Olmo-3-1025-7B" "Qwen/Qwen3-8B-Base" "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 direction_mode="activation_additive_rot" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot", "shtiefel_additive_rot", "activation_additive_rot", "angular_steering", "householder_pseudo_rotation"
 train_guard_val_gap=0 # 0 disables; otherwise run train guard validation every N dataloader iterations
-num_opt_layers=1 # optimize this many middle layers (plus best layer during intervention)
+num_opt_layers="${NUM_OPT_LAYERS:-2}" # override with NUM_OPT_LAYERS; 0 means all layers for additive modes
 llamaguard_data="basic" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
 eval_guard_backends=("llamaguard" "qwen3guard" "wildguard") # any subset of: "llamaguard" "qwen3guard" "wildguard"
 lr=1e-5
@@ -70,7 +70,7 @@ gsm8k_max_new_tokens=512
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-5}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2}"
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
