@@ -15,6 +15,7 @@ optimizer="AdamW" # "Adam", "AdamW", "SGD"
 max_iters=10000
 result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
 log_steps=0
+clear_ckpts=true # delete checkpoint .pt files only after training and final validation succeed
 init_mode="diag_permutation" # "random", "diag_permutation", or "ab_orthogonal"
 orth_method="svd" # "qr" or "svd"
 k_proj="${K_PROJ:-35}" # direct low-rank projection width; override with K_PROJ
@@ -181,6 +182,10 @@ fi
 
 if [[ "${locality_store_predictions}" == "true" ]]; then
   cmd+=(--locality_store_predictions)
+fi
+
+if [[ "${clear_ckpts}" == "true" ]]; then
+  cmd+=(--clear_ckpts)
 fi
 
 # Optional eval flags:

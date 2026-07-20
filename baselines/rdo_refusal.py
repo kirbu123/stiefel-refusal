@@ -94,6 +94,55 @@ def save_run_hparams(run_dir, config_dict):
         json.dump(safe, f, indent=2)
 
 
+def _clear_experiment_checkpoints(run_dir: str) -> None:
+    """Delete tensor checkpoint payloads after all training/evaluation succeeds."""
+    checkpoint_dir = Path(run_dir) / "checkpoints"
+    if not checkpoint_dir.is_dir():
+        print(f"[checkpoint cleanup] No checkpoint directory found: {checkpoint_dir}")
+        return
+
+    deleted_files = 0
+    deleted_bytes = 0
+    for checkpoint_path in checkpoint_dir.rglob("*.pt"):
+        if not checkpoint_path.is_file():
+            continue
+        try:
+            deleted_bytes += checkpoint_path.stat().st_size
+            checkpoint_path.unlink()
+            deleted_files += 1
+        except OSError as exc:
+            raise RuntimeError(
+                f"Failed to delete checkpoint file {checkpoint_path}: {exc}"
+            ) from exc
+
+    # Remove directories such as progress_checkpoints once their tensors are gone,
+    # while preserving lightweight metadata files in checkpoints/.
+    for directory in sorted(
+        (path for path in checkpoint_dir.rglob("*") if path.is_dir()),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    ):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+
+    cleanup_payload = {
+        "checkpoint_dir": str(checkpoint_dir),
+        "deleted_pt_files": deleted_files,
+        "deleted_bytes": deleted_bytes,
+        "deleted_gib": deleted_bytes / (1024 ** 3),
+    }
+    _safe_json_dump(
+        str(Path(run_dir) / "checkpoint_cleanup.json"),
+        cleanup_payload,
+    )
+    print(
+        "[checkpoint cleanup] Deleted "
+        f"{deleted_files} tensor files ({deleted_bytes / (1024 ** 3):.3f} GiB)"
+    )
+
+
 def _tb_log_for_nnsight(metrics, step):
     """Drop-in replacement for wandb.log inside nnsight.apply; uses _ACTIVE_TB_WRITER."""
     w = _ACTIVE_TB_WRITER
@@ -208,6 +257,7 @@ DEFAULT_CONFIG = {
     # 0 = disabled. Save operation weights every N training iterations (dataloader steps; ``num_iters``)
     # to checkpoints/progress_checkpoints. Small values write large tensors often and can saturate disk I/O.
     'log_steps': 0,
+    'clear_ckpts': False,              # Delete checkpoint .pt files after final evaluation
     # 0 = disabled. Run in-training guard validation every N dataloader iterations.
     'train_guard_val_gap': 0,
     # (activation modes) Gate/clip scaling bounds: keep the intervened activation norm
@@ -281,6 +331,12 @@ def parse_args():
         type=int,
         default=DEFAULT_CONFIG['train_guard_val_gap'],
         help='Run in-training guard validation every N dataloader iterations; 0 disables',
+    )
+    parser.add_argument(
+        '--clear_ckpts',
+        action='store_true',
+        default=DEFAULT_CONFIG['clear_ckpts'],
+        help='Delete checkpoint .pt files only after training and end-of-run evaluation succeed',
     )
     parser.add_argument('--direction_mode', type=str, default=DEFAULT_CONFIG['direction_mode'],
                     choices=['baseline', 'rotation', 'activation_rot', 'activation_additive_rot', 'shtiefel_rot', 'shtiefel_proj_rot', 'shtiefel_additive_rot', 'angular_steering', 'householder_pseudo_rotation'],
@@ -3361,6 +3417,8 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
             mmlu_cfg=mmlu_cfg,
             locality_cfg=locality_cfg,
         )
+    if bool(getattr(args, "clear_ckpts", False)):
+        _clear_experiment_checkpoints(tb_run_dir)
     return results
 
 
