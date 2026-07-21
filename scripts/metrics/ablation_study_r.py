@@ -63,6 +63,12 @@ ROTATION_MARKERS = {
     "activation": "o",
     "stiefel": "s",
 }
+ROTATION_PHASE_COLORS = {
+    ("activation", "refined_attack"): "#d95f02",
+    ("activation", "refined_protect"): "#1b9e77",
+    ("stiefel", "refined_attack"): "#377eb8",
+    ("stiefel", "refined_protect"): "#984ea3",
+}
 DEFAULT_RDO_EXP_LIST = (
     PROJECT_ROOT / "results" / "rdo_refusal" / "analysis" / "rdo_exp_list.txt"
 )
@@ -156,7 +162,7 @@ def _is_plotted_metric(row: dict[str, Any]) -> bool:
     if phase not in PHASES:
         return False
     if benchmark == "guard":
-        return _clean_field(row.get("group", "")) == "harmful" and metric in GUARD_METRICS
+        return metric in GUARD_METRICS
     return CAPABILITY_METRICS.get(benchmark) == metric
 
 
@@ -410,18 +416,18 @@ def _series_title(benchmark: str, backend: str, group: str, metric: str) -> str:
 
 
 def _series_ylabel(benchmark: str, backend: str, metric: str) -> str:
+    if benchmark == "guard":
+        return {
+            "llamaguard": "Llama-Guard score",
+            "qwen3guard": "Qwen-Guard score",
+            "wildguard": "Wild-Guard score",
+        }.get(backend, "Guard score")
     if metric in ("accuracy", "exact_match", "pct_unsafe"):
         return metric.replace("_", " ").title()
     if metric == "perplexity":
         return "Perplexity (lower is better)"
     if metric == "mean_unsafe_probability":
         return "Mean unsafe probability"
-    if metric == "mean_score":
-        return {
-            "llamaguard": "LlamaGuard score",
-            "wildguard": "WildGuard score",
-            "qwen3guard": "QwenGuard score",
-        }.get(backend, "Guard score")
     return metric.replace("_", " ").title()
 
 
@@ -473,13 +479,14 @@ def plot_family(
                 x_values = phase_df["k_proj"].to_numpy(dtype=float)
                 means = phase_df["mean"].to_numpy(dtype=float)
                 stds = phase_df["std"].to_numpy(dtype=float)
+                curve_color = ROTATION_PHASE_COLORS[(rotation_family, phase)]
                 axis.plot(
                     x_values,
                     means,
                     marker=ROTATION_MARKERS[rotation_family],
                     linewidth=2,
                     linestyle="-",
-                    color=PHASE_COLORS[phase],
+                    color=curve_color,
                     label=f"{ROTATION_LABELS[rotation_family]} {phase.removeprefix('refined_')}",
                 )
                 if (stds > 0).any():
@@ -487,7 +494,7 @@ def plot_family(
                         x_values,
                         means - stds,
                         means + stds,
-                        color=PHASE_COLORS[phase],
+                        color=curve_color,
                         alpha=0.12,
                         linewidth=0,
                     )

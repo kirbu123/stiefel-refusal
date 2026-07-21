@@ -32,6 +32,7 @@ from scripts.metrics.ablation_study_r import (  # noqa: E402
     RDO_PHASE_LABELS,
     ROTATION_LABELS,
     ROTATION_MARKERS,
+    ROTATION_PHASE_COLORS,
     load_rdo_references,
     rdo_reference_for_family,
 )
@@ -148,7 +149,7 @@ def _is_plotted_metric(row: dict[str, Any]) -> bool:
     if phase not in PHASES:
         return False
     if benchmark == "guard":
-        return _clean_field(row.get("group", "")) == "harmful" and metric in GUARD_METRICS
+        return metric in GUARD_METRICS
     return CAPABILITY_METRICS.get(benchmark) == metric
 
 
@@ -329,19 +330,18 @@ def _series_title(benchmark: str, backend: str, group: str, metric: str) -> str:
 
 
 def _series_ylabel(benchmark: str, backend: str, metric: str) -> str:
-    del benchmark
+    if benchmark == "guard":
+        return {
+            "llamaguard": "Llama-Guard score",
+            "qwen3guard": "Qwen-Guard score",
+            "wildguard": "Wild-Guard score",
+        }.get(backend, "Guard score")
     if metric in ("accuracy", "exact_match", "pct_unsafe"):
         return metric.replace("_", " ").title()
     if metric == "perplexity":
         return "Perplexity (lower is better)"
     if metric == "mean_unsafe_probability":
         return "Mean unsafe probability"
-    if metric == "mean_score":
-        return {
-            "llamaguard": "LlamaGuard score",
-            "wildguard": "WildGuard score",
-            "qwen3guard": "QwenGuard score",
-        }.get(backend, "Guard score")
     return metric.replace("_", " ").title()
 
 
@@ -397,13 +397,14 @@ def plot_family(
                 means = phase_df["mean"].to_numpy(dtype=float)
                 stds = phase_df["std"].to_numpy(dtype=float)
                 x_ticks.update(int(value) for value in x_values)
+                curve_color = ROTATION_PHASE_COLORS[(rotation_family, phase)]
                 axis.plot(
                     x_values,
                     means,
                     marker=ROTATION_MARKERS[rotation_family],
                     linewidth=2,
                     linestyle="-",
-                    color=PHASE_COLORS[phase],
+                    color=curve_color,
                     label=f"{ROTATION_LABELS[rotation_family]} {phase.removeprefix('refined_')}",
                 )
                 if (stds > 0).any():
@@ -411,7 +412,7 @@ def plot_family(
                         x_values,
                         means - stds,
                         means + stds,
-                        color=PHASE_COLORS[phase],
+                        color=curve_color,
                         alpha=0.12,
                         linewidth=0,
                     )
