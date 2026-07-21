@@ -14,6 +14,7 @@ lr=1e-5
 optimizer="AdamW" # "Adam", "AdamW", "SGD"
 max_iters=10000
 result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
+result_root="${RESULT_ROOT:-./results/rdo_refusal/tensorboard}" # root for newly trained run directories
 log_steps=0
 clear_ckpts=true # delete checkpoint .pt files only after training and final validation succeed
 init_mode="diag_permutation" # "random", "diag_permutation", or "ab_orthogonal"
@@ -112,6 +113,7 @@ cmd=(python -m baselines.rdo_refusal \
   --orth_method "${orth_method}" \
   --log_steps "${log_steps}" \
   --train_guard_val_gap "${train_guard_val_gap}" \
+  --result_root "${result_root}" \
   --eval_max_new_tokens "${eval_max_new_tokens}" \
   --eval_batch_size "${eval_batch_size}" \
   --mmlu_dataset "${mmlu_dataset}" \

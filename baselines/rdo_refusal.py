@@ -258,6 +258,7 @@ DEFAULT_CONFIG = {
     # to checkpoints/progress_checkpoints. Small values write large tensors often and can saturate disk I/O.
     'log_steps': 0,
     'clear_ckpts': False,              # Delete checkpoint .pt files after final evaluation
+    'result_root': None,               # Optional root for newly trained TensorBoard runs
     # 0 = disabled. Run in-training guard validation every N dataloader iterations.
     'train_guard_val_gap': 0,
     # (activation modes) Gate/clip scaling bounds: keep the intervened activation norm
@@ -443,6 +444,15 @@ def parse_args():
             'evaluation outputs (eval_metrics_*.json) are written into the same directory.'
         ),
     )
+    parser.add_argument(
+        '--result_root',
+        type=str,
+        default=DEFAULT_CONFIG['result_root'],
+        help=(
+            'Root directory for newly trained TensorBoard runs. Unlike --result_path, '
+            'this does not load an existing run or skip training.'
+        ),
+    )
     parser.add_argument('--eval_split', type=str, default=DEFAULT_CONFIG['eval_split'],
                     choices=['train', 'val', 'test'],
                     help='Which split jsons to use for LlamaGuard eval: data/{splits}_splits/*_{eval_split}.json')
@@ -518,6 +528,13 @@ def _tb_dir_frz_suffix(train_kwargs: dict | None = None) -> str:
     im = str(im).replace(os.sep, "_").replace("/", "_").replace(" ", "_")
     om = str(om).replace(os.sep, "_").replace("/", "_").replace(" ", "_")
     return f"nol={nol}_kp={k_proj}_im={im}_om={om}"
+
+
+def _tensorboard_result_root() -> str:
+    configured = getattr(args, "result_root", None)
+    if configured is not None and str(configured).strip():
+        return os.path.abspath(os.path.expanduser(str(configured)))
+    return os.path.join(os.getenv("SAVE_DIR", "results"), "tensorboard")
 
 
 # Apply configuration values
@@ -3318,7 +3335,6 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
         )
     else:
         run_id = uuid.uuid4().hex[:12]
-        save_root = os.getenv("SAVE_DIR", "results")
         _dm = train_kwargs.get("direction_mode", DEFAULT_CONFIG["direction_mode"])
         _frz = _tb_dir_frz_suffix(train_kwargs)
         subdir = (
@@ -3326,7 +3342,7 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
             if run_name
             else f"{group_name}_{model_id}_{_dm}_{_frz}_{run_id}"
         )
-        tb_run_dir = os.path.join(save_root, "tensorboard", subdir)
+        tb_run_dir = os.path.join(_tensorboard_result_root(), subdir)
         os.makedirs(tb_run_dir, exist_ok=True)
         save_run_hparams(tb_run_dir, run_config)
 
@@ -5333,11 +5349,10 @@ def train_refusal_cone(group_name, run_name, init_vectors, **kwargs):
     run_config.pop('train_independent_direction', None)
 
     run_id = uuid.uuid4().hex[:12]
-    save_root = os.getenv("SAVE_DIR", "results")
     _dm = train_kwargs.get("direction_mode", getattr(args, "direction_mode", DEFAULT_CONFIG["direction_mode"]))
     _frz = _tb_dir_frz_suffix(train_kwargs)
     subdir = f"{group_name}_{model_id}_{_dm}_{_frz}_{run_name}_{run_id}"
-    tb_run_dir = os.path.join(save_root, "tensorboard", subdir)
+    tb_run_dir = os.path.join(_tensorboard_result_root(), subdir)
     os.makedirs(tb_run_dir, exist_ok=True)
     save_run_hparams(tb_run_dir, run_config)
 
@@ -5712,11 +5727,10 @@ def train_independent_vector(group_name=None, run_name=None, independent_vectors
     run_config.pop('train_independent_direction', None)
 
     run_id = uuid.uuid4().hex[:12]
-    save_root = os.getenv("SAVE_DIR", "results")
     _dm = train_kwargs.get("direction_mode", getattr(args, "direction_mode", DEFAULT_CONFIG["direction_mode"]))
     _frz = _tb_dir_frz_suffix(train_kwargs)
     subdir = f"{group_name}_{model_id}_{_dm}_{_frz}_{run_name}_{run_id}"
-    tb_run_dir = os.path.join(save_root, "tensorboard", subdir)
+    tb_run_dir = os.path.join(_tensorboard_result_root(), subdir)
     os.makedirs(tb_run_dir, exist_ok=True)
     save_run_hparams(tb_run_dir, run_config)
 

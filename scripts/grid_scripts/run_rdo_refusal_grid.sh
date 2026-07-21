@@ -6,8 +6,19 @@ cd "$(dirname "$0")/../.."
 
 # GPU used for every sequential run.
 # Override with: CUDA_VISIBLE_DEVICES=1 ./scripts/grid_scripts/run_rdo_refusal_grid.sh
-CUDA_VISIBLE_DEVICES=0
+CUDA_VISIBLE_DEVICES=3
 cuda_visible_devices="${CUDA_VISIBLE_DEVICES:-0}"
+
+# Root directory where this grid stores TensorBoard experiment run directories.
+# Override with: RESULT_ROOT=/path/to/tensorboard ./scripts/grid_scripts/run_rdo_refusal_grid.sh
+
+RESULT_ROOT="/home/user1/buka2004/LLM-Attack-Defense/results/rdo_refusal/AAAI-results/nol-ablations/olmo/activation_additive_rot"
+
+result_root="${RESULT_ROOT:-./results/rdo_refusal/tensorboard}"
+if [[ -z "${result_root}" ]]; then
+  echo "Invalid empty result root" >&2
+  exit 2
+fi
 
 # Cartesian-product grid: every model and mode runs with every k_proj and nol value.
 # "Qwen/Qwen3-8B" "allenai/Olmo-3-7B-Instruct" "allenai/OLMo-2-0425-1B-Instruct" "allenai/Olmo-3-1025-7B" "Qwen/Qwen3-8B-Base" "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
@@ -15,8 +26,8 @@ model_values=(
   "allenai/Olmo-3-7B-Instruct"
 )
 direction_mode_values=(activation_additive_rot) # activation_additive_rot shtiefel_additive_rot
-k_proj_values=(100 150 175 200 225 300)
-n_of_layers_values=(0)
+k_proj_values=(35)
+n_of_layers_values=(0 1 2 3 4 5 7 10)
 
 for model_name in "${model_values[@]}"; do
   if [[ -z "${model_name}" ]]; then
@@ -47,6 +58,7 @@ for model_name in "${model_values[@]}"; do
 
         echo "=== Starting RDO run with model=${model_name}, mode=${direction_mode}, k_proj=${k_proj}, nol=${n_of_layers} on GPU ${cuda_visible_devices} ==="
         CUDA_VISIBLE_DEVICES="${cuda_visible_devices}" \
+          RESULT_ROOT="${result_root}" \
           MODEL_NAME="${model_name}" \
           DIRECTION_MODE="${direction_mode}" \
           K_PROJ="${k_proj}" \
