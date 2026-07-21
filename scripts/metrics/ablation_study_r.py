@@ -55,6 +55,14 @@ RDO_PHASE_COLORS = {
     "refined_attack": "#b2182b",
     "refined_protect": "#ef8a62",
 }
+ROTATION_LABELS = {
+    "activation": "Cayley Rotation",
+    "stiefel": "Stiefel Rotation",
+}
+ROTATION_MARKERS = {
+    "activation": "o",
+    "stiefel": "s",
+}
 DEFAULT_RDO_EXP_LIST = (
     PROJECT_ROOT / "results" / "rdo_refusal" / "analysis" / "rdo_exp_list.txt"
 )
@@ -68,9 +76,18 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument(
-        "experiment_dir",
+        "-a",
+        "--activation-experiment",
         type=Path,
-        help="Directory containing RDO run subdirectories with hparams.json",
+        required=True,
+        help="activation_additive_rot experiment-family directory",
+    )
+    parser.add_argument(
+        "-s",
+        "--stiefel-experiment",
+        type=Path,
+        required=True,
+        help="shtiefel_additive_rot experiment-family directory",
     )
     parser.add_argument(
         "--output-dir",
@@ -139,7 +156,7 @@ def _is_plotted_metric(row: dict[str, Any]) -> bool:
     if phase not in PHASES:
         return False
     if benchmark == "guard":
-        return metric in GUARD_METRICS
+        return _clean_field(row.get("group", "")) == "harmful" and metric in GUARD_METRICS
     return CAPABILITY_METRICS.get(benchmark) == metric
 
 
@@ -347,7 +364,11 @@ def load_experiments(
     return pd.DataFrame.from_records(records), families, diagnostics
 
 
-def aggregate_metrics(records: pd.DataFrame) -> pd.DataFrame:
+def aggregate_metrics(
+    records: pd.DataFrame,
+    *,
+    reject_duplicates: bool = False,
+) -> pd.DataFrame:
     if records.empty:
         return pd.DataFrame()
     group_columns = [
@@ -359,6 +380,18 @@ def aggregate_metrics(records: pd.DataFrame) -> pd.DataFrame:
         "phase",
         "metric",
     ]
+    if "rotation_family" in records.columns:
+        group_columns.insert(1, "rotation_family")
+    if reject_duplicates:
+        duplicate_counts = records.groupby(group_columns, dropna=False).size()
+        duplicates = duplicate_counts[duplicate_counts > 1]
+        if not duplicates.empty:
+            first_key = duplicates.index[0]
+            raise ValueError(
+                "Multiple experiments have identical ablation settings; "
+                f"first duplicate key={first_key!r}, count={int(duplicates.iloc[0])}. "
+                "Remove duplicate runs instead of averaging them."
+            )
     aggregated = (
         records.groupby(group_columns, dropna=False)["value"]
         .agg(mean="mean", std="std", count="count")
@@ -376,7 +409,7 @@ def _series_title(benchmark: str, backend: str, group: str, metric: str) -> str:
     return f"{benchmark.replace('_', ' ').upper()}: {metric.replace('_', ' ')}"
 
 
-def _series_ylabel(benchmark: str, metric: str) -> str:
+def _series_ylabel(benchmark: str, backend: str, metric: str) -> str:
     if metric in ("accuracy", "exact_match", "pct_unsafe"):
         return metric.replace("_", " ").title()
     if metric == "perplexity":
@@ -384,7 +417,11 @@ def _series_ylabel(benchmark: str, metric: str) -> str:
     if metric == "mean_unsafe_probability":
         return "Mean unsafe probability"
     if metric == "mean_score":
-        return "Mean guard score"
+        return {
+            "llamaguard": "LlamaGuard score",
+            "wildguard": "WildGuard score",
+            "qwen3guard": "QwenGuard score",
+        }.get(backend, "Guard score")
     return metric.replace("_", " ").title()
 
 
@@ -405,56 +442,81 @@ def plot_family(
     series_columns = ["benchmark", "backend", "group", "metric"]
     for series_key, series_df in family_df.groupby(series_columns, dropna=False):
         benchmark, backend, group, metric = [str(value) for value in series_key]
-        available_phases = [
-            phase for phase in PHASES if not series_df[series_df["phase"] == phase].empty
-        ]
-        if not available_phases:
-            continue
-
         fig, axis = plt.subplots(figsize=(7.2, 4.6))
-        for phase in available_phases:
-            phase_df = series_df[series_df["phase"] == phase].sort_values("k_proj")
-            x_values = phase_df["k_proj"].to_numpy(dtype=float)
-            means = phase_df["mean"].to_numpy(dtype=float)
-            stds = phase_df["std"].to_numpy(dtype=float)
-            axis.plot(
-                x_values,
-                means,
-                marker=None if phase == "initial" else "o",
-                linewidth=2,
-                linestyle=":" if phase == "initial" else "-",
-                color=PHASE_COLORS[phase],
-                label=PHASE_LABELS[phase],
+        initial_df = series_df[
+            (series_df["phase"] == "initial")
+            & (series_df["rotation_family"] == "activation")
+        ].sort_values("k_proj")
+        if initial_df.empty:
+            initial_df = series_df[series_df["phase"] == "initial"].sort_values(
+                "k_proj"
             )
-            if phase != "initial" and (stds > 0).any():
-                axis.fill_between(
+        if not initial_df.empty:
+            initial_df = initial_df.drop_duplicates(subset=["k_proj"])
+            axis.plot(
+                initial_df["k_proj"].to_numpy(dtype=float),
+                initial_df["mean"].to_numpy(dtype=float),
+                linewidth=2,
+                linestyle=":",
+                color=PHASE_COLORS["initial"],
+                label=PHASE_LABELS["initial"],
+            )
+
+        for rotation_family in ("activation", "stiefel"):
+            for phase in ("refined_attack", "refined_protect"):
+                phase_df = series_df[
+                    (series_df["phase"] == phase)
+                    & (series_df["rotation_family"] == rotation_family)
+                ].sort_values("k_proj")
+                if phase_df.empty:
+                    continue
+                x_values = phase_df["k_proj"].to_numpy(dtype=float)
+                means = phase_df["mean"].to_numpy(dtype=float)
+                stds = phase_df["std"].to_numpy(dtype=float)
+                axis.plot(
                     x_values,
-                    means - stds,
-                    means + stds,
+                    means,
+                    marker=ROTATION_MARKERS[rotation_family],
+                    linewidth=2,
+                    linestyle="-",
                     color=PHASE_COLORS[phase],
-                    alpha=0.18,
-                    linewidth=0,
+                    label=f"{ROTATION_LABELS[rotation_family]} {phase.removeprefix('refined_')}",
                 )
+                if (stds > 0).any():
+                    axis.fill_between(
+                        x_values,
+                        means - stds,
+                        means + stds,
+                        color=PHASE_COLORS[phase],
+                        alpha=0.12,
+                        linewidth=0,
+                    )
 
         if rdo_reference is not None:
             metric_lookup = rdo_reference["metrics"]
-            for phase in ("refined_attack", "refined_protect"):
+            for source_phase, display_phase in (
+                ("refined_attack", "refined_protect"),
+                ("refined_protect", "refined_attack"),
+            ):
                 reference_value = metric_lookup.get(
-                    (benchmark, backend, group, metric, phase)
+                    (benchmark, backend, group, metric, source_phase)
                 )
                 if reference_value is None:
                     continue
                 axis.axhline(
                     reference_value,
-                    color=RDO_PHASE_COLORS[phase],
+                    color=RDO_PHASE_COLORS[display_phase],
                     linestyle=":",
                     linewidth=2.2,
-                    label=RDO_PHASE_LABELS[phase],
+                    label=RDO_PHASE_LABELS[display_phase],
                     zorder=1,
                 )
 
         axis.set_xlabel("n", fontweight="bold")
-        axis.set_ylabel(_series_ylabel(benchmark, metric), fontweight="bold")
+        axis.set_ylabel(
+            _series_ylabel(benchmark, backend, metric),
+            fontweight="bold",
+        )
         axis.set_title(
             _series_title(benchmark, backend, group, metric),
             fontweight="bold",
@@ -489,49 +551,85 @@ def main() -> int:
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    records, families, diagnostics = load_experiments(
-        args.experiment_dir.resolve(),
-        args.legacy_projection_dim,
+    experiment_specs = (
+        ("activation", "activation_additive_rot", args.activation_experiment),
+        ("stiefel", "shtiefel_additive_rot", args.stiefel_experiment),
     )
+    record_frames: list[pd.DataFrame] = []
+    parameter_sets: dict[str, dict[str, Any]] = {}
+    diagnostics: dict[str, Any] = {
+        "experiments": {},
+        "runs_discovered": 0,
+        "runs_loaded": 0,
+        "runs_skipped": [],
+        "guard_errors": [],
+    }
+    for rotation_family, expected_mode, experiment_dir in experiment_specs:
+        family_records, families, family_diagnostics = load_experiments(
+            experiment_dir.resolve(),
+            args.legacy_projection_dim,
+        )
+        if len(families) != 1:
+            raise ValueError(
+                f"{rotation_family} experiment must contain exactly one parameter "
+                f"family, found {len(families)}"
+            )
+        parameters = next(iter(families.values()))
+        if _clean_field(parameters.get("direction_mode")) != expected_mode:
+            raise ValueError(
+                f"{rotation_family} experiment has direction_mode="
+                f"{parameters.get('direction_mode')!r}, expected {expected_mode!r}"
+            )
+        family_records = family_records.copy()
+        family_records["rotation_family"] = rotation_family
+        record_frames.append(family_records)
+        parameter_sets[rotation_family] = parameters
+        diagnostics["experiments"][rotation_family] = family_diagnostics
+        diagnostics["runs_discovered"] += family_diagnostics["runs_discovered"]
+        diagnostics["runs_loaded"] += family_diagnostics["runs_loaded"]
+        diagnostics["runs_skipped"].extend(family_diagnostics["runs_skipped"])
+        diagnostics["guard_errors"].extend(family_diagnostics["guard_errors"])
+
+    records = pd.concat(record_frames, ignore_index=True)
+    comparison_id = _family_id(parameter_sets)
+    records["family_id"] = comparison_id
     rdo_references = load_rdo_references(args.rdo_exp_list.resolve())
     if records.empty:
-        raise RuntimeError("No supported metrics were found in the experiment directory")
-    aggregated = aggregate_metrics(records)
+        raise RuntimeError("No supported metrics were found in the experiment directories")
+    aggregated = aggregate_metrics(records, reject_duplicates=True)
     records.to_csv(output_dir / "run_metrics.csv", index=False)
     aggregated.to_csv(output_dir / "aggregated_metrics.csv", index=False)
 
-    generated_plots: list[str] = []
-    family_summaries = []
-    for family_id, family_df in aggregated.groupby("family_id"):
-        family_dir = output_dir / "families" / f"family_{family_id}"
-        family_dir.mkdir(parents=True, exist_ok=True)
-        parameters = families[str(family_id)]
-        rdo_reference = rdo_reference_for_family(parameters, rdo_references)
-        (family_dir / "family_parameters.json").write_text(
-            json.dumps(parameters, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        family_plots = plot_family(
-            family_df,
-            family_dir,
-            dpi=args.dpi,
-            rdo_reference=rdo_reference,
-        )
-        generated_plots.extend(family_plots)
-        family_summaries.append(
-            {
-                "family_id": str(family_id),
-                "k_proj_values": sorted(
-                    float(value) for value in family_df["k_proj"].unique()
-                ),
-                "plots": len(family_plots),
-                "rdo_reference": (
-                    rdo_reference["experiment_dir"]
-                    if rdo_reference is not None
-                    else None
-                ),
-            }
-        )
+    family_dir = output_dir / "families" / f"family_{comparison_id}"
+    family_dir.mkdir(parents=True, exist_ok=True)
+    rdo_reference = rdo_reference_for_family(
+        parameter_sets["activation"],
+        rdo_references,
+    )
+    (family_dir / "family_parameters.json").write_text(
+        json.dumps(parameter_sets, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    generated_plots = plot_family(
+        aggregated,
+        family_dir,
+        dpi=args.dpi,
+        rdo_reference=rdo_reference,
+    )
+    family_summaries = [
+        {
+            "family_id": comparison_id,
+            "k_proj_values": sorted(
+                float(value) for value in aggregated["k_proj"].unique()
+            ),
+            "plots": len(generated_plots),
+            "rdo_reference": (
+                rdo_reference["experiment_dir"]
+                if rdo_reference is not None
+                else None
+            ),
+        }
+    ]
 
     diagnostics["metric_rows"] = len(records)
     diagnostics["aggregated_rows"] = len(aggregated)

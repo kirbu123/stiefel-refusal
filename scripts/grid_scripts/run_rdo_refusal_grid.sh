@@ -12,7 +12,7 @@ cuda_visible_devices="${CUDA_VISIBLE_DEVICES:-0}"
 # Cartesian-product grid: every model and mode runs with every k_proj and nol value.
 # "Qwen/Qwen3-8B" "allenai/Olmo-3-7B-Instruct" "allenai/OLMo-2-0425-1B-Instruct" "allenai/Olmo-3-1025-7B" "Qwen/Qwen3-8B-Base" "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 model_values=(
-  "allenai/Olmo-3-7B-Instruct"
+
 )
 direction_mode_values=(shtiefel_additive_rot) # activation_additive_rot shtiefel_additive_rot
 k_proj_values=(100 150 175 200 225 300)
