@@ -26,6 +26,13 @@ from visualization.research import (  # noqa: E402
     _rows_from_eval_csv,
     _rows_from_eval_json,
 )
+from scripts.metrics.ablation_study_r import (  # noqa: E402
+    DEFAULT_RDO_EXP_LIST,
+    RDO_PHASE_COLORS,
+    RDO_PHASE_LABELS,
+    load_rdo_references,
+    rdo_reference_for_family,
+)
 
 
 PHASES = ("initial", "refined_attack", "refined_protect")
@@ -38,7 +45,7 @@ CAPABILITY_METRICS = {
     "gsm8k": "exact_match",
 }
 PHASE_LABELS = {
-    "initial": "Initial",
+    "initial": "Initial model",
     "refined_attack": "Refined attack",
     "refined_protect": "Refined protect",
 }
@@ -74,6 +81,12 @@ def parse_args() -> argparse.Namespace:
         help="Output directory for tables, plots, and diagnostics",
     )
     parser.add_argument("--dpi", type=int, default=300, help="PNG resolution")
+    parser.add_argument(
+        "--rdo-exp-list",
+        type=Path,
+        default=DEFAULT_RDO_EXP_LIST,
+        help="Model-to-RDO-experiment map used for horizontal reference lines",
+    )
     return parser.parse_args()
 
 
@@ -92,6 +105,7 @@ def _family_payload(hparams: dict[str, Any]) -> dict[str, Any]:
     excluded = set(VOLATILE_PRR_FAMILY_KEYS) | {
         "num_opt_layers",
         "optimize_all_layers",
+        "clear_ckpts",
     }
     return {
         key: _json_safe(value)
@@ -305,6 +319,7 @@ def plot_family(
     family_dir: Path,
     *,
     dpi: int,
+    rdo_reference: dict[str, Any] | None = None,
 ) -> list[str]:
     plot_dir = family_dir / "plots"
     table_dir = family_dir / "tables"
@@ -335,12 +350,13 @@ def plot_family(
             axis.plot(
                 x_values,
                 means,
-                marker="o",
+                marker=None if phase == "initial" else "o",
                 linewidth=2,
+                linestyle=":" if phase == "initial" else "-",
                 color=PHASE_COLORS[phase],
                 label=PHASE_LABELS[phase],
             )
-            if (stds > 0).any():
+            if phase != "initial" and (stds > 0).any():
                 axis.fill_between(
                     x_values,
                     means - stds,
@@ -350,12 +366,34 @@ def plot_family(
                     linewidth=0,
                 )
 
-        axis.set_xlabel("Number of optimized layers (nol)")
-        axis.set_ylabel(_series_ylabel(benchmark, metric))
-        axis.set_title(_series_title(benchmark, backend, group, metric))
+        if rdo_reference is not None:
+            metric_lookup = rdo_reference["metrics"]
+            for phase in ("refined_attack", "refined_protect"):
+                reference_value = metric_lookup.get(
+                    (benchmark, backend, group, metric, phase)
+                )
+                if reference_value is None:
+                    continue
+                axis.axhline(
+                    reference_value,
+                    color=RDO_PHASE_COLORS[phase],
+                    linestyle=":",
+                    linewidth=2.2,
+                    label=RDO_PHASE_LABELS[phase],
+                    zorder=1,
+                )
+
+        axis.set_xlabel("Number of optimized layers", fontweight="bold")
+        axis.set_ylabel(_series_ylabel(benchmark, metric), fontweight="bold")
+        axis.set_title(
+            _series_title(benchmark, backend, group, metric),
+            fontweight="bold",
+        )
         axis.set_xticks(sorted(x_ticks))
         axis.grid(True, alpha=0.25)
-        axis.legend(frameon=False)
+        for tick_label in axis.get_xticklabels() + axis.get_yticklabels():
+            tick_label.set_fontweight("bold")
+        axis.legend(frameon=False, prop={"weight": "bold"})
         fig.tight_layout()
 
         stem_parts = [benchmark]
@@ -383,6 +421,7 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     records, families, diagnostics = load_experiments(args.experiment_dir.resolve())
+    rdo_references = load_rdo_references(args.rdo_exp_list.resolve())
     if records.empty:
         raise RuntimeError("No supported metrics were found in the experiment directory")
     aggregated = aggregate_metrics(records)
@@ -395,11 +434,17 @@ def main() -> int:
         family_dir = output_dir / "families" / f"family_{family_id}"
         family_dir.mkdir(parents=True, exist_ok=True)
         parameters = families[str(family_id)]
+        rdo_reference = rdo_reference_for_family(parameters, rdo_references)
         (family_dir / "family_parameters.json").write_text(
             json.dumps(parameters, indent=2, sort_keys=True),
             encoding="utf-8",
         )
-        family_plots = plot_family(family_df, family_dir, dpi=args.dpi)
+        family_plots = plot_family(
+            family_df,
+            family_dir,
+            dpi=args.dpi,
+            rdo_reference=rdo_reference,
+        )
         generated_plots.extend(family_plots)
         family_summaries.append(
             {
@@ -408,6 +453,11 @@ def main() -> int:
                     int(value) for value in family_df["num_opt_layers"].unique()
                 ),
                 "plots": len(family_plots),
+                "rdo_reference": (
+                    rdo_reference["experiment_dir"]
+                    if rdo_reference is not None
+                    else None
+                ),
             }
         )
 

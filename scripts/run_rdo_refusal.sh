@@ -4,8 +4,8 @@ set -euo pipefail
 # Run from repo root
 cd "$(dirname "$0")/.."
 # variablesallenai/Olmo-3-7B-Instruct
-model="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B" # "allenai/OLMo-2-0425-1B-Instruct" "allenai/Olmo-3-1025-7B" "Qwen/Qwen3-8B-Base" "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
-direction_mode="activation_additive_rot" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot", "shtiefel_additive_rot", "activation_additive_rot", "angular_steering", "householder_pseudo_rotation"
+model="${MODEL_NAME:-deepseek-ai/DeepSeek-R1-Distill-Qwen-7B}" # override with MODEL_NAME
+direction_mode="${DIRECTION_MODE:-activation_additive_rot}" # override with DIRECTION_MODE
 train_guard_val_gap=0 # 0 disables; otherwise run train guard validation every N dataloader iterations
 num_opt_layers="${NUM_OPT_LAYERS:-1}" # override with NUM_OPT_LAYERS; 0 means all layers for additive modes
 llamaguard_data="basic" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)

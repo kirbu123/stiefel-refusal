@@ -38,7 +38,7 @@ CAPABILITY_METRICS = {
     "gsm8k": "exact_match",
 }
 PHASE_LABELS = {
-    "initial": "Initial",
+    "initial": "Initial model",
     "refined_attack": "Refined attack",
     "refined_protect": "Refined protect",
 }
@@ -47,6 +47,17 @@ PHASE_COLORS = {
     "refined_attack": "#d95f02",
     "refined_protect": "#1b9e77",
 }
+RDO_PHASE_LABELS = {
+    "refined_attack": "RDO attack",
+    "refined_protect": "RDO protect",
+}
+RDO_PHASE_COLORS = {
+    "refined_attack": "#b2182b",
+    "refined_protect": "#ef8a62",
+}
+DEFAULT_RDO_EXP_LIST = (
+    PROJECT_ROOT / "results" / "rdo_refusal" / "analysis" / "rdo_exp_list.txt"
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,6 +88,12 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--dpi", type=int, default=300, help="PNG resolution")
+    parser.add_argument(
+        "--rdo-exp-list",
+        type=Path,
+        default=DEFAULT_RDO_EXP_LIST,
+        help="Model-to-RDO-experiment map used for horizontal reference lines",
+    )
     return parser.parse_args()
 
 
@@ -91,7 +108,7 @@ def _json_safe(value: Any) -> Any:
 
 
 def _family_payload(hparams: dict[str, Any]) -> dict[str, Any]:
-    excluded = set(VOLATILE_PRR_FAMILY_KEYS) | {"k_proj"}
+    excluded = set(VOLATILE_PRR_FAMILY_KEYS) | {"k_proj", "clear_ckpts"}
     return {
         key: _json_safe(value)
         for key, value in sorted(hparams.items())
@@ -134,6 +151,102 @@ def _paired_json_payload(eval_path: Path) -> dict[str, Any]:
         return json.loads(json_path.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def load_rdo_references(map_path: Path) -> list[dict[str, Any]]:
+    """Load model-specific RDO metric lookups from ``name: experiment_path`` lines."""
+    if not map_path.is_file():
+        raise FileNotFoundError(f"RDO experiment map does not exist: {map_path}")
+
+    references: list[dict[str, Any]] = []
+    for line_number, raw_line in enumerate(
+        map_path.read_text(encoding="utf-8").splitlines(),
+        start=1,
+    ):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        model_key, separator, experiment_text = line.partition(":")
+        if not separator or not model_key.strip() or not experiment_text.strip():
+            raise ValueError(
+                f"Invalid RDO map entry at {map_path}:{line_number}; "
+                "expected 'model: experiment_path'"
+            )
+        experiment_dir = Path(experiment_text.strip()).expanduser()
+        if not experiment_dir.is_absolute():
+            experiment_dir = (map_path.parent / experiment_dir).resolve()
+        hparams_path = experiment_dir / "hparams.json"
+        if not hparams_path.is_file():
+            raise FileNotFoundError(f"Missing RDO hparams: {hparams_path}")
+        hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
+        eval_path, eval_format = _choose_latest_eval_file(experiment_dir)
+        if eval_path is None or eval_format is None:
+            raise FileNotFoundError(f"No RDO eval_metrics file in {experiment_dir}")
+        metric_rows = (
+            _rows_from_eval_csv(eval_path)
+            if eval_format == "csv"
+            else _rows_from_eval_json(eval_path)
+        )
+        lookup: dict[tuple[str, str, str, str, str], float] = {}
+        for row in metric_rows:
+            phase = _clean_field(row.get("phase", ""))
+            if phase not in RDO_PHASE_LABELS or not _is_plotted_metric(row):
+                continue
+            try:
+                value = float(row["value"])
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(value):
+                continue
+            lookup[
+                (
+                    _clean_field(row.get("benchmark", "")),
+                    _clean_field(row.get("backend", "")),
+                    _clean_field(row.get("group", "")),
+                    _clean_field(row.get("metric", "")),
+                    phase,
+                )
+            ] = value
+
+        identifiers = {
+            _clean_field(model_key),
+            _clean_field(hparams.get("model")),
+            _clean_field(hparams.get("model_id")),
+        }
+        references.append(
+            {
+                "model_key": model_key.strip(),
+                "experiment_dir": str(experiment_dir),
+                "identifiers": {value for value in identifiers if value},
+                "metrics": lookup,
+            }
+        )
+    return references
+
+
+def rdo_reference_for_family(
+    family_parameters: dict[str, Any],
+    references: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Match a family to the mapped RDO run by model/model_id, then map alias."""
+    family_identifiers = {
+        _clean_field(family_parameters.get("model")),
+        _clean_field(family_parameters.get("model_id")),
+    }
+    family_identifiers.discard("")
+    for reference in references:
+        if family_identifiers & set(reference["identifiers"]):
+            return reference
+
+    joined = " ".join(sorted(family_identifiers))
+    aliases = ("deepseek", "olmo", "qwen")
+    for alias in aliases:
+        if alias in joined:
+            for reference in references:
+                if _clean_field(reference["model_key"]) == alias:
+                    return reference
+            break
+    return None
 
 
 def load_experiments(
@@ -280,6 +393,7 @@ def plot_family(
     family_dir: Path,
     *,
     dpi: int,
+    rdo_reference: dict[str, Any] | None = None,
 ) -> list[str]:
     plot_dir = family_dir / "plots"
     table_dir = family_dir / "tables"
@@ -306,12 +420,13 @@ def plot_family(
             axis.plot(
                 x_values,
                 means,
-                marker="o",
+                marker=None if phase == "initial" else "o",
                 linewidth=2,
+                linestyle=":" if phase == "initial" else "-",
                 color=PHASE_COLORS[phase],
                 label=PHASE_LABELS[phase],
             )
-            if (stds > 0).any():
+            if phase != "initial" and (stds > 0).any():
                 axis.fill_between(
                     x_values,
                     means - stds,
@@ -321,11 +436,33 @@ def plot_family(
                     linewidth=0,
                 )
 
-        axis.set_xlabel(r"Projection width $k_{\mathrm{proj}}$")
-        axis.set_ylabel(_series_ylabel(benchmark, metric))
-        axis.set_title(_series_title(benchmark, backend, group, metric))
+        if rdo_reference is not None:
+            metric_lookup = rdo_reference["metrics"]
+            for phase in ("refined_attack", "refined_protect"):
+                reference_value = metric_lookup.get(
+                    (benchmark, backend, group, metric, phase)
+                )
+                if reference_value is None:
+                    continue
+                axis.axhline(
+                    reference_value,
+                    color=RDO_PHASE_COLORS[phase],
+                    linestyle=":",
+                    linewidth=2.2,
+                    label=RDO_PHASE_LABELS[phase],
+                    zorder=1,
+                )
+
+        axis.set_xlabel("n", fontweight="bold")
+        axis.set_ylabel(_series_ylabel(benchmark, metric), fontweight="bold")
+        axis.set_title(
+            _series_title(benchmark, backend, group, metric),
+            fontweight="bold",
+        )
         axis.grid(True, alpha=0.25)
-        axis.legend(frameon=False)
+        for tick_label in axis.get_xticklabels() + axis.get_yticklabels():
+            tick_label.set_fontweight("bold")
+        axis.legend(frameon=False, prop={"weight": "bold"})
         fig.tight_layout()
 
         stem_parts = [benchmark]
@@ -356,6 +493,7 @@ def main() -> int:
         args.experiment_dir.resolve(),
         args.legacy_projection_dim,
     )
+    rdo_references = load_rdo_references(args.rdo_exp_list.resolve())
     if records.empty:
         raise RuntimeError("No supported metrics were found in the experiment directory")
     aggregated = aggregate_metrics(records)
@@ -368,6 +506,7 @@ def main() -> int:
         family_dir = output_dir / "families" / f"family_{family_id}"
         family_dir.mkdir(parents=True, exist_ok=True)
         parameters = families[str(family_id)]
+        rdo_reference = rdo_reference_for_family(parameters, rdo_references)
         (family_dir / "family_parameters.json").write_text(
             json.dumps(parameters, indent=2, sort_keys=True),
             encoding="utf-8",
@@ -376,6 +515,7 @@ def main() -> int:
             family_df,
             family_dir,
             dpi=args.dpi,
+            rdo_reference=rdo_reference,
         )
         generated_plots.extend(family_plots)
         family_summaries.append(
@@ -385,6 +525,11 @@ def main() -> int:
                     float(value) for value in family_df["k_proj"].unique()
                 ),
                 "plots": len(family_plots),
+                "rdo_reference": (
+                    rdo_reference["experiment_dir"]
+                    if rdo_reference is not None
+                    else None
+                ),
             }
         )
 
