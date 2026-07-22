@@ -18,23 +18,6 @@ from pipeline.submodules.select_direction import select_direction
 from pipeline.submodules.evaluate_jailbreak import evaluate_jailbreak, substring_matching_judge_fn
 from pipeline.submodules.evaluate_loss import evaluate_loss
 
-# Base (non-chat) checkpoints never refuse, so the refusal-based filter empties
-# the dataset and select_direction() asserts. Redirect known base checkpoints to
-# their Instruct sibling, which the pipeline handles as designed.
-BASE_TO_INSTRUCT = {
-    "Qwen/Qwen3-8B-Base": "Qwen/Qwen3-8B",
-    "allenai/Olmo-3-1025-7B": "allenai/Olmo-3-7B-Instruct",
-}
-
-def resolve_instruct_model(model_path):
-    if model_path in BASE_TO_INSTRUCT:
-        return BASE_TO_INSTRUCT[model_path]
-    # convenience fallback for cleanly-named base repos (e.g. ".../Foo-7B-Base")
-    for suffix in ("-Base", "-base"):
-        if model_path.endswith(suffix):
-            return model_path[: -len(suffix)]
-    return model_path
-
 def parse_arguments():
     """Parse model path argument from command line."""
     _repo_root = Path(__file__).resolve().parent.parent.parent
@@ -178,11 +161,6 @@ def evaluate_loss_for_datasets(cfg, model_base, fwd_pre_hooks, fwd_hooks, interv
 
 def run_pipeline(model_path):
     """Run the full pipeline."""
-    resolved = resolve_instruct_model(model_path)
-    if resolved != model_path:
-        print(f"[base-model remap] '{model_path}' is a base checkpoint that never "
-              f"refuses; running Instruct variant '{resolved}' instead.")
-        model_path = resolved
     model_alias = os.path.basename(model_path)
     cfg = Config(model_alias=model_alias, model_path=model_path)
 

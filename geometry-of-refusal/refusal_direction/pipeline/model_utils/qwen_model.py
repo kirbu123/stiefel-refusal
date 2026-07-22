@@ -67,7 +67,7 @@ class QwenModel(ModelBase):
     def _load_model(self, model_path, dtype=torch.bfloat16):
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
-            torch_dtype=dtype,
+            dtype=dtype,
             device_map="auto",
             cache_dir=os.getenv("HUGGINGFACE_CACHE_DIR"),
         ).eval()
@@ -77,8 +77,13 @@ class QwenModel(ModelBase):
         return model
 
     def _load_tokenizer(self, model_path):
+        tokenizer_path = (
+            "Qwen/Qwen3-8B"
+            if model_path == "Rootkit7/Qwen3-8B-abliterated"
+            else model_path
+        )
         tokenizer = AutoTokenizer.from_pretrained(
-            model_path,
+            tokenizer_path,
         )
         tokenizer.padding_side = 'left'
         return tokenizer

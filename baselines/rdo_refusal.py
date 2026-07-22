@@ -17,7 +17,7 @@ from nnsight import LanguageModel
 from nnsight.envoy import Envoy
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from transformers import set_seed
+from transformers import AutoTokenizer, set_seed
 import nnsight
 
 
@@ -557,7 +557,22 @@ elif args.dtype == 'float32':
 else:
     raise ValueError(f"Unsupported dtype: {args.dtype}")
 
-model = LanguageModel(MODEL_PATH, cache_dir=os.getenv("HUGGINGFACE_CACHE_DIR"), device_map='auto', torch_dtype=dtype)
+tokenizer_overrides = {
+    "Rootkit7/Qwen3-8B-abliterated": "Qwen/Qwen3-8B",
+    "tiiuae/Falcon3-7B-Base": "tiiuae/Falcon3-7B-Instruct",
+}
+tokenizer_path = tokenizer_overrides.get(MODEL_PATH, MODEL_PATH)
+tokenizer = AutoTokenizer.from_pretrained(
+    tokenizer_path,
+    cache_dir=os.getenv("HUGGINGFACE_CACHE_DIR"),
+)
+model = LanguageModel(
+    MODEL_PATH,
+    tokenizer=tokenizer,
+    cache_dir=os.getenv("HUGGINGFACE_CACHE_DIR"),
+    device_map="auto",
+    dtype=dtype,
+)
 model.requires_grad_(False)
 args.optimize_all_layers = (
     args.direction_mode in _all_layer_nol_modes and _requested_num_opt_layers == 0
@@ -666,6 +681,15 @@ def apply_chat_template(tokenizer, instructions: list[str]):
             )
             for inst in instructions
         ]
+    elif "falcon3" in MODEL_PATH.lower():
+        prompts = [
+            tokenizer.apply_chat_template(
+                [{"role": "user", "content": inst}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            for inst in instructions
+        ]
     else:
         raise ValueError(f"Model {MODEL_PATH} not supported, need to configure chat template")
     return prompts
@@ -708,6 +732,8 @@ elif "qwen3" in MODEL_PATH.lower():
 elif "llama-3" in MODEL_PATH.lower():
     refusal_tokens = [40]
 elif "olmo" in MODEL_PATH.lower():
+    refusal_tokens = [model.tokenizer.encode("I", add_special_tokens=False)[0]]
+elif "falcon3" in MODEL_PATH.lower():
     refusal_tokens = [model.tokenizer.encode("I", add_special_tokens=False)[0]]
 else:
     raise ValueError(f"Model {MODEL_PATH} not supported, need to configure refusal tokens")
