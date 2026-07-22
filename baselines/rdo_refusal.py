@@ -44,6 +44,7 @@ from baselines.additive_rotation_ops import (
     dense_additive_rotation_matrix,
     infer_non_identity_layers,
     select_activation_additive_layers,
+    select_baseline_ablation_layers,
 )
 
 dotenv.load_dotenv(override=True)
@@ -347,9 +348,9 @@ def parse_args():
         type=int,
         default=DEFAULT_CONFIG['num_opt_layers'],
         help=(
-            'Number of layers to optimize for layer-selective modes. For activation_additive_rot '
-            'and shtiefel_additive_rot, nol=0 selects all layers and is logged as the model layer '
-            'count; positive values select that many middle layers. '
+            'Number of layers to optimize for layer-selective modes. For baseline, '
+            'activation_additive_rot, and shtiefel_additive_rot, nol=0 selects all layers and '
+            'is logged as the model layer count; positive values select that many middle layers. '
             'Other supported modes use standard middle-layer selection.'
         ),
     )
@@ -509,11 +510,15 @@ args = parse_args()
 _requested_num_opt_layers = int(getattr(args, "num_opt_layers", 1))
 if _requested_num_opt_layers < 0:
     raise AssertionError(f"--num_opt_layers must be >= 0, got {args.num_opt_layers}")
-_all_layer_nol_modes = {"activation_additive_rot", "shtiefel_additive_rot"}
+_all_layer_nol_modes = {
+    "baseline",
+    "activation_additive_rot",
+    "shtiefel_additive_rot",
+}
 if _requested_num_opt_layers == 0 and args.direction_mode not in _all_layer_nol_modes:
     raise AssertionError(
         "--num_opt_layers=0 (all layers) is supported only for "
-        "direction_mode=activation_additive_rot or shtiefel_additive_rot"
+        "direction_mode=baseline, activation_additive_rot, or shtiefel_additive_rot"
     )
 MODEL_PATH = args.model
 
@@ -1031,11 +1036,38 @@ def clip_grad_norm(grad, max_norm):
 
 
 class RefusalCone(nn.Module):
-    def __init__(self, module: Envoy, dim: int, n_vectors: int, init_vectors: torch.Tensor | None = None, orthogonal_vectors: torch.Tensor | None = None) -> None:
+    def __init__(
+        self,
+        module: Envoy,
+        dim: int,
+        n_vectors: int,
+        init_vectors: torch.Tensor | None = None,
+        orthogonal_vectors: torch.Tensor | None = None,
+        num_opt_layers: int = 0,
+        best_layer: int | None = None,
+    ) -> None:
         super(RefusalCone, self).__init__()
         self.module = module
         self.n_vectors = n_vectors
         self._guard_mode = "attack"
+        n_layers = len(self.module.layers)
+        requested_num_opt_layers = int(num_opt_layers)
+        self.num_opt_layers = (
+            n_layers if requested_num_opt_layers == 0 else requested_num_opt_layers
+        )
+        layer_scores = _layer_scores_from_refusal_directions(
+            globals().get("refusal_directions"),
+            n_layers,
+        )
+        if best_layer is None or not (0 < int(best_layer) < n_layers - 1):
+            middle = list(range(1, n_layers - 1))
+            best_layer = max(middle, key=lambda idx: float(layer_scores[idx]))
+        self._optimized_layer_idxs = select_baseline_ablation_layers(
+            n_layers=n_layers,
+            num_opt_layers=self.num_opt_layers,
+            best_layer=int(best_layer),
+            layer_scores=layer_scores,
+        )
         dev = _runtime_device()
         self.fn_vectors = [torch.nn.Parameter(torch.randn(dim, dtype=torch.float32, device=dev), requires_grad=True) for _ in range(n_vectors)]
         if init_vectors is not None:
@@ -1048,7 +1080,9 @@ class RefusalCone(nn.Module):
     def __call__(self, direction):
         normalized_direction = direction / direction.norm()
         normalized_direction = normalized_direction.to(model.dtype)
-        for layer in self.module.layers:
+        for layer_idx, layer in enumerate(self.module.layers):
+            if layer_idx not in self._optimized_layer_idxs:
+                continue
             self.ablate_input(layer, normalized_direction)
             self.ablate_output(layer.self_attn, normalized_direction, 2)
             self.ablate_output(layer.mlp, normalized_direction, 1)
@@ -2698,7 +2732,15 @@ def refusal_cone_optimization(model, train_dataset,
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True, collate_fn=custom_collate)
 
     if direction_mode == "baseline":
-        operation = RefusalCone(model.model, model.config.hidden_size, cone_dim, init_vectors=init_vectors, orthogonal_vectors=orthogonal_vectors)
+        operation = RefusalCone(
+            model.model,
+            model.config.hidden_size,
+            cone_dim,
+            init_vectors=init_vectors,
+            orthogonal_vectors=orthogonal_vectors,
+            num_opt_layers=num_opt_layers,
+            best_layer=best_layer,
+        )
     elif direction_mode == "rotation":
         operation = RefusalDirectionRotation(model.model, model.config.hidden_size, init_vectors=init_vectors, orthogonal_vectors=orthogonal_vectors)
     elif direction_mode == "activation_rot":

@@ -6,13 +6,13 @@ cd "$(dirname "$0")/../.."
 
 # GPU used for every sequential run.
 # Override with: CUDA_VISIBLE_DEVICES=1 ./scripts/grid_scripts/run_rdo_refusal_grid.sh
-CUDA_VISIBLE_DEVICES=3
+CUDA_VISIBLE_DEVICES=0
 cuda_visible_devices="${CUDA_VISIBLE_DEVICES:-0}"
 
 # Root directory where this grid stores TensorBoard experiment run directories.
 # Override with: RESULT_ROOT=/path/to/tensorboard ./scripts/grid_scripts/run_rdo_refusal_grid.sh
 
-RESULT_ROOT="/home/user1/buka2004/LLM-Attack-Defense/results/rdo_refusal/AAAI-results/nol-ablations/olmo/activation_additive_rot"
+RESULT_ROOT="/home/user1/buka2004/LLM-Attack-Defense/results/rdo_refusal/AAAI-results/baseline"
 
 result_root="${RESULT_ROOT:-./results/rdo_refusal/tensorboard}"
 if [[ -z "${result_root}" ]]; then
@@ -21,13 +21,21 @@ if [[ -z "${result_root}" ]]; then
 fi
 
 # Cartesian-product grid: every model and mode runs with every k_proj and nol value.
-# "Qwen/Qwen3-8B" "allenai/Olmo-3-7B-Instruct" "allenai/OLMo-2-0425-1B-Instruct" "allenai/Olmo-3-1025-7B" "Qwen/Qwen3-8B-Base" "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+# "Qwen/Qwen3-8B" "allenai/Olmo-3-7B-Instruct" "allenai/OLMo-2-0425-1B-Instruct" "Rootkit7/Qwen3-8B-abliterated" "allenai/Olmo-3-1025-7B" "Qwen/Qwen3-8B-Base" "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 model_values=(
-  "allenai/Olmo-3-7B-Instruct"
+  "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 )
-direction_mode_values=(activation_additive_rot) # activation_additive_rot shtiefel_additive_rot
+direction_mode_values=(baseline) # baseline activation_additive_rot shtiefel_additive_rot
 k_proj_values=(35)
-n_of_layers_values=(0 1 2 3 4 5 7 10)
+n_of_layers_values=(1 2 3 4 5 7 10 12 15 20)
+
+# Loss weights (defaults match scripts/run_rdo_refusal.sh).
+ADDITION_LAMBDA=0.2
+
+ablation_lambda="${ABLATION_LAMBDA:-1.0}"
+addition_lambda="${ADDITION_LAMBDA:-0.0}"
+retain_lambda="${RETAIN_LAMBDA:-1.0}"
+repetition_lambda="${REPETITION_LAMBDA:-0.0}"
 
 for model_name in "${model_values[@]}"; do
   if [[ -z "${model_name}" ]]; then
@@ -37,7 +45,7 @@ for model_name in "${model_values[@]}"; do
 
   for direction_mode in "${direction_mode_values[@]}"; do
     case "${direction_mode}" in
-      activation_additive_rot|shtiefel_additive_rot) ;;
+      baseline|activation_additive_rot|shtiefel_additive_rot) ;;
       *)
         echo "Invalid direction_mode value: ${direction_mode}" >&2
         exit 2
@@ -59,6 +67,10 @@ for model_name in "${model_values[@]}"; do
         echo "=== Starting RDO run with model=${model_name}, mode=${direction_mode}, k_proj=${k_proj}, nol=${n_of_layers} on GPU ${cuda_visible_devices} ==="
         CUDA_VISIBLE_DEVICES="${cuda_visible_devices}" \
           RESULT_ROOT="${result_root}" \
+          ABLATION_LAMBDA="${ablation_lambda}" \
+          ADDITION_LAMBDA="${addition_lambda}" \
+          RETAIN_LAMBDA="${retain_lambda}" \
+          REPETITION_LAMBDA="${repetition_lambda}" \
           MODEL_NAME="${model_name}" \
           DIRECTION_MODE="${direction_mode}" \
           K_PROJ="${k_proj}" \

@@ -7,6 +7,7 @@ from baselines.additive_rotation_ops import (
     dense_additive_rotation_matrix,
     infer_non_identity_layers,
     select_activation_additive_layers,
+    select_baseline_ablation_layers,
 )
 
 
@@ -144,6 +145,45 @@ class TestAdditiveRotationOps(unittest.TestCase):
         matrices[3, 1, 2] = 0.5
 
         self.assertEqual(infer_non_identity_layers(matrices), {1, 3})
+
+    def test_baseline_nol_zero_preserves_all_layer_ablation(self):
+        selected = select_baseline_ablation_layers(
+            n_layers=6,
+            num_opt_layers=0,
+            best_layer=3,
+            layer_scores=[0.0] * 6,
+        )
+
+        self.assertEqual(selected, set(range(6)))
+
+    def test_baseline_nol_selects_exact_ranked_layers_and_best(self):
+        selected = select_baseline_ablation_layers(
+            n_layers=7,
+            num_opt_layers=3,
+            best_layer=3,
+            layer_scores=[0.0, 1.0, 8.0, 0.1, 7.0, 2.0, 0.0],
+        )
+
+        self.assertEqual(selected, {2, 3, 4})
+
+    def test_baseline_nol_caps_to_middle_layers(self):
+        selected = select_baseline_ablation_layers(
+            n_layers=5,
+            num_opt_layers=99,
+            best_layer=2,
+            layer_scores=[0.0] * 5,
+        )
+
+        self.assertEqual(selected, {1, 2, 3})
+
+    def test_baseline_nol_rejects_negative_value(self):
+        with self.assertRaises(ValueError):
+            select_baseline_ablation_layers(
+                n_layers=5,
+                num_opt_layers=-1,
+                best_layer=2,
+                layer_scores=[0.0] * 5,
+            )
 
 
 if __name__ == "__main__":

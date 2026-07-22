@@ -45,6 +45,26 @@ def select_activation_additive_layers(
     return set(ranked[: min(target, len(middle))])
 
 
+def select_baseline_ablation_layers(
+    *,
+    n_layers: int,
+    num_opt_layers: int,
+    best_layer: int,
+    layer_scores: Sequence[float],
+) -> set[int]:
+    """Select baseline ablation layers with the shared RDO NOL policy.
+
+    ``nol=0`` (or the effective all-layer count) preserves legacy baseline
+    ablation on every layer. Positive values select ranked middle layers.
+    """
+    return select_activation_additive_layers(
+        n_layers=n_layers,
+        num_opt_layers=num_opt_layers,
+        best_layer=best_layer,
+        layer_scores=layer_scores,
+    )
+
+
 def infer_non_identity_layers(
     matrices: Tensor,
     *,

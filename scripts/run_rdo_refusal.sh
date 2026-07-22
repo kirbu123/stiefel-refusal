@@ -20,6 +20,10 @@ clear_ckpts=true # delete checkpoint .pt files only after training and final val
 init_mode="diag_permutation" # "random", "diag_permutation", or "ab_orthogonal"
 orth_method="svd" # "qr" or "svd"
 k_proj="${K_PROJ:-35}" # direct low-rank projection width; override with K_PROJ
+ablation_lambda="${ABLATION_LAMBDA:-1.0}"
+addition_lambda="${ADDITION_LAMBDA:-0.0}"
+retain_lambda="${RETAIN_LAMBDA:-1.0}"
+repetition_lambda="${REPETITION_LAMBDA:-0.0}"
 
 # LlamaGuard eval config
 eval_max_new_tokens=256 # inportant param for llama guard eval
@@ -141,11 +145,11 @@ cmd=(python -m baselines.rdo_refusal \
   --gsm8k_sample_size "${GSM8K_SAMPLE_SIZE}" \
   --gsm8k_sample_seed "${gsm8k_sample_seed}" \
   --gsm8k_max_new_tokens "${GSM8K_MAX_NEW_TOKENS}" \
-  --ablation_lambda 1.0 \
-  --addition_lambda 0.0 \
-  --retain_lambda 1.0 \
+  --ablation_lambda "${ablation_lambda}" \
+  --addition_lambda "${addition_lambda}" \
+  --retain_lambda "${retain_lambda}" \
   --retain_loss \
-  --repetition_lambda 0.0 \
+  --repetition_lambda "${repetition_lambda}" \
   # --retain_lambda 0.0 \
 )
 
