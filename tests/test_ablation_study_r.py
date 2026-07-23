@@ -68,6 +68,31 @@ class AblationStudyRTests(unittest.TestCase):
         self.assertEqual(attack["count"], 2)
         self.assertGreater(attack["std"], 0.0)
 
+    def test_new_model_aliases_match_specific_baselines(self):
+        references = [
+            {"model_key": key, "identifiers": {key}, "metrics": {}}
+            for key in (
+                "deepseek",
+                "olmo",
+                "qwen",
+                "qwen-1.5b-ease",
+                "falcon-7b-base",
+            )
+        ]
+        cases = {
+            "CWRUSafetyLab/Qwen2.5-1.5B-Instruct-EASE": "qwen-1.5b-ease",
+            "tiiuae/Falcon3-7B-Base": "falcon-7b-base",
+            "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B": "deepseek",
+            "Qwen/Qwen3-8B": "qwen",
+        }
+        for model, expected_key in cases.items():
+            with self.subTest(model=model):
+                reference = ablation.require_rdo_reference_for_family(
+                    {"model": model},
+                    references,
+                )
+                self.assertEqual(reference["model_key"], expected_key)
+
 
 if __name__ == "__main__":
     unittest.main()

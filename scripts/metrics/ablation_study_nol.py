@@ -34,7 +34,7 @@ from scripts.metrics.ablation_study_r import (  # noqa: E402
     ROTATION_MARKERS,
     ROTATION_PHASE_COLORS,
     load_rdo_references,
-    rdo_reference_for_family,
+    require_rdo_reference_for_family,
 )
 
 
@@ -527,7 +527,7 @@ def main() -> int:
 
     family_dir = output_dir / "families" / f"family_{comparison_id}"
     family_dir.mkdir(parents=True, exist_ok=True)
-    rdo_reference = rdo_reference_for_family(
+    rdo_reference = require_rdo_reference_for_family(
         parameter_sets["activation"],
         rdo_references,
     )

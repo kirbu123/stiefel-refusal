@@ -18,8 +18,8 @@ def construct_model_base(model_path: str) -> ModelBase:
         from pipeline.model_utils.yi_model import YiModel
         return YiModel(model_path)
     elif 'falcon3' in model_path.lower():
-        from pipeline.model_utils.olmo_model import OlmoModel
-        return OlmoModel(model_path)
+        from pipeline.model_utils.falcon3_model import Falcon3Model
+        return Falcon3Model(model_path)
     elif 'olmo' in model_path.lower():
         from pipeline.model_utils.olmo_model import OlmoModel
         return OlmoModel(model_path)

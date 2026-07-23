@@ -72,6 +72,13 @@ ROTATION_PHASE_COLORS = {
 DEFAULT_RDO_EXP_LIST = (
     PROJECT_ROOT / "results" / "rdo_refusal" / "analysis" / "rdo_exp_list.txt"
 )
+RDO_MODEL_KEY_MARKERS = (
+    ("qwen-1.5b-ease", ("qwen2.5-1.5b-instruct-ease", "qwen2.5-1.5b", "ease")),
+    ("falcon-7b-base", ("falcon3-7b-base", "falcon3")),
+    ("deepseek", ("deepseek",)),
+    ("olmo", ("olmo",)),
+    ("qwen", ("qwen",)),
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -155,6 +162,14 @@ def _clean_field(value: Any) -> str:
     return str(value).strip().lower()
 
 
+def _model_identifier_variants(value: Any) -> set[str]:
+    """Return comparable full-repository and basename model identifiers."""
+    cleaned = _clean_field(value)
+    if not cleaned:
+        return set()
+    return {cleaned, cleaned.rsplit("/", 1)[-1]}
+
+
 def _is_plotted_metric(row: dict[str, Any]) -> bool:
     benchmark = _clean_field(row.get("benchmark", ""))
     metric = _clean_field(row.get("metric", ""))
@@ -231,16 +246,14 @@ def load_rdo_references(map_path: Path) -> list[dict[str, Any]]:
                 )
             ] = value
 
-        identifiers = {
-            _clean_field(model_key),
-            _clean_field(hparams.get("model")),
-            _clean_field(hparams.get("model_id")),
-        }
+        identifiers = set()
+        for value in (model_key, hparams.get("model"), hparams.get("model_id")):
+            identifiers.update(_model_identifier_variants(value))
         references.append(
             {
                 "model_key": model_key.strip(),
                 "experiment_dir": str(experiment_dir),
-                "identifiers": {value for value in identifiers if value},
+                "identifiers": identifiers,
                 "metrics": lookup,
             }
         )
@@ -251,25 +264,43 @@ def rdo_reference_for_family(
     family_parameters: dict[str, Any],
     references: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Match a family to the mapped RDO run by model/model_id, then map alias."""
-    family_identifiers = {
-        _clean_field(family_parameters.get("model")),
-        _clean_field(family_parameters.get("model_id")),
-    }
-    family_identifiers.discard("")
+    """Match a family to an RDO run by identifier, then specific map-key markers."""
+    family_identifiers = set()
+    for value in (
+        family_parameters.get("model"),
+        family_parameters.get("model_id"),
+    ):
+        family_identifiers.update(_model_identifier_variants(value))
     for reference in references:
         if family_identifiers & set(reference["identifiers"]):
             return reference
 
     joined = " ".join(sorted(family_identifiers))
-    aliases = ("deepseek", "olmo", "qwen")
-    for alias in aliases:
-        if alias in joined:
+    for model_key, markers in RDO_MODEL_KEY_MARKERS:
+        if any(marker in joined for marker in markers):
             for reference in references:
-                if _clean_field(reference["model_key"]) == alias:
+                if _clean_field(reference["model_key"]) == model_key:
                     return reference
-            break
+            return None
     return None
+
+
+def require_rdo_reference_for_family(
+    family_parameters: dict[str, Any],
+    references: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Return the mapped baseline or fail instead of silently omitting it."""
+    reference = rdo_reference_for_family(family_parameters, references)
+    if reference is not None:
+        return reference
+    model = family_parameters.get("model") or family_parameters.get("model_id")
+    available_keys = ", ".join(
+        str(reference["model_key"]) for reference in references
+    )
+    raise ValueError(
+        f"No RDO baseline experiment matched model {model!r}; "
+        f"available map keys: {available_keys}"
+    )
 
 
 def load_experiments(
@@ -609,7 +640,7 @@ def main() -> int:
 
     family_dir = output_dir / "families" / f"family_{comparison_id}"
     family_dir.mkdir(parents=True, exist_ok=True)
-    rdo_reference = rdo_reference_for_family(
+    rdo_reference = require_rdo_reference_for_family(
         parameter_sets["activation"],
         rdo_references,
     )
