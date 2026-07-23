@@ -70,15 +70,22 @@ def parse_args() -> argparse.Namespace:
         "-a",
         "--activation-experiment",
         type=Path,
-        required=True,
         help="activation_additive_rot experiment-family directory",
     )
     parser.add_argument(
         "-s",
         "--stiefel-experiment",
         type=Path,
-        required=True,
         help="shtiefel_additive_rot experiment-family directory",
+    )
+    parser.add_argument(
+        "-b",
+        "--baseline-experiment",
+        type=Path,
+        help=(
+            "baseline experiment-family directory; when provided, plot only "
+            "this experiment without mapped RDO reference lines"
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -99,7 +106,13 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_RDO_EXP_LIST,
         help="Model-to-RDO-experiment map used for horizontal reference lines",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.baseline_experiment is not None:
+        if args.activation_experiment is not None or args.stiefel_experiment is not None:
+            parser.error("-b/--baseline-experiment cannot be combined with -a or -s")
+    elif args.activation_experiment is None or args.stiefel_experiment is None:
+        parser.error("provide either -b, or both -a and -s")
+    return args
 
 
 def _json_safe(value: Any) -> Any:
@@ -359,6 +372,15 @@ def plot_family(
     family_df.to_csv(table_dir / "aggregated_metrics.csv", index=False)
 
     generated: list[str] = []
+    available_families = set(family_df["rotation_family"].astype(str))
+    rotation_families = tuple(
+        family
+        for family in ("activation", "stiefel", "baseline")
+        if family in available_families
+    )
+    initial_family = (
+        "activation" if "activation" in available_families else rotation_families[0]
+    )
     series_columns = ["benchmark", "backend", "group", "metric"]
     for series_key, series_df in family_df.groupby(series_columns, dropna=False):
         benchmark, backend, group, metric = [str(value) for value in series_key]
@@ -366,7 +388,7 @@ def plot_family(
         x_ticks: set[int] = set()
         initial_df = series_df[
             (series_df["phase"] == "initial")
-            & (series_df["rotation_family"] == "activation")
+            & (series_df["rotation_family"] == initial_family)
         ].sort_values("num_opt_layers")
         if initial_df.empty:
             initial_df = series_df[series_df["phase"] == "initial"].sort_values(
@@ -385,7 +407,7 @@ def plot_family(
                 label=PHASE_LABELS["initial"],
             )
 
-        for rotation_family in ("activation", "stiefel"):
+        for rotation_family in rotation_families:
             for phase in ("refined_attack", "refined_protect"):
                 phase_df = series_df[
                     (series_df["phase"] == phase)
@@ -397,15 +419,23 @@ def plot_family(
                 means = phase_df["mean"].to_numpy(dtype=float)
                 stds = phase_df["std"].to_numpy(dtype=float)
                 x_ticks.update(int(value) for value in x_values)
-                curve_color = ROTATION_PHASE_COLORS[(rotation_family, phase)]
+                curve_color = ROTATION_PHASE_COLORS.get(
+                    (rotation_family, phase),
+                    PHASE_COLORS[phase],
+                )
+                marker = ROTATION_MARKERS.get(rotation_family, "^")
+                rotation_label = ROTATION_LABELS.get(
+                    rotation_family,
+                    rotation_family.replace("_", " ").title(),
+                )
                 axis.plot(
                     x_values,
                     means,
-                    marker=ROTATION_MARKERS[rotation_family],
+                    marker=marker,
                     linewidth=2,
                     linestyle="-",
                     color=curve_color,
-                    label=f"{ROTATION_LABELS[rotation_family]} {phase.removeprefix('refined_')}",
+                    label=f"{rotation_label} {phase.removeprefix('refined_')}",
                 )
                 if (stds > 0).any():
                     axis.fill_between(
@@ -477,13 +507,18 @@ def main() -> int:
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    experiment_specs = (
-        ("activation", "activation_additive_rot", args.activation_experiment),
-        ("stiefel", "shtiefel_additive_rot", args.stiefel_experiment),
-    )
+    baseline_only = args.baseline_experiment is not None
+    if baseline_only:
+        experiment_specs = (("baseline", "baseline", args.baseline_experiment),)
+    else:
+        experiment_specs = (
+            ("activation", "activation_additive_rot", args.activation_experiment),
+            ("stiefel", "shtiefel_additive_rot", args.stiefel_experiment),
+        )
     record_frames: list[pd.DataFrame] = []
     parameter_sets: dict[str, dict[str, Any]] = {}
     diagnostics: dict[str, Any] = {
+        "mode": "baseline_only" if baseline_only else "rotation_comparison",
         "experiments": {},
         "runs_discovered": 0,
         "runs_loaded": 0,
@@ -518,19 +553,27 @@ def main() -> int:
     records = pd.concat(record_frames, ignore_index=True)
     comparison_id = _family_id(parameter_sets)
     records["family_id"] = comparison_id
-    rdo_references = load_rdo_references(args.rdo_exp_list.resolve())
     if records.empty:
         raise RuntimeError("No supported metrics were found in the experiment directories")
-    aggregated = aggregate_metrics(records, reject_duplicates=True)
+    # Baseline-only directories may contain repeated runs for the same nol.
+    # Treat those as replicates and report their mean/std; paired rotation
+    # comparisons remain strict so accidentally duplicated runs are not hidden.
+    aggregated = aggregate_metrics(records, reject_duplicates=not baseline_only)
+    diagnostics["duplicate_policy"] = (
+        "average_replicates" if baseline_only else "reject"
+    )
     records.to_csv(output_dir / "run_metrics.csv", index=False)
     aggregated.to_csv(output_dir / "aggregated_metrics.csv", index=False)
 
     family_dir = output_dir / "families" / f"family_{comparison_id}"
     family_dir.mkdir(parents=True, exist_ok=True)
-    rdo_reference = require_rdo_reference_for_family(
-        parameter_sets["activation"],
-        rdo_references,
-    )
+    rdo_reference = None
+    if not baseline_only:
+        rdo_references = load_rdo_references(args.rdo_exp_list.resolve())
+        rdo_reference = require_rdo_reference_for_family(
+            parameter_sets["activation"],
+            rdo_references,
+        )
     (family_dir / "family_parameters.json").write_text(
         json.dumps(parameter_sets, indent=2, sort_keys=True),
         encoding="utf-8",
@@ -565,6 +608,7 @@ def main() -> int:
     )
     summary = {
         "x_parameter": "num_opt_layers",
+        "mode": diagnostics["mode"],
         "families": family_summaries,
         "generated_plot_files": generated_plots,
     }

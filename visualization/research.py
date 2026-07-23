@@ -28,6 +28,7 @@ MAJOR_GUARD_METRICS = ("n", "mean_score", "mean_unsafe_probability", "pct_unsafe
 VOLATILE_FAMILY_KEYS = {
     "num_opt_layers",
     "result_path",
+    "result_root",
     "add_layer",
     "alpha",
     "cone_dim",
@@ -37,6 +38,7 @@ VOLATILE_IM_FAMILY_KEYS = VOLATILE_FAMILY_KEYS | {"init_mode"}
 VOLATILE_PRR_FAMILY_KEYS = {
     "proj_reduce_ratio",
     "result_path",
+    "result_root",
     "add_layer",
     "alpha",
     "cone_dim",
