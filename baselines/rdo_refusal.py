@@ -46,6 +46,15 @@ from baselines.additive_rotation_ops import (
     select_activation_additive_layers,
     select_baseline_ablation_layers,
 )
+from baselines.angular_steering_ops import (
+    PaperAngularSteering,
+    extract_saladbench_plane,
+    unwrap_hf_model,
+)
+from baselines.spherical_steering_ops import (
+    PaperSphericalSteering,
+    extract_saladbench_prototypes,
+)
 
 dotenv.load_dotenv(override=True)
 
@@ -278,8 +287,16 @@ def parse_args():
     Returns:
         argparse.Namespace: Parsed arguments with default values if not specified.
     """
-    # If running in interactive mode
-    if not sys.argv[0].endswith('rdo.py') and not sys.argv[0].endswith('rdo_refusal.py'):
+    # If running in interactive mode (notebooks / REPL), skip CLI parsing.
+    # Accept both the RDO module and the paper-angular CLI entrypoint.
+    _argv0 = os.path.basename(str(sys.argv[0]))
+    _cli_entrypoints = {
+        "rdo.py",
+        "rdo_refusal.py",
+        "angular_steering_refusal.py",
+        "spherical_steering_refusal.py",
+    }
+    if _argv0 not in _cli_entrypoints:
         return argparse.Namespace(**DEFAULT_CONFIG)
     
     # If running from command line
@@ -341,8 +358,31 @@ def parse_args():
         help='Delete checkpoint .pt files only after training and end-of-run evaluation succeed',
     )
     parser.add_argument('--direction_mode', type=str, default=DEFAULT_CONFIG['direction_mode'],
-                    choices=['baseline', 'rotation', 'activation_rot', 'activation_additive_rot', 'shtiefel_rot', 'shtiefel_proj_rot', 'shtiefel_additive_rot', 'angular_steering', 'householder_pseudo_rotation'],
-                    help='baseline: original RefusalCone. rotation: learn orthogonal M (Cayley), r=M@r0; requires cone_dim=1')
+                    choices=['baseline', 'rotation', 'activation_rot', 'activation_additive_rot', 'shtiefel_rot', 'shtiefel_proj_rot', 'shtiefel_additive_rot', 'angular_steering', 'householder_pseudo_rotation', 'paper_angular_steering', 'paper_spherical_steering'],
+                    help='baseline: original RefusalCone. rotation: learn orthogonal M (Cayley), r=M@r0; requires cone_dim=1. paper_*_steering: upstream inference-time steering (no DIM/train)')
+    parser.add_argument('--angular_strategy', type=str, default='max_sim',
+                    choices=['max_sim', 'max_norm'],
+                    help='Layer-selection strategy for paper_angular_steering plane extraction')
+    parser.add_argument('--angular_adaptive_mode', type=int, default=1, choices=[0, 1],
+                    help='Adaptive steering mode for paper_angular_steering (0=always, 1=conditional)')
+    parser.add_argument('--angular_attack_degree', type=float, default=180.0,
+                    help='Attack rotation angle (degrees) for paper_angular_steering')
+    parser.add_argument('--angular_protect_degree', type=float, default=0.0,
+                    help='Protect rotation angle (degrees) for paper_angular_steering')
+    parser.add_argument('--angular_n_extract_samples', type=int, default=512,
+                    help='Max SaladBench samples used to extract the paper_angular_steering plane')
+    parser.add_argument('--angular_extract_batch_size', type=int, default=8,
+                    help='Batch size for paper_angular_steering activation extraction')
+    parser.add_argument('--spherical_kappa', type=float, default=20.0,
+                    help='vMF concentration for paper_spherical_steering')
+    parser.add_argument('--spherical_alpha', type=float, default=0.7,
+                    help='Max rotation strength for paper_spherical_steering')
+    parser.add_argument('--spherical_beta', type=float, default=0.1,
+                    help='Gate threshold (p_H - p_T) for paper_spherical_steering')
+    parser.add_argument('--spherical_n_extract_samples', type=int, default=512,
+                    help='Max SaladBench samples used to extract paper_spherical_steering prototypes')
+    parser.add_argument('--spherical_extract_batch_size', type=int, default=8,
+                    help='Batch size for paper_spherical_steering activation extraction')
     parser.add_argument(
         '--num_opt_layers',
         type=int,
@@ -599,31 +639,55 @@ with model.trace("Hello") as tracer:
 
 # %%
 model_id = MODEL_PATH.split("/")[-1]
+_PAPER_ANGULAR_MODE = "paper_angular_steering"
+_PAPER_SPHERICAL_MODE = "paper_spherical_steering"
+_PAPER_INFERENCE_MODES = {_PAPER_ANGULAR_MODE, _PAPER_SPHERICAL_MODE}
+_skip_dim = args.direction_mode in _PAPER_INFERENCE_MODES
+
 dim_dir_path = f"{os.getenv('SAVE_DIR')}/{os.getenv('DIM_DIR')}/{model_id}"
 direction_file = f"{dim_dir_path}/direction.pt"
 metadata_file = f"{dim_dir_path}/direction_metadata.json"
 mean_diffs_file = f"{dim_dir_path}/generate_directions/mean_diffs.pt"
 
-# Check if DIM direction files exist
-if not (os.path.exists(direction_file) and os.path.exists(metadata_file)):
-    raise FileNotFoundError(
-        "DIM direction files not found. Please compute the DIM directions first as described in the README."
-    )
+refusal_directions = None
+best_layer = None
+best_token = None
+best_refusal_direction = None
+add_layer = None
+alpha = None
 
-load_map_location = "cuda" if torch.cuda.is_available() else "cpu"
-refusal_directions = torch.load(mean_diffs_file, map_location=load_map_location)
-refusal_results = json.load(open(metadata_file))
-best_layer = refusal_results["layer"]
-best_token = refusal_results["pos"]
-best_refusal_direction = torch.load(direction_file, map_location=load_map_location).to(model.dtype)
+if _skip_dim:
+    print(
+        f"[{args.direction_mode}] Skipping DIM load; "
+        f"steering artifacts will be extracted from SaladBench."
+    )
+    alpha = torch.tensor(1.0)
+    add_layer = -1
+    best_layer = 0
+    best_token = -1
+    best_refusal_direction = torch.zeros(
+        int(model.config.hidden_size), dtype=model.dtype, device=_runtime_device()
+    )
+else:
+    # Check if DIM direction files exist
+    if not (os.path.exists(direction_file) and os.path.exists(metadata_file)):
+        raise FileNotFoundError(
+            "DIM direction files not found. Please compute the DIM directions first as described in the README."
+        )
+
+    load_map_location = "cuda" if torch.cuda.is_available() else "cpu"
+    refusal_directions = torch.load(mean_diffs_file, map_location=load_map_location)
+    refusal_results = json.load(open(metadata_file))
+    best_layer = refusal_results["layer"]
+    best_token = refusal_results["pos"]
+    best_refusal_direction = torch.load(direction_file, map_location=load_map_location).to(model.dtype)
+    add_layer = best_layer
+    alpha = best_refusal_direction.norm().detach().clone()
+    print(f"add_layer: {add_layer}, alpha: {alpha}")
 
 # %%
 SAVE_DIR = f"{os.getenv('SAVE_DIR')}/rdo/{MODEL_PATH.split('/')[-1]}/"
 os.makedirs(SAVE_DIR, exist_ok=True)
-
-add_layer = best_layer
-alpha = best_refusal_direction.norm().detach().clone()
-print(f"add_layer: {add_layer}, alpha: {alpha}")
 
 # %%
 harmful_train = json.load(open(f'data/{splits}_splits/harmful_train.json'))
@@ -800,9 +864,18 @@ num_target_tokens = 30
 harmful_targets_path = f"{os.getenv('SAVE_DIR')}/rdo/{model_id}/{splits}/targets/harmful_targets.json"
 harmless_targets_path = f"{os.getenv('SAVE_DIR')}/rdo/{model_id}/{splits}/targets/harmless_targets.json"
 
-# Generate all targets
-harmful_targets = generate_harmful_targets(model, harmful_train_instructions, best_refusal_direction, harmful_targets_path, num_target_tokens)
-harmless_targets = generate_harmless_targets(model, harmless_train_instructions, harmless_targets_path, num_target_tokens)
+# Generate all targets (DIM-based; skipped for paper_angular_steering which does not train)
+if _skip_dim:
+    print(f"[{args.direction_mode}] Skipping DIM-based train target generation.")
+    harmful_targets = [
+        {"prompt": p, "ablation": ""} for p in harmful_train_instructions
+    ]
+    harmless_targets = [
+        {"prompt": p, "addition": "", "retain": ""} for p in harmless_train_instructions
+    ]
+else:
+    harmful_targets = generate_harmful_targets(model, harmful_train_instructions, best_refusal_direction, harmful_targets_path, num_target_tokens)
+    harmless_targets = generate_harmless_targets(model, harmless_train_instructions, harmless_targets_path, num_target_tokens)
 
 # %%
 if args.filter_data:
@@ -3333,6 +3406,143 @@ def refusal_cone_optimization(model, train_dataset,
     }
 
 # %%
+def _prepare_paper_angular_steering_artifacts(*, tb_writer, tb_checkpoint_dir: str) -> dict:
+    """Extract SaladBench plane, save checkpoints, return results for end-of-run eval."""
+    os.makedirs(tb_checkpoint_dir, exist_ok=True)
+    hf_model = unwrap_hf_model(model)
+    plane = extract_saladbench_plane(
+        hf_model=hf_model,
+        tokenizer=model.tokenizer,
+        harmful_instructions=[d["instruction"] for d in harmful_train],
+        harmless_instructions=[d["instruction"] for d in harmless_train],
+        strategy=str(getattr(args, "angular_strategy", "max_sim")),
+        n_samples=int(getattr(args, "angular_n_extract_samples", 512)),
+        batch_size=int(getattr(args, "angular_extract_batch_size", 8)),
+    )
+    plane_payload = {
+        **plane,
+        "attack_degree": float(getattr(args, "angular_attack_degree", 180.0)),
+        "protect_degree": float(getattr(args, "angular_protect_degree", 0.0)),
+        "adaptive_mode": int(getattr(args, "angular_adaptive_mode", 1)),
+        "apply_all_layers": True,
+    }
+    plane_path = os.path.join(tb_checkpoint_dir, "steering_plane.pt")
+    torch.save(plane_payload, plane_path)
+
+    # Compatibility stubs expected by shared loaders / naming.
+    dummy_vec = plane_payload["b1"].detach().cpu().clone()
+    torch.save(dummy_vec, os.path.join(tb_checkpoint_dir, "lowest_loss_vector.pt"))
+    torch.save(dummy_vec.unsqueeze(0), os.path.join(tb_checkpoint_dir, "vectors.pt"))
+
+    active_layers = torch.tensor(
+        list(range(int(model.config.num_hidden_layers))), dtype=torch.long
+    )
+    torch.save(active_layers, os.path.join(tb_checkpoint_dir, "active_layers.pt"))
+    with open(os.path.join(tb_checkpoint_dir, "layer_training_info.txt"), "w") as f:
+        f.write(
+            f"paper_angular_steering selected_layer={plane_payload['layer']} "
+            f"position={plane_payload['position']} strategy={plane_payload['strategy']}\n"
+            f"apply_all_layers=True attack_degree={plane_payload['attack_degree']} "
+            f"protect_degree={plane_payload['protect_degree']}\n"
+        )
+
+    if tb_writer is not None:
+        tb_writer.add_scalar("paper_angular/selected_layer", float(plane_payload["layer"]), 0)
+        tb_writer.add_scalar("paper_angular/attack_degree", float(plane_payload["attack_degree"]), 0)
+        tb_writer.add_scalar("paper_angular/protect_degree", float(plane_payload["protect_degree"]), 0)
+
+    # Refresh hparams with the selected extraction layer / plane metadata.
+    hparams_path = os.path.join(os.path.dirname(tb_checkpoint_dir), "hparams.json")
+    if os.path.isfile(hparams_path):
+        try:
+            with open(hparams_path, "r", encoding="utf-8") as f:
+                hp = json.load(f)
+            hp["add_layer"] = int(plane_payload["layer"])
+            hp["angular_selected_layer"] = int(plane_payload["layer"])
+            hp["angular_selected_position"] = str(plane_payload["position"])
+            hp["strategy"] = plane_payload["strategy"]
+            hp["adaptive_mode"] = int(plane_payload["adaptive_mode"])
+            hp["attack_degree"] = float(plane_payload["attack_degree"])
+            hp["protect_degree"] = float(plane_payload["protect_degree"])
+            hp["n_extract_samples"] = int(plane_payload["n_extract_samples"])
+            with open(hparams_path, "w", encoding="utf-8") as f:
+                json.dump(hp, f, indent=2)
+        except Exception as exc:
+            print(f"[{_PAPER_ANGULAR_MODE}] Warning: could not update hparams.json: {exc}")
+
+    print(f"[{_PAPER_ANGULAR_MODE}] Saved plane checkpoint: {plane_path}")
+    return {
+        "lowest_loss_vector": dummy_vec,
+        "lowest_loss_cayley_param": plane_payload,
+        "steering_plane": plane_payload,
+        "vectors": dummy_vec.unsqueeze(0),
+    }
+
+
+def _prepare_paper_spherical_steering_artifacts(*, tb_writer, tb_checkpoint_dir: str) -> dict:
+    """Extract SaladBench prototypes, save checkpoints, return results for end-of-run eval."""
+    os.makedirs(tb_checkpoint_dir, exist_ok=True)
+    hf_model = unwrap_hf_model(model)
+    prototype = extract_saladbench_prototypes(
+        hf_model=hf_model,
+        tokenizer=model.tokenizer,
+        harmful_instructions=[d["instruction"] for d in harmful_train],
+        harmless_instructions=[d["instruction"] for d in harmless_train],
+        n_samples=int(getattr(args, "spherical_n_extract_samples", 512)),
+        batch_size=int(getattr(args, "spherical_extract_batch_size", 8)),
+        kappa=float(getattr(args, "spherical_kappa", 20.0)),
+        alpha=float(getattr(args, "spherical_alpha", 0.7)),
+        beta=float(getattr(args, "spherical_beta", 0.1)),
+    )
+    proto_payload = {**prototype}
+    proto_path = os.path.join(tb_checkpoint_dir, "steering_prototype.pt")
+    torch.save(proto_payload, proto_path)
+
+    dummy_vec = proto_payload["mu_harm"].detach().cpu().clone()
+    torch.save(dummy_vec, os.path.join(tb_checkpoint_dir, "lowest_loss_vector.pt"))
+    torch.save(dummy_vec.unsqueeze(0), os.path.join(tb_checkpoint_dir, "vectors.pt"))
+
+    active_layers = torch.tensor([int(proto_payload["layer"])], dtype=torch.long)
+    torch.save(active_layers, os.path.join(tb_checkpoint_dir, "active_layers.pt"))
+    with open(os.path.join(tb_checkpoint_dir, "layer_training_info.txt"), "w") as f:
+        f.write(
+            f"paper_spherical_steering selected_layer={proto_payload['layer']} "
+            f"kappa={proto_payload['kappa']} alpha={proto_payload['alpha']} "
+            f"beta={proto_payload['beta']} diff_norm={proto_payload.get('diff_norm')}\n"
+            f"attack=(mu_T=mu_harm, mu_H=mu_safe) protect=(mu_T=mu_safe, mu_H=mu_harm)\n"
+        )
+
+    if tb_writer is not None:
+        tb_writer.add_scalar("paper_spherical/selected_layer", float(proto_payload["layer"]), 0)
+        tb_writer.add_scalar("paper_spherical/kappa", float(proto_payload["kappa"]), 0)
+        tb_writer.add_scalar("paper_spherical/alpha", float(proto_payload["alpha"]), 0)
+        tb_writer.add_scalar("paper_spherical/beta", float(proto_payload["beta"]), 0)
+
+    hparams_path = os.path.join(os.path.dirname(tb_checkpoint_dir), "hparams.json")
+    if os.path.isfile(hparams_path):
+        try:
+            with open(hparams_path, "r", encoding="utf-8") as f:
+                hp = json.load(f)
+            hp["add_layer"] = int(proto_payload["layer"])
+            hp["spherical_selected_layer"] = int(proto_payload["layer"])
+            hp["spherical_kappa"] = float(proto_payload["kappa"])
+            hp["spherical_alpha"] = float(proto_payload["alpha"])
+            hp["spherical_beta"] = float(proto_payload["beta"])
+            hp["n_extract_samples"] = int(proto_payload["n_extract_samples"])
+            with open(hparams_path, "w", encoding="utf-8") as f:
+                json.dump(hp, f, indent=2)
+        except Exception as exc:
+            print(f"[{_PAPER_SPHERICAL_MODE}] Warning: could not update hparams.json: {exc}")
+
+    print(f"[{_PAPER_SPHERICAL_MODE}] Saved prototype checkpoint: {proto_path}")
+    return {
+        "lowest_loss_vector": dummy_vec,
+        "lowest_loss_cayley_param": proto_payload,
+        "steering_prototype": proto_payload,
+        "vectors": dummy_vec.unsqueeze(0),
+    }
+
+
 def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], **kwargs):
     """
     Train a single refusal direction vector.
@@ -3412,18 +3622,45 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
         )
         tb_run_dir = os.path.join(_tensorboard_result_root(), subdir)
         os.makedirs(tb_run_dir, exist_ok=True)
+        # Record paper-steering defaults in hparams for ablation tooling.
+        if _dm == _PAPER_ANGULAR_MODE:
+            run_config.setdefault("strategy", getattr(args, "angular_strategy", "max_sim"))
+            run_config.setdefault("adaptive_mode", getattr(args, "angular_adaptive_mode", 1))
+            run_config.setdefault("attack_degree", getattr(args, "angular_attack_degree", 180.0))
+            run_config.setdefault("protect_degree", getattr(args, "angular_protect_degree", 0.0))
+            run_config.setdefault(
+                "n_extract_samples", getattr(args, "angular_n_extract_samples", 512)
+            )
+        if _dm == _PAPER_SPHERICAL_MODE:
+            run_config.setdefault("spherical_kappa", getattr(args, "spherical_kappa", 20.0))
+            run_config.setdefault("spherical_alpha", getattr(args, "spherical_alpha", 0.7))
+            run_config.setdefault("spherical_beta", getattr(args, "spherical_beta", 0.1))
+            run_config.setdefault(
+                "n_extract_samples", getattr(args, "spherical_n_extract_samples", 512)
+            )
         save_run_hparams(tb_run_dir, run_config)
 
         tb_writer = SummaryWriter(log_dir=tb_run_dir)
         tb_checkpoint_dir = os.path.join(tb_run_dir, "checkpoints")
         try:
-            results = refusal_cone_optimization(
-                model=model,
-                train_dataset=train_dataset,
-                tb_writer=tb_writer,
-                tb_checkpoint_dir=tb_checkpoint_dir,
-                **train_kwargs
-            )
+            if _dm == _PAPER_ANGULAR_MODE:
+                results = _prepare_paper_angular_steering_artifacts(
+                    tb_writer=tb_writer,
+                    tb_checkpoint_dir=tb_checkpoint_dir,
+                )
+            elif _dm == _PAPER_SPHERICAL_MODE:
+                results = _prepare_paper_spherical_steering_artifacts(
+                    tb_writer=tb_writer,
+                    tb_checkpoint_dir=tb_checkpoint_dir,
+                )
+            else:
+                results = refusal_cone_optimization(
+                    model=model,
+                    train_dataset=train_dataset,
+                    tb_writer=tb_writer,
+                    tb_checkpoint_dir=tb_checkpoint_dir,
+                    **train_kwargs
+                )
         finally:
             tb_writer.close()
         print(f"TensorBoard log dir: {tb_run_dir}")
@@ -3731,7 +3968,23 @@ def _load_training_results_from_result_path(result_path: str, direction_mode: st
     lowest_vec = torch.load(lowest_vec_path, map_location="cpu")
 
     lowest_cayley = None
-    if direction_mode != "baseline":
+    steering_plane = None
+    steering_prototype = None
+    if direction_mode == _PAPER_ANGULAR_MODE:
+        plane_path = _req(
+            os.path.join(ckpt_dir, "steering_plane.pt"),
+            "steering_plane.pt (required for paper_angular_steering)",
+        )
+        steering_plane = torch.load(plane_path, map_location="cpu")
+        lowest_cayley = steering_plane
+    elif direction_mode == _PAPER_SPHERICAL_MODE:
+        proto_path = _req(
+            os.path.join(ckpt_dir, "steering_prototype.pt"),
+            "steering_prototype.pt (required for paper_spherical_steering)",
+        )
+        steering_prototype = torch.load(proto_path, map_location="cpu")
+        lowest_cayley = steering_prototype
+    elif direction_mode != "baseline":
         lowest_cayley_path = _req(
             os.path.join(ckpt_dir, "lowest_loss_cayley_param.pt"),
             "lowest_loss_cayley_param.pt (required for non-baseline direction_mode)",
@@ -3743,6 +3996,10 @@ def _load_training_results_from_result_path(result_path: str, direction_mode: st
         "lowest_loss_vector": lowest_vec,
         "lowest_loss_cayley_param": lowest_cayley,
     }
+    if steering_plane is not None:
+        results["steering_plane"] = steering_plane
+    if steering_prototype is not None:
+        results["steering_prototype"] = steering_prototype
 
     # Optional: keep compatibility with any downstream that expects these keys.
     vectors_path = os.path.join(ckpt_dir, "vectors.pt")
@@ -3760,9 +4017,19 @@ def _extract_refined_artifact(training_results: dict, direction_mode: str):
     Return an object representing the learned "refined" intervention.
     - baseline/rotation: a vector direction (Tensor [d_model])
     - rotation modes: per-layer dense intervention matrix (Tensor [n_layers, d, d])
+    - paper_angular_steering: plane dict with b1/b2/layer/degrees
+    - paper_spherical_steering: prototype dict with mu_harm/mu_safe/layer/kappa/alpha/beta
     """
     if training_results is None:
         return None
+    if direction_mode == _PAPER_ANGULAR_MODE:
+        return training_results.get("steering_plane") or training_results.get(
+            "lowest_loss_cayley_param"
+        )
+    if direction_mode == _PAPER_SPHERICAL_MODE:
+        return training_results.get("steering_prototype") or training_results.get(
+            "lowest_loss_cayley_param"
+        )
     if direction_mode != "baseline":
         return training_results.get("lowest_loss_cayley_param")
 
@@ -4130,6 +4397,8 @@ def _supports_protect_guard_mode(direction_mode: str) -> bool:
         "shtiefel_additive_rot",
         "activation_rot",
         "activation_additive_rot",
+        "paper_angular_steering",
+        "paper_spherical_steering",
     }
 
 
@@ -4543,6 +4812,60 @@ def _evaluate_end_metrics(
                     num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
                     best_layer=best_layer,
                 )
+            if direction_mode == _PAPER_ANGULAR_MODE:
+                if not isinstance(refined_artifact, dict):
+                    raise ValueError(
+                        "paper_angular_steering refined_artifact must be a plane dict"
+                    )
+                return PaperAngularSteering(
+                    model.model,
+                    refined_artifact,
+                    attack_degree=float(
+                        refined_artifact.get(
+                            "attack_degree",
+                            getattr(args, "angular_attack_degree", 180.0),
+                        )
+                    ),
+                    protect_degree=float(
+                        refined_artifact.get(
+                            "protect_degree",
+                            getattr(args, "angular_protect_degree", 0.0),
+                        )
+                    ),
+                    adaptive_mode=int(
+                        refined_artifact.get(
+                            "adaptive_mode",
+                            getattr(args, "angular_adaptive_mode", 1),
+                        )
+                    ),
+                    apply_all_layers=bool(
+                        refined_artifact.get("apply_all_layers", True)
+                    ),
+                )
+            if direction_mode == _PAPER_SPHERICAL_MODE:
+                if not isinstance(refined_artifact, dict):
+                    raise ValueError(
+                        "paper_spherical_steering refined_artifact must be a prototype dict"
+                    )
+                return PaperSphericalSteering(
+                    model.model,
+                    refined_artifact,
+                    kappa=float(
+                        refined_artifact.get(
+                            "kappa", getattr(args, "spherical_kappa", 20.0)
+                        )
+                    ),
+                    alpha=float(
+                        refined_artifact.get(
+                            "alpha", getattr(args, "spherical_alpha", 0.7)
+                        )
+                    ),
+                    beta=float(
+                        refined_artifact.get(
+                            "beta", getattr(args, "spherical_beta", 0.1)
+                        )
+                    ),
+                )
             if direction_mode == "householder_pseudo_rotation":
                 return RefusalHouseholderPseudoRotation(
                     model.model,
@@ -4585,8 +4908,20 @@ def _evaluate_end_metrics(
         refined_rotation_model = None
         if refined_artifact is not None and direction_mode != "baseline":
             refined_rotation_model = _build_refined_rotation_model()
-            if refined_rotation_model is not None:
+            if refined_rotation_model is not None and direction_mode not in _PAPER_INFERENCE_MODES:
                 _prime_rotation_model_cache(refined_rotation_model, refined_artifact)
+            elif (
+                refined_rotation_model is not None
+                and direction_mode == _PAPER_ANGULAR_MODE
+                and isinstance(refined_artifact, dict)
+            ):
+                refined_rotation_model.import_plane_checkpoint(refined_artifact)
+            elif (
+                refined_rotation_model is not None
+                and direction_mode == _PAPER_SPHERICAL_MODE
+                and isinstance(refined_artifact, dict)
+            ):
+                refined_rotation_model.import_prototype_checkpoint(refined_artifact)
 
         def _make_refined_step_fn(refined_artifact, guard_mode: str = "attack"):
             if refined_artifact is None:

@@ -6,13 +6,13 @@ cd "$(dirname "$0")/../.."
 
 # GPU used for every sequential run.
 # Override with: CUDA_VISIBLE_DEVICES=1 ./scripts/grid_scripts/run_rdo_refusal_grid.sh
-CUDA_VISIBLE_DEVICES=5
+CUDA_VISIBLE_DEVICES=0
 cuda_visible_devices="${CUDA_VISIBLE_DEVICES:-0}"
 
 # Root directory where this grid stores TensorBoard experiment run directories.
 # Override with: RESULT_ROOT=/path/to/tensorboard ./scripts/grid_scripts/run_rdo_refusal_grid.sh
 
-RESULT_ROOT="/home/user1/buka2004/LLM-Attack-Defense/results/rdo_refusal/AAAI-results/r-ablations/falcon-7b-base/shtiefel_additive_rot"
+RESULT_ROOT="/home/user1/buka2004/LLM-Attack-Defense/results/rdo_refusal/AAAI-results/baseline/nol-ablations/falcon-7b-base"
 
 result_root="${RESULT_ROOT:-./results/rdo_refusal/tensorboard}"
 if [[ -z "${result_root}" ]]; then
@@ -25,12 +25,12 @@ fi
 model_values=(
   "tiiuae/Falcon3-7B-Base"
 )
-direction_mode_values=(shtiefel_additive_rot) # baseline activation_additive_rot shtiefel_additive_rot
-k_proj_values=(1 2 10 20 35 50 70 100 150 200)
-n_of_layers_values=(0)
+direction_mode_values=(baseline) # baseline activation_additive_rot shtiefel_additive_rot
+k_proj_values=(35)
+n_of_layers_values=(1 3 4 5 7 12 15 20)
 
 # Loss weights (defaults match scripts/run_rdo_refusal.sh).
-# ADDITION_LAMBDA=0.2
+ADDITION_LAMBDA=0.2
 
 ablation_lambda="${ABLATION_LAMBDA:-1.0}"
 addition_lambda="${ADDITION_LAMBDA:-0.0}"
