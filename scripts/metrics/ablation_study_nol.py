@@ -29,12 +29,11 @@ from visualization.research import (  # noqa: E402
 from scripts.metrics.ablation_study_r import (  # noqa: E402
     DEFAULT_RDO_EXP_LIST,
     RDO_PHASE_COLORS,
-    RDO_PHASE_LABELS,
     ROTATION_LABELS,
     ROTATION_MARKERS,
     ROTATION_PHASE_COLORS,
     load_rdo_references,
-    require_rdo_reference_for_family,
+    require_baseline_references_for_family,
 )
 
 
@@ -84,7 +83,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help=(
             "baseline experiment-family directory; when provided, plot only "
-            "this experiment without mapped RDO reference lines"
+            "this baseline NOL sweep (no RDO/angular/spherical hlines)"
         ),
     )
     parser.add_argument(
@@ -104,7 +103,10 @@ def parse_args() -> argparse.Namespace:
         "--rdo-exp-list",
         type=Path,
         default=DEFAULT_RDO_EXP_LIST,
-        help="Model-to-RDO-experiment map used for horizontal reference lines",
+        help=(
+            "YAML/TXT map of RDO / angular-steering / spherical-steering "
+            "baselines used for horizontal reference lines"
+        ),
     )
     args = parser.parse_args()
     if args.baseline_experiment is not None:
@@ -136,6 +138,7 @@ def _family_payload(hparams: dict[str, Any]) -> dict[str, Any]:
         key: _json_safe(value)
         for key, value in sorted(hparams.items())
         if key not in excluded
+        and not str(key).startswith(("angular_", "spherical_"))
     }
 
 
@@ -364,12 +367,26 @@ def plot_family(
     *,
     dpi: int,
     rdo_reference: dict[str, Any] | None = None,
+    baseline_references: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     plot_dir = family_dir / "plots"
     table_dir = family_dir / "tables"
     plot_dir.mkdir(parents=True, exist_ok=True)
     table_dir.mkdir(parents=True, exist_ok=True)
     family_df.to_csv(table_dir / "aggregated_metrics.csv", index=False)
+
+    if baseline_references is None:
+        baseline_references = []
+        if rdo_reference is not None:
+            baseline_references = [
+                {
+                    **rdo_reference,
+                    "kind": rdo_reference.get("kind", "rdo"),
+                    "swap_phases": True,
+                    "label_prefix": "RDO",
+                    "colors": RDO_PHASE_COLORS,
+                }
+            ]
 
     generated: list[str] = []
     available_families = set(family_df["rotation_family"].astype(str))
@@ -419,15 +436,17 @@ def plot_family(
                 means = phase_df["mean"].to_numpy(dtype=float)
                 stds = phase_df["std"].to_numpy(dtype=float)
                 x_ticks.update(int(value) for value in x_values)
-                curve_color = ROTATION_PHASE_COLORS.get(
-                    (rotation_family, phase),
-                    PHASE_COLORS[phase],
-                )
-                marker = ROTATION_MARKERS.get(rotation_family, "^")
-                rotation_label = ROTATION_LABELS.get(
-                    rotation_family,
-                    rotation_family.replace("_", " ").title(),
-                )
+                if rotation_family == "baseline":
+                    curve_color = PHASE_COLORS[phase]
+                    marker = "D"
+                    rotation_label = "Baseline RDO"
+                else:
+                    curve_color = ROTATION_PHASE_COLORS[(rotation_family, phase)]
+                    marker = ROTATION_MARKERS[rotation_family]
+                    rotation_label = ROTATION_LABELS.get(
+                        rotation_family,
+                        rotation_family.replace("_", " ").title(),
+                    )
                 axis.plot(
                     x_values,
                     means,
@@ -447,23 +466,33 @@ def plot_family(
                         linewidth=0,
                     )
 
-        if rdo_reference is not None:
-            metric_lookup = rdo_reference["metrics"]
-            for source_phase, display_phase in (
-                ("refined_attack", "refined_protect"),
-                ("refined_protect", "refined_attack"),
-            ):
+        for reference in baseline_references:
+            metric_lookup = reference["metrics"]
+            colors = reference.get("colors") or RDO_PHASE_COLORS
+            label_prefix = str(reference.get("label_prefix") or "RDO")
+            if reference.get("swap_phases", False):
+                phase_pairs = (
+                    ("refined_attack", "refined_protect"),
+                    ("refined_protect", "refined_attack"),
+                )
+            else:
+                phase_pairs = (
+                    ("refined_attack", "refined_attack"),
+                    ("refined_protect", "refined_protect"),
+                )
+            for source_phase, display_phase in phase_pairs:
                 reference_value = metric_lookup.get(
                     (benchmark, backend, group, metric, source_phase)
                 )
                 if reference_value is None:
                     continue
+                phase_name = display_phase.removeprefix("refined_")
                 axis.axhline(
                     reference_value,
-                    color=RDO_PHASE_COLORS[display_phase],
+                    color=colors[display_phase],
                     linestyle=":",
                     linewidth=2.2,
-                    label=RDO_PHASE_LABELS[display_phase],
+                    label=f"{label_prefix} {phase_name}",
                     zorder=1,
                 )
 
@@ -567,12 +596,17 @@ def main() -> int:
 
     family_dir = output_dir / "families" / f"family_{comparison_id}"
     family_dir.mkdir(parents=True, exist_ok=True)
+    baseline_references: list[dict[str, Any]] = []
     rdo_reference = None
     if not baseline_only:
         rdo_references = load_rdo_references(args.rdo_exp_list.resolve())
-        rdo_reference = require_rdo_reference_for_family(
+        baseline_references = require_baseline_references_for_family(
             parameter_sets["activation"],
             rdo_references,
+        )
+        rdo_reference = next(
+            (item for item in baseline_references if item.get("kind") == "rdo"),
+            None,
         )
     (family_dir / "family_parameters.json").write_text(
         json.dumps(parameter_sets, indent=2, sort_keys=True),
@@ -582,7 +616,7 @@ def main() -> int:
         aggregated,
         family_dir,
         dpi=args.dpi,
-        rdo_reference=rdo_reference,
+        baseline_references=baseline_references,
     )
     family_summaries = [
         {
@@ -596,6 +630,15 @@ def main() -> int:
                 if rdo_reference is not None
                 else None
             ),
+            "baseline_references": [
+                {
+                    "kind": item.get("kind"),
+                    "model_key": item.get("model_key"),
+                    "experiment_dir": item.get("experiment_dir"),
+                    "swap_phases": item.get("swap_phases"),
+                }
+                for item in baseline_references
+            ],
         }
     ]
 

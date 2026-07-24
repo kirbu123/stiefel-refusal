@@ -55,6 +55,33 @@ RDO_PHASE_COLORS = {
     "refined_attack": "#b2182b",
     "refined_protect": "#ef8a62",
 }
+BASELINE_KIND_STYLES = {
+    "rdo": {
+        "label_prefix": "RDO",
+        "swap_phases": True,
+        "colors": {
+            "refined_attack": "#b2182b",
+            "refined_protect": "#ef8a62",
+        },
+    },
+    "angular-steering": {
+        "label_prefix": "Angular Steering",
+        "swap_phases": False,
+        "colors": {
+            "refined_attack": "#542788",
+            "refined_protect": "#998ec3",
+        },
+    },
+    "spherical-steering": {
+        "label_prefix": "Spherical Steering",
+        # Stored attack/protect are swapped, same as RDO.
+        "swap_phases": True,
+        "colors": {
+            "refined_attack": "#01665e",
+            "refined_protect": "#5ab4ac",
+        },
+    },
+}
 ROTATION_LABELS = {
     "activation": "Cayley Rotation",
     "stiefel": "Stiefel Rotation",
@@ -70,7 +97,11 @@ ROTATION_PHASE_COLORS = {
     ("stiefel", "refined_protect"): "#984ea3",
 }
 DEFAULT_RDO_EXP_LIST = (
-    PROJECT_ROOT / "results" / "rdo_refusal" / "analysis" / "rdo_exp_list.txt"
+    PROJECT_ROOT
+    / "results"
+    / "rdo_refusal"
+    / "AAAI-results"
+    / "rdo_exp_list.yaml"
 )
 RDO_MODEL_KEY_MARKERS = (
     ("qwen-1.5b-ease", ("qwen2.5-1.5b-instruct-ease", "qwen2.5-1.5b", "ease")),
@@ -122,7 +153,10 @@ def parse_args() -> argparse.Namespace:
         "--rdo-exp-list",
         type=Path,
         default=DEFAULT_RDO_EXP_LIST,
-        help="Model-to-RDO-experiment map used for horizontal reference lines",
+        help=(
+            "Baseline experiment map (.yaml preferred, or legacy .txt). "
+            "YAML may include rdo, angular-steering, and spherical-steering entries"
+        ),
     )
     return parser.parse_args()
 
@@ -143,6 +177,7 @@ def _family_payload(hparams: dict[str, Any]) -> dict[str, Any]:
         key: _json_safe(value)
         for key, value in sorted(hparams.items())
         if key not in excluded
+        and not str(key).startswith(("angular_", "spherical_"))
     }
 
 
@@ -191,12 +226,159 @@ def _paired_json_payload(eval_path: Path) -> dict[str, Any]:
         return {}
 
 
+def _metrics_lookup_from_experiment(experiment_dir: Path) -> dict[tuple[str, str, str, str, str], float]:
+    eval_path, eval_format = _choose_latest_eval_file(experiment_dir)
+    if eval_path is None or eval_format is None:
+        raise FileNotFoundError(f"No eval_metrics file in {experiment_dir}")
+    metric_rows = (
+        _rows_from_eval_csv(eval_path)
+        if eval_format == "csv"
+        else _rows_from_eval_json(eval_path)
+    )
+    lookup: dict[tuple[str, str, str, str, str], float] = {}
+    for row in metric_rows:
+        phase = _clean_field(row.get("phase", ""))
+        if phase not in ("refined_attack", "refined_protect") or not _is_plotted_metric(row):
+            continue
+        try:
+            value = float(row["value"])
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value):
+            continue
+        lookup[
+            (
+                _clean_field(row.get("benchmark", "")),
+                _clean_field(row.get("backend", "")),
+                _clean_field(row.get("group", "")),
+                _clean_field(row.get("metric", "")),
+                phase,
+            )
+        ] = value
+    return lookup
+
+
+def _resolve_experiment_dir(path_text: str, map_path: Path) -> Path:
+    experiment_dir = Path(path_text.strip()).expanduser()
+    if not experiment_dir.is_absolute():
+        experiment_dir = (map_path.parent / experiment_dir).resolve()
+    return experiment_dir
+
+
+def _infer_model_key(hparams: dict[str, Any], preferred_keys: list[str] | None = None) -> str | None:
+    identifiers = set()
+    for value in (hparams.get("model"), hparams.get("model_id")):
+        identifiers.update(_model_identifier_variants(value))
+    joined = " ".join(sorted(identifiers))
+    preferred = preferred_keys or [key for key, _ in RDO_MODEL_KEY_MARKERS]
+    for model_key, markers in RDO_MODEL_KEY_MARKERS:
+        if model_key not in preferred:
+            continue
+        if any(marker in joined for marker in markers):
+            return model_key
+    for model_key in preferred:
+        if model_key in joined:
+            return model_key
+    return None
+
+
+def _build_baseline_reference(
+    *,
+    kind: str,
+    model_key: str,
+    experiment_dir: Path,
+) -> dict[str, Any]:
+    style = BASELINE_KIND_STYLES[kind]
+    hparams_path = experiment_dir / "hparams.json"
+    if not hparams_path.is_file():
+        raise FileNotFoundError(f"Missing hparams for {kind} baseline: {hparams_path}")
+    hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
+    identifiers = {_clean_field(model_key)}
+    for value in (hparams.get("model"), hparams.get("model_id")):
+        identifiers.update(_model_identifier_variants(value))
+    return {
+        "kind": kind,
+        "model_key": model_key,
+        "experiment_dir": str(experiment_dir),
+        "identifiers": {value for value in identifiers if value},
+        "metrics": _metrics_lookup_from_experiment(experiment_dir),
+        "swap_phases": bool(style["swap_phases"]),
+        "label_prefix": str(style["label_prefix"]),
+        "colors": dict(style["colors"]),
+    }
+
+
+def _load_references_from_root(
+    *,
+    kind: str,
+    root: Path,
+    model_keys: list[str],
+) -> list[dict[str, Any]]:
+    if not root.is_dir():
+        raise FileNotFoundError(f"Missing {kind} experiment root: {root}")
+    references: list[dict[str, Any]] = []
+    for run_dir in sorted(path for path in root.iterdir() if path.is_dir()):
+        if not (run_dir / "hparams.json").is_file():
+            continue
+        hparams = json.loads((run_dir / "hparams.json").read_text(encoding="utf-8"))
+        model_key = _infer_model_key(hparams, preferred_keys=model_keys)
+        if model_key is None:
+            continue
+        references.append(
+            _build_baseline_reference(
+                kind=kind,
+                model_key=model_key,
+                experiment_dir=run_dir,
+            )
+        )
+    return references
+
+
 def load_rdo_references(map_path: Path) -> list[dict[str, Any]]:
-    """Load model-specific RDO metric lookups from ``name: experiment_path`` lines."""
+    """Load RDO / angular / spherical baseline metric lookups from YAML or legacy TXT."""
     if not map_path.is_file():
-        raise FileNotFoundError(f"RDO experiment map does not exist: {map_path}")
+        raise FileNotFoundError(f"Baseline experiment map does not exist: {map_path}")
 
     references: list[dict[str, Any]] = []
+    suffix = map_path.suffix.lower()
+    if suffix in {".yaml", ".yml"}:
+        import yaml
+
+        payload = yaml.safe_load(map_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(payload, dict):
+            raise ValueError(f"Invalid baseline map YAML: {map_path}")
+
+        rdo_entries = payload.get("rdo") or {}
+        if not isinstance(rdo_entries, dict) or not rdo_entries:
+            raise ValueError(f"YAML map {map_path} must contain a non-empty 'rdo' mapping")
+        model_keys = [str(key) for key in rdo_entries]
+        for model_key, experiment_text in rdo_entries.items():
+            references.append(
+                _build_baseline_reference(
+                    kind="rdo",
+                    model_key=str(model_key),
+                    experiment_dir=_resolve_experiment_dir(str(experiment_text), map_path),
+                )
+            )
+
+        for kind in ("angular-steering", "spherical-steering"):
+            section = payload.get(kind) or {}
+            if not section:
+                continue
+            if not isinstance(section, dict) or "root" not in section:
+                raise ValueError(
+                    f"YAML map section {kind!r} must be a mapping with a 'root' path"
+                )
+            references.extend(
+                _load_references_from_root(
+                    kind=kind,
+                    root=_resolve_experiment_dir(str(section["root"]), map_path),
+                    model_keys=model_keys,
+                )
+            )
+        return references
+
+    # Legacy TXT: one `model: path` line per RDO baseline.
     for line_number, raw_line in enumerate(
         map_path.read_text(encoding="utf-8").splitlines(),
         start=1,
@@ -210,52 +392,12 @@ def load_rdo_references(map_path: Path) -> list[dict[str, Any]]:
                 f"Invalid RDO map entry at {map_path}:{line_number}; "
                 "expected 'model: experiment_path'"
             )
-        experiment_dir = Path(experiment_text.strip()).expanduser()
-        if not experiment_dir.is_absolute():
-            experiment_dir = (map_path.parent / experiment_dir).resolve()
-        hparams_path = experiment_dir / "hparams.json"
-        if not hparams_path.is_file():
-            raise FileNotFoundError(f"Missing RDO hparams: {hparams_path}")
-        hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
-        eval_path, eval_format = _choose_latest_eval_file(experiment_dir)
-        if eval_path is None or eval_format is None:
-            raise FileNotFoundError(f"No RDO eval_metrics file in {experiment_dir}")
-        metric_rows = (
-            _rows_from_eval_csv(eval_path)
-            if eval_format == "csv"
-            else _rows_from_eval_json(eval_path)
-        )
-        lookup: dict[tuple[str, str, str, str, str], float] = {}
-        for row in metric_rows:
-            phase = _clean_field(row.get("phase", ""))
-            if phase not in RDO_PHASE_LABELS or not _is_plotted_metric(row):
-                continue
-            try:
-                value = float(row["value"])
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(value):
-                continue
-            lookup[
-                (
-                    _clean_field(row.get("benchmark", "")),
-                    _clean_field(row.get("backend", "")),
-                    _clean_field(row.get("group", "")),
-                    _clean_field(row.get("metric", "")),
-                    phase,
-                )
-            ] = value
-
-        identifiers = set()
-        for value in (model_key, hparams.get("model"), hparams.get("model_id")):
-            identifiers.update(_model_identifier_variants(value))
         references.append(
-            {
-                "model_key": model_key.strip(),
-                "experiment_dir": str(experiment_dir),
-                "identifiers": identifiers,
-                "metrics": lookup,
-            }
+            _build_baseline_reference(
+                kind="rdo",
+                model_key=model_key.strip(),
+                experiment_dir=_resolve_experiment_dir(experiment_text, map_path),
+            )
         )
     return references
 
@@ -265,42 +407,89 @@ def rdo_reference_for_family(
     references: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
     """Match a family to an RDO run by identifier, then specific map-key markers."""
+    matched = baseline_references_for_family(family_parameters, references)
+    for reference in matched:
+        if reference.get("kind") == "rdo":
+            return reference
+    return None
+
+
+def baseline_references_for_family(
+    family_parameters: dict[str, Any],
+    references: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return all mapped baselines (RDO/angular/spherical) for one experiment family."""
     family_identifiers = set()
     for value in (
         family_parameters.get("model"),
         family_parameters.get("model_id"),
     ):
         family_identifiers.update(_model_identifier_variants(value))
+
+    matched: list[dict[str, Any]] = []
+    seen_kinds: set[str] = set()
+
     for reference in references:
         if family_identifiers & set(reference["identifiers"]):
-            return reference
+            kind = str(reference.get("kind", "rdo"))
+            if kind in seen_kinds:
+                continue
+            matched.append(reference)
+            seen_kinds.add(kind)
 
-    joined = " ".join(sorted(family_identifiers))
-    for model_key, markers in RDO_MODEL_KEY_MARKERS:
-        if any(marker in joined for marker in markers):
+    if len(seen_kinds) < len(BASELINE_KIND_STYLES):
+        joined = " ".join(sorted(family_identifiers))
+        resolved_key = None
+        for model_key, markers in RDO_MODEL_KEY_MARKERS:
+            if any(marker in joined for marker in markers):
+                resolved_key = model_key
+                break
+        if resolved_key is not None:
             for reference in references:
-                if _clean_field(reference["model_key"]) == model_key:
-                    return reference
-            return None
-    return None
+                kind = str(reference.get("kind", "rdo"))
+                if kind in seen_kinds:
+                    continue
+                if _clean_field(reference["model_key"]) != resolved_key:
+                    continue
+                matched.append(reference)
+                seen_kinds.add(kind)
+
+    # Preserve stable plotting order.
+    order = {kind: index for index, kind in enumerate(BASELINE_KIND_STYLES)}
+    matched.sort(key=lambda item: order.get(str(item.get("kind")), 99))
+    return matched
 
 
 def require_rdo_reference_for_family(
     family_parameters: dict[str, Any],
     references: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Return the mapped baseline or fail instead of silently omitting it."""
+    """Return the mapped RDO baseline or fail instead of silently omitting it."""
     reference = rdo_reference_for_family(family_parameters, references)
     if reference is not None:
         return reference
     model = family_parameters.get("model") or family_parameters.get("model_id")
     available_keys = ", ".join(
-        str(reference["model_key"]) for reference in references
+        str(item["model_key"])
+        for item in references
+        if item.get("kind") == "rdo"
     )
     raise ValueError(
         f"No RDO baseline experiment matched model {model!r}; "
         f"available map keys: {available_keys}"
     )
+
+
+def require_baseline_references_for_family(
+    family_parameters: dict[str, Any],
+    references: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Require an RDO match, then attach any angular/spherical baselines for the model."""
+    matched = baseline_references_for_family(family_parameters, references)
+    if any(item.get("kind") == "rdo" for item in matched):
+        return matched
+    require_rdo_reference_for_family(family_parameters, references)
+    return matched
 
 
 def load_experiments(
@@ -468,12 +657,27 @@ def plot_family(
     *,
     dpi: int,
     rdo_reference: dict[str, Any] | None = None,
+    baseline_references: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     plot_dir = family_dir / "plots"
     table_dir = family_dir / "tables"
     plot_dir.mkdir(parents=True, exist_ok=True)
     table_dir.mkdir(parents=True, exist_ok=True)
     family_df.to_csv(table_dir / "aggregated_metrics.csv", index=False)
+
+    if baseline_references is None:
+        baseline_references = []
+        if rdo_reference is not None:
+            # Backward-compatible single RDO reference.
+            baseline_references = [
+                {
+                    **rdo_reference,
+                    "kind": rdo_reference.get("kind", "rdo"),
+                    "swap_phases": True,
+                    "label_prefix": "RDO",
+                    "colors": RDO_PHASE_COLORS,
+                }
+            ]
 
     generated: list[str] = []
     series_columns = ["benchmark", "backend", "group", "metric"]
@@ -530,23 +734,33 @@ def plot_family(
                         linewidth=0,
                     )
 
-        if rdo_reference is not None:
-            metric_lookup = rdo_reference["metrics"]
-            for source_phase, display_phase in (
-                ("refined_attack", "refined_protect"),
-                ("refined_protect", "refined_attack"),
-            ):
+        for reference in baseline_references:
+            metric_lookup = reference["metrics"]
+            colors = reference.get("colors") or RDO_PHASE_COLORS
+            label_prefix = str(reference.get("label_prefix") or "RDO")
+            if reference.get("swap_phases", False):
+                phase_pairs = (
+                    ("refined_attack", "refined_protect"),
+                    ("refined_protect", "refined_attack"),
+                )
+            else:
+                phase_pairs = (
+                    ("refined_attack", "refined_attack"),
+                    ("refined_protect", "refined_protect"),
+                )
+            for source_phase, display_phase in phase_pairs:
                 reference_value = metric_lookup.get(
                     (benchmark, backend, group, metric, source_phase)
                 )
                 if reference_value is None:
                     continue
+                phase_name = display_phase.removeprefix("refined_")
                 axis.axhline(
                     reference_value,
-                    color=RDO_PHASE_COLORS[display_phase],
+                    color=colors[display_phase],
                     linestyle=":",
                     linewidth=2.2,
-                    label=RDO_PHASE_LABELS[display_phase],
+                    label=f"{label_prefix} {phase_name}",
                     zorder=1,
                 )
 
@@ -640,9 +854,13 @@ def main() -> int:
 
     family_dir = output_dir / "families" / f"family_{comparison_id}"
     family_dir.mkdir(parents=True, exist_ok=True)
-    rdo_reference = require_rdo_reference_for_family(
+    baseline_references = require_baseline_references_for_family(
         parameter_sets["activation"],
         rdo_references,
+    )
+    rdo_reference = next(
+        (item for item in baseline_references if item.get("kind") == "rdo"),
+        None,
     )
     (family_dir / "family_parameters.json").write_text(
         json.dumps(parameter_sets, indent=2, sort_keys=True),
@@ -652,7 +870,7 @@ def main() -> int:
         aggregated,
         family_dir,
         dpi=args.dpi,
-        rdo_reference=rdo_reference,
+        baseline_references=baseline_references,
     )
     family_summaries = [
         {
@@ -662,10 +880,17 @@ def main() -> int:
             ),
             "plots": len(generated_plots),
             "rdo_reference": (
-                rdo_reference["experiment_dir"]
-                if rdo_reference is not None
-                else None
+                rdo_reference["experiment_dir"] if rdo_reference is not None else None
             ),
+            "baseline_references": [
+                {
+                    "kind": item.get("kind"),
+                    "model_key": item.get("model_key"),
+                    "experiment_dir": item.get("experiment_dir"),
+                    "swap_phases": item.get("swap_phases"),
+                }
+                for item in baseline_references
+            ],
         }
     ]
 
