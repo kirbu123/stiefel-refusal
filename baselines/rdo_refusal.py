@@ -5,6 +5,7 @@ import csv
 import json
 import os
 import os.path
+import shutil
 import sys
 import uuid
 import dotenv
@@ -111,11 +112,21 @@ def _clear_experiment_checkpoints(run_dir: str) -> None:
         print(f"[checkpoint cleanup] No checkpoint directory found: {checkpoint_dir}")
         return
 
+    keep_activation_dumps = bool(getattr(args, "keep_activation_pca_dumps", False))
+    activation_dump_dir = (checkpoint_dir / "tmp_best_layer_activations").resolve()
+
     deleted_files = 0
     deleted_bytes = 0
     for checkpoint_path in checkpoint_dir.rglob("*.pt"):
         if not checkpoint_path.is_file():
             continue
+        if keep_activation_dumps:
+            try:
+                resolved = checkpoint_path.resolve()
+                if resolved.parent == activation_dump_dir or activation_dump_dir in resolved.parents:
+                    continue
+            except OSError:
+                pass
         try:
             deleted_bytes += checkpoint_path.stat().st_size
             checkpoint_path.unlink()
@@ -132,6 +143,8 @@ def _clear_experiment_checkpoints(run_dir: str) -> None:
         key=lambda path: len(path.parts),
         reverse=True,
     ):
+        if keep_activation_dumps and directory.resolve() == activation_dump_dir:
+            continue
         try:
             directory.rmdir()
         except OSError:
@@ -142,6 +155,7 @@ def _clear_experiment_checkpoints(run_dir: str) -> None:
         "deleted_pt_files": deleted_files,
         "deleted_bytes": deleted_bytes,
         "deleted_gib": deleted_bytes / (1024 ** 3),
+        "kept_activation_pca_dumps": keep_activation_dumps,
     }
     _safe_json_dump(
         str(Path(run_dir) / "checkpoint_cleanup.json"),
@@ -278,6 +292,11 @@ DEFAULT_CONFIG = {
     # (activation_rot / cayley modes) Log the rotated-vector PCA trajectory every N optimizer
     # steps and plot a 2D figure to TensorBoard at the end of training. 0 disables.
     'pca_traj_interval': 50,
+    # Dump best-layer post-steering activations during training and plot a 3D PCA trajectory.
+    'eval_activation_pca': False,
+    'activation_save_gap': 100,
+    # When True with eval_activation_pca: keep checkpoints/tmp_best_layer_activations after plotting.
+    'keep_activation_pca_dumps': False,
 }
 
 def parse_args():
@@ -440,6 +459,34 @@ def parse_args():
         type=int,
         default=DEFAULT_CONFIG["pca_traj_interval"],
         help='(activation_rot / cayley modes) Collect the rotated-vector PCA trajectory every N optimizer steps; 0 disables',
+    )
+    parser.add_argument(
+        '--eval_activation_pca',
+        action='store_true',
+        default=DEFAULT_CONFIG['eval_activation_pca'],
+        help=(
+            'During training, periodically dump best-layer post-steering activations and '
+            'plot a 3D PCA trajectory (start=green, end=red, middle=black)'
+        ),
+    )
+    parser.add_argument(
+        '--activation_save_gap',
+        type=int,
+        default=DEFAULT_CONFIG['activation_save_gap'],
+        help=(
+            'When --eval_activation_pca is set, save best-layer activations every N '
+            'optimizer steps (plus first and final); ignored otherwise'
+        ),
+    )
+    parser.add_argument(
+        '--keep_activation_pca_dumps',
+        action='store_true',
+        default=DEFAULT_CONFIG['keep_activation_pca_dumps'],
+        help=(
+            'When --eval_activation_pca is set, keep checkpoints/tmp_best_layer_activations '
+            'after plotting (and skip deleting those .pt files under --clear_ckpts). '
+            'Default False deletes dumps after the 3D plot'
+        ),
     )
 
     # Loss weights
@@ -2780,6 +2827,183 @@ def _log_pca_trajectory(tb_writer, traj_points, traj_steps, step):
         print(f"[pca_trajectory] skipped figure logging: {e}")
 
 
+_ACTIVATION_PCA_PROBE_SIZE = 8
+
+
+def _activation_pca_probe_prompts(
+    train_dataset,
+    max_prompts: int = _ACTIVATION_PCA_PROBE_SIZE,
+) -> list[str]:
+    """Fixed harmful probe prompts so activation snapshots stay comparable across steps."""
+    prompts = list(getattr(train_dataset, "harmful_prompts", []) or [])
+    if not prompts:
+        prompts = list(getattr(train_dataset, "ablation_prompts", []) or [])
+    if not prompts:
+        raise ValueError("No harmful/ablation prompts available for activation PCA probing")
+    return prompts[: max(1, int(max_prompts))]
+
+
+def _capture_best_layer_activation(
+    model: LanguageModel,
+    prompts: list[str],
+    operation,
+    direction_mode: str,
+    best_layer: int,
+) -> torch.Tensor:
+    """Mean last-token residual at ``best_layer`` after applying current attack steering."""
+    step_fn = _build_train_guard_step_fn(
+        operation,
+        direction_mode,
+        int(best_layer),
+        guard_mode="attack",
+    )
+    with torch.no_grad():
+        with model.trace() as tracer:
+            with tracer.invoke(prompts):
+                step_fn(model)
+                layer_input = model.model.layers[int(best_layer)].input
+                # nnsight may expose residual as a tensor or (tensor, ...).
+                if isinstance(layer_input, (tuple, list)):
+                    layer_input = layer_input[0]
+                activation = layer_input[:, -1, :].mean(dim=0).save()
+    value = activation.value if hasattr(activation, "value") else activation
+    return value.detach().float().cpu().reshape(-1)
+
+
+def _activation_pca_tmp_dir(tb_checkpoint_dir: str | None) -> str | None:
+    if not tb_checkpoint_dir:
+        return None
+    path = os.path.join(tb_checkpoint_dir, "tmp_best_layer_activations")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _save_activation_snapshot(tmp_dir: str, step: int, activation: torch.Tensor) -> str:
+    path = os.path.join(tmp_dir, f"step_{int(step):06d}.pt")
+    torch.save(
+        {"step": int(step), "activation": activation.detach().float().cpu()},
+        path,
+    )
+    return path
+
+
+def _load_activation_snapshots(
+    tmp_dir: str | None,
+) -> tuple[list[torch.Tensor], list[int]]:
+    if not tmp_dir or not os.path.isdir(tmp_dir):
+        return [], []
+    points: list[torch.Tensor] = []
+    steps: list[int] = []
+    for path in sorted(Path(tmp_dir).glob("step_*.pt")):
+        payload = torch.load(path, map_location="cpu")
+        if isinstance(payload, dict):
+            activation = payload.get("activation")
+            step = int(payload.get("step", len(steps)))
+        else:
+            activation = payload
+            step = len(steps)
+        if activation is None:
+            continue
+        points.append(torch.as_tensor(activation).float().reshape(-1))
+        steps.append(step)
+    return points, steps
+
+
+def _log_best_layer_activation_pca_3d(
+    tb_writer,
+    points: list[torch.Tensor],
+    steps: list[int],
+    out_png: str | None,
+    step: int,
+) -> None:
+    """3D PCA of best-layer activation trajectory: start=green, end=red, middle=black."""
+    del steps  # kept for API symmetry with the 2D trajectory logger
+    if len(points) < 2:
+        print("[activation_pca] skipped figure logging: need at least 2 snapshots")
+        return
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+        mat = torch.stack(points).float()
+        mat_c = mat - mat.mean(dim=0, keepdim=True)
+        q = min(3, mat_c.shape[0], mat_c.shape[1])
+        _, _, V = torch.pca_lowrank(mat_c, q=q)
+        proj = (mat_c @ V[:, :q]).numpy()
+        if proj.shape[1] < 3:
+            pad = np.zeros((proj.shape[0], 3 - proj.shape[1]), dtype=proj.dtype)
+            proj = np.concatenate([proj, pad], axis=1)
+
+        colors = ["black"] * len(points)
+        colors[0] = "green"
+        colors[-1] = "red"
+
+        fig = plt.figure(figsize=(7.0, 5.5))
+        ax = fig.add_subplot(111, projection="3d")
+        ax.plot(proj[:, 0], proj[:, 1], proj[:, 2], "-", color="0.7", lw=1, zorder=1)
+        ax.scatter(
+            proj[:, 0],
+            proj[:, 1],
+            proj[:, 2],
+            c=colors,
+            s=28,
+            depthshade=True,
+            zorder=2,
+        )
+        ax.set_xlabel("PC1")
+        ax.set_ylabel("PC2")
+        ax.set_zlabel("PC3")
+        ax.set_title("Best-layer post-steering activations — PCA 3D")
+        if tb_writer is not None:
+            tb_writer.add_figure(
+                "train/best_layer_activation_pca_3d",
+                fig,
+                global_step=step,
+            )
+        if out_png:
+            os.makedirs(os.path.dirname(out_png) or ".", exist_ok=True)
+            fig.savefig(out_png, dpi=200, bbox_inches="tight")
+            print(f"[activation_pca] wrote {out_png} ({len(points)} points)")
+        plt.close(fig)
+    except Exception as e:
+        print(f"[activation_pca] skipped figure logging: {e}")
+
+
+def _finalize_best_layer_activation_pca(
+    *,
+    tmp_dir: str | None,
+    tb_writer,
+    tb_checkpoint_dir: str | None,
+    step: int,
+    keep_dumps: bool = False,
+) -> None:
+    """Load dumped activations, plot 3D PCA, optionally delete the temp directory."""
+    points, steps = _load_activation_snapshots(tmp_dir)
+    out_png = None
+    if tb_checkpoint_dir:
+        out_png = os.path.join(tb_checkpoint_dir, "best_layer_activation_pca_3d.png")
+    try:
+        _log_best_layer_activation_pca_3d(
+            tb_writer,
+            points,
+            steps,
+            out_png,
+            step=step,
+        )
+    finally:
+        if keep_dumps:
+            if tmp_dir and os.path.isdir(tmp_dir):
+                print(
+                    f"[activation_pca] keeping {len(points)} activation dumps under {tmp_dir}"
+                )
+            return
+        if tmp_dir and os.path.isdir(tmp_dir):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            print(f"[activation_pca] cleared temp activations under {tmp_dir}")
+
+
 def _build_optimizer(optimizer_name: str, params, lr: float):
     """Construct the optimizer selected by --optimizer."""
     if optimizer_name == "Adam":
@@ -2979,6 +3203,31 @@ def refusal_cone_optimization(model, train_dataset,
         and (hasattr(operation, "cayley_matrix") or hasattr(operation, "matrix"))
     )
     traj_points, traj_steps = [], []
+
+    collect_activation_pca = bool(getattr(args, "eval_activation_pca", False))
+    activation_save_gap = int(getattr(args, "activation_save_gap", 100) or 0)
+    activation_pca_tmp_dir = None
+    activation_pca_probe_prompts = None
+    activation_pca_last_step = None
+    if collect_activation_pca:
+        if activation_save_gap <= 0:
+            print(
+                "[activation_pca] disabled: activation_save_gap must be > 0 "
+                f"(got {activation_save_gap})"
+            )
+            collect_activation_pca = False
+        else:
+            activation_pca_tmp_dir = _activation_pca_tmp_dir(tb_checkpoint_dir)
+            if activation_pca_tmp_dir is None:
+                print("[activation_pca] disabled: tb_checkpoint_dir is required for temp dumps")
+                collect_activation_pca = False
+            else:
+                activation_pca_probe_prompts = _activation_pca_probe_prompts(train_dataset)
+                print(
+                    f"[activation_pca] enabled: gap={activation_save_gap}, "
+                    f"probe={len(activation_pca_probe_prompts)}, "
+                    f"tmp={activation_pca_tmp_dir}"
+                )
 
     step_counter = 0
     opt_step_counter = 0
@@ -3312,6 +3561,30 @@ def refusal_cone_optimization(model, train_dataset,
                             traj_steps.append(opt_step_counter)
                             _log_pca_trajectory(tb_writer, traj_points, traj_steps, opt_step_counter)
 
+                    if collect_activation_pca and (
+                        opt_step_counter == 1
+                        or opt_step_counter % activation_save_gap == 0
+                    ):
+                        try:
+                            activation = _capture_best_layer_activation(
+                                model,
+                                activation_pca_probe_prompts,
+                                operation,
+                                direction_mode,
+                                best_layer,
+                            )
+                            _save_activation_snapshot(
+                                activation_pca_tmp_dir,
+                                opt_step_counter,
+                                activation,
+                            )
+                            activation_pca_last_step = opt_step_counter
+                        except Exception as e:
+                            print(
+                                f"[activation_pca] snapshot failed at step "
+                                f"{opt_step_counter}: {e}"
+                            )
+
                     print("Step", step_counter, "train/basis_vector_bypass_score", [round(s, 2) for s in basis_bypass_scores], "train/basis_vector_induce_score", [round(s, 2) for s in basis_induce_scores])
                     
                     if n_sample > 0:
@@ -3395,6 +3668,31 @@ def refusal_cone_optimization(model, train_dataset,
         )
 
     _log_pca_trajectory(tb_writer, traj_points, traj_steps, step_counter)
+
+    if collect_activation_pca and activation_pca_tmp_dir is not None:
+        if activation_pca_last_step != opt_step_counter and opt_step_counter > 0:
+            try:
+                activation = _capture_best_layer_activation(
+                    model,
+                    activation_pca_probe_prompts,
+                    operation,
+                    direction_mode,
+                    best_layer,
+                )
+                _save_activation_snapshot(
+                    activation_pca_tmp_dir,
+                    opt_step_counter,
+                    activation,
+                )
+            except Exception as e:
+                print(f"[activation_pca] final snapshot failed: {e}")
+        _finalize_best_layer_activation_pca(
+            tmp_dir=activation_pca_tmp_dir,
+            tb_writer=tb_writer,
+            tb_checkpoint_dir=tb_checkpoint_dir,
+            step=opt_step_counter if opt_step_counter > 0 else step_counter,
+            keep_dumps=bool(getattr(args, "keep_activation_pca_dumps", False)),
+        )
 
     return {
         "vectors": vectors,

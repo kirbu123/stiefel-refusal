@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 model="${MODEL_NAME:-deepseek-ai/DeepSeek-R1-Distill-Qwen-7B}" # override with MODEL_NAME
 direction_mode="${DIRECTION_MODE:-activation_additive_rot}" # override with DIRECTION_MODE
 train_guard_val_gap=0 # 0 disables; otherwise run train guard validation every N dataloader iterations
-num_opt_layers="${NUM_OPT_LAYERS:-1}" # override with NUM_OPT_LAYERS; 0 means all layers for additive modes
+num_opt_layers="${NUM_OPT_LAYERS:-0}" # override with NUM_OPT_LAYERS; 0 means all layers for additive modes
 llamaguard_data="basic" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
 eval_guard_backends=("llamaguard" "qwen3guard" "wildguard") # any subset of: "llamaguard" "qwen3guard" "wildguard"
 lr=1e-5
@@ -17,6 +17,9 @@ result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave 
 result_root="${RESULT_ROOT:-./results/rdo_refusal/tensorboard}" # root for newly trained run directories
 log_steps=0
 clear_ckpts=true # delete checkpoint .pt files only after training and final validation succeed
+eval_activation_pca="${EVAL_ACTIVATION_PCA:-false}" # true: dump best-layer acts + 3D PCA plot during train
+activation_save_gap="${ACTIVATION_SAVE_GAP:-100}" # optimizer-step gap when eval_activation_pca=true
+keep_activation_pca_dumps="${KEEP_ACTIVATION_PCA_DUMPS:-false}" # true: keep tmp_best_layer_activations after plot
 init_mode="diag_permutation" # "random", "diag_permutation", or "ab_orthogonal"
 orth_method="svd" # "qr" or "svd"
 k_proj="${K_PROJ:-35}" # direct low-rank projection width; override with K_PROJ
@@ -192,6 +195,13 @@ fi
 
 if [[ "${clear_ckpts}" == "true" ]]; then
   cmd+=(--clear_ckpts)
+fi
+
+if [[ "${eval_activation_pca}" == "true" ]]; then
+  cmd+=(--eval_activation_pca --activation_save_gap "${activation_save_gap}")
+  if [[ "${keep_activation_pca_dumps}" == "true" ]]; then
+    cmd+=(--keep_activation_pca_dumps)
+  fi
 fi
 
 # Optional eval flags:

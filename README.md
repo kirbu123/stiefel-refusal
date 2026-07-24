@@ -7,7 +7,8 @@ This document covers the retained RDO workflow on `main`:
 3. launch individual or grid experiments;
 4. optionally run paper Angular / Spherical inference-only steering baselines
    (no DIM / no RDO training);
-5. generate `k_proj` and `num_opt_layers` ablation plots.
+5. generate `k_proj` and `num_opt_layers` ablation plots;
+6. optionally dump best-layer activations and build PCA comparison figures.
 
 All commands assume the repository is located at:
 
@@ -271,11 +272,43 @@ GSM8K_SAMPLE_SIZE
 GSM8K_MAX_NEW_TOKENS
 GUARD_EVAL_BATCH_SIZE
 GUARD_TRAIN_BATCH_SIZE
+EVAL_ACTIVATION_PCA
+ACTIVATION_SAVE_GAP
+KEEP_ACTIVATION_PCA_DUMPS
 ```
 
 The current wrapper enables LlamaGuard/Qwen3Guard/WildGuard, MMLU, WikiText
 perplexity, ARC-Easy, ARC-Challenge, and GSM8K evaluation. Edit the corresponding
 `enable_*` variables in the wrapper to disable expensive evaluations.
+
+### Activation PCA dumps during training
+
+To record best-layer post-steering activations (attack mode) and write a per-run
+3D PCA trajectory plot:
+
+```bash
+EVAL_ACTIVATION_PCA=true \
+ACTIVATION_SAVE_GAP=100 \
+KEEP_ACTIVATION_PCA_DUMPS=true \
+MODEL_NAME="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B" \
+DIRECTION_MODE="activation_additive_rot" \
+NUM_OPT_LAYERS=1 \
+K_PROJ=35 \
+./scripts/run_rdo_refusal.sh
+```
+
+Equivalent CLI flags for a direct Python launch:
+
+```text
+--eval_activation_pca
+--activation_save_gap N          # dump every N optimizer steps (plus first/final)
+--keep_activation_pca_dumps      # keep checkpoints/tmp_best_layer_activations/
+```
+
+Without `--keep_activation_pca_dumps`, dumps are deleted after the per-run plot.
+Kept dumps are required by the multi-experiment PCA comparison scripts below.
+Snapshots are mean last-token residuals under **attack** steering on a fixed
+harmful probe set.
 
 ### Direct Python launch
 
@@ -300,6 +333,9 @@ python -m baselines.rdo_refusal \
   --eval_arc_easy \
   --eval_arc_challenge \
   --eval_gsm8k \
+  --eval_activation_pca \
+  --activation_save_gap 100 \
+  --keep_activation_pca_dumps \
   --result_root ./results/rdo_refusal/tensorboard
 ```
 
@@ -363,6 +399,11 @@ Adaptive angular steering built on per-layer Stiefel rotations.
 
 Uses a norm-preserving Householder map to move the original refusal direction
 toward a learned target direction.
+
+### `paper_angular_steering` / `paper_spherical_steering`
+
+Inference-only paper baselines (no DIM / no RDO training). See
+[Paper Angular and Spherical steering](#paper-angular-and-spherical-steering).
 
 ### Layer and projection controls
 
@@ -497,6 +538,9 @@ contains:
 ├── eval_metrics_<timestamp>.json
 ├── eval_metrics_<timestamp>.csv
 ├── checkpoints/
+│   ├── best_layer_activation_pca_3d.png   # if --eval_activation_pca
+│   └── tmp_best_layer_activations/        # if --keep_activation_pca_dumps
+│       └── step_*.pt
 └── TensorBoard event files
 ```
 
@@ -512,18 +556,82 @@ Inspect TensorBoard logs with:
 tensorboard --logdir results/rdo_refusal
 ```
 
+## Visualization scripts
+
+### Multi-experiment activation PCA (shared start)
+
+Fits one centered 3D PCA across dumps from several runs, aligns trajectories to a
+shared start, and draws the DIM refusal direction. Requires
+`checkpoints/tmp_best_layer_activations/` in each run.
+
+```bash
+python scripts/metrics/plot_activation_pca_compare.py \
+  --exp-dirs \
+    /path/to/run_activation_additive_rot \
+    /path/to/run_baseline \
+    /path/to/run_shtiefel_additive_rot \
+  --dim-root results/rdo_refusal/dim
+```
+
+Default output:
+
+```text
+<first-exp>/checkpoints/activation_pca_compare_3d.png
+```
+
+### Multi-experiment activation PCA (origin vectors)
+
+Uncentered PCA so plot origin is zero activation. Plots only start/end points as
+vectors from the origin (no shared-start alignment), plus a compact refusal
+direction cue.
+
+```bash
+python scripts/metrics/plot_activation_pca_vector_compare.py \
+  --exp-dirs \
+    /path/to/run_activation_additive_rot \
+    /path/to/run_baseline \
+    /path/to/run_shtiefel_additive_rot \
+  --dim-root results/rdo_refusal/dim
+```
+
+Default output:
+
+```text
+<first-exp>/checkpoints/activation_pca_vector_compare_3d.png
+```
+
+Legend labels map `baseline` → RDO, `activation_additive_rot` → Cayley Steering,
+`shtiefel_additive_rot` → Stiefel Rotation.
+
 ## Ablation plots
+
+Batch driver over all models under the AAAI NOL / `k_proj` roots (and optional
+baseline NOL trees):
+
+```bash
+python scripts/metrics/ablation_study.py \
+  --rdo-exp-list results/rdo_refusal/AAAI-results/rdo_exp_list.yaml \
+  --output-dir results/rdo_refusal/analysis
+```
+
+Add `-b results/rdo_refusal/AAAI-results/baseline/nol-ablations` to also plot
+baseline-only NOL families under `analysis/baseline/<model>/`.
+
+Horizontal reference lines (RDO / Angular / Spherical) are **not** stored inside
+`analysis/`; they are loaded from experiment dirs listed in
+`results/rdo_refusal/AAAI-results/rdo_exp_list.yaml`. Curve data for the
+Cayley/Stiefel series is written under `analysis/` as CSVs.
 
 ### `k_proj` ablation
 
-This compares Cayley additive and Stiefel additive experiment families and adds
-horizontal RDO reference lines from `rdo_exp_list.txt`:
+Compares Cayley additive and Stiefel additive experiment families and adds
+horizontal reference lines from the YAML map:
 
 ```bash
 python scripts/metrics/ablation_study_r.py \
   -a /path/to/activation_additive_rot \
   -s /path/to/shtiefel_additive_rot \
-  --rdo-exp-list results/rdo_refusal/analysis/rdo_exp_list.txt \
+  --rdo-exp-list results/rdo_refusal/AAAI-results/rdo_exp_list.yaml \
   --output-dir results/rdo_refusal/analysis/<model>/ablation_study_k_proj
 ```
 
@@ -533,7 +641,7 @@ python scripts/metrics/ablation_study_r.py \
 python scripts/metrics/ablation_study_nol.py \
   -a /path/to/activation_additive_rot \
   -s /path/to/shtiefel_additive_rot \
-  --rdo-exp-list results/rdo_refusal/analysis/rdo_exp_list.txt \
+  --rdo-exp-list results/rdo_refusal/AAAI-results/rdo_exp_list.yaml \
   --output-dir results/rdo_refusal/analysis/<model>/ablation_study_nol
 ```
 
@@ -551,14 +659,9 @@ python scripts/metrics/ablation_study_nol.py \
 Repeated baseline runs with the same `num_opt_layers` are treated as replicates
 and plotted using their mean and standard deviation.
 
-The reference map format is:
-
-```text
-model-key: /absolute/or/relative/path/to/baseline/run
-```
-
-Current matching supports DeepSeek, Olmo, Qwen3, Qwen2.5 EASE, and Falcon3
-entries.
+The YAML reference map lists per-model experiment dirs for `rdo`,
+`angular-steering`, and `spherical-steering` sections (see
+`results/rdo_refusal/AAAI-results/rdo_exp_list.yaml`).
 
 Each metrics output includes:
 
@@ -664,8 +767,9 @@ Install environment
   -> configure geometry-of-refusal/.env
   -> run pipeline.run_pipeline for each model
   -> verify DIM files
-  -> run one RDO experiment
+  -> run one RDO experiment (optionally EVAL_ACTIVATION_PCA=true)
   -> inspect evaluations/checkpoints
   -> run the grid
-  -> generate ablation plots
+  -> generate ablation plots (ablation_study.py)
+  -> optional: plot_activation_pca_compare / plot_activation_pca_vector_compare
 ```

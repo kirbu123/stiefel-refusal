@@ -769,14 +769,21 @@ def plot_family(
             _series_ylabel(benchmark, backend, metric),
             fontweight="bold",
         )
-        axis.set_title(
-            _series_title(benchmark, backend, group, metric),
-            fontweight="bold",
-        )
         axis.grid(True, alpha=0.25)
         for tick_label in axis.get_xticklabels() + axis.get_yticklabels():
             tick_label.set_fontweight("bold")
-        axis.legend(frameon=False, prop={"weight": "bold"})
+        n_legend = len(axis.get_legend_handles_labels()[0])
+        axis.legend(
+            frameon=False,
+            prop={"weight": "bold", "size": 8},
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.16),
+            ncol=max(1, min(4, n_legend)),
+            columnspacing=0.9,
+            handlelength=1.4,
+            handletextpad=0.35,
+            borderaxespad=0.0,
+        )
         fig.tight_layout()
 
         stem_parts = [benchmark]
