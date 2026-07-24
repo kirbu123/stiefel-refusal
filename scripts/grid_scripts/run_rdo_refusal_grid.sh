@@ -6,13 +6,13 @@ cd "$(dirname "$0")/../.."
 
 # GPU used for every sequential run.
 # Override with: CUDA_VISIBLE_DEVICES=1 ./scripts/grid_scripts/run_rdo_refusal_grid.sh
-CUDA_VISIBLE_DEVICES=0
+CUDA_VISIBLE_DEVICES=6
 cuda_visible_devices="${CUDA_VISIBLE_DEVICES:-0}"
 
 # Root directory where this grid stores TensorBoard experiment run directories.
 # Override with: RESULT_ROOT=/path/to/tensorboard ./scripts/grid_scripts/run_rdo_refusal_grid.sh
 
-RESULT_ROOT="/home/user1/buka2004/LLM-Attack-Defense/results/rdo_refusal/AAAI-results/baseline/nol-ablations/falcon-7b-base"
+RESULT_ROOT="/home/user1/buka2004/LLM-Attack-Defense/results/rdo_refusal/AAAI-results/baseline/nol-ablations/qwen-1.5b-ease"
 
 result_root="${RESULT_ROOT:-./results/rdo_refusal/tensorboard}"
 if [[ -z "${result_root}" ]]; then
@@ -23,11 +23,11 @@ fi
 # Cartesian-product grid: every model and mode runs with every k_proj and nol value.
 # "Qwen/Qwen3-8B" "tiiuae/Falcon3-7B-Base" "huihui-ai/Huihui-Qwen3.5-9B-abliterated" "CWRUSafetyLab/Qwen2.5-1.5B-Instruct-EASE" "allenai/Olmo-3-7B-Instruct" "allenai/OLMo-2-0425-1B-Instruct" "Rootkit7/Qwen3-8B-abliterated" "allenai/Olmo-3-1025-7B" "Qwen/Qwen3-8B-Base" "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 model_values=(
-  "tiiuae/Falcon3-7B-Base"
+  "CWRUSafetyLab/Qwen2.5-1.5B-Instruct-EASE"
 )
 direction_mode_values=(baseline) # baseline activation_additive_rot shtiefel_additive_rot
 k_proj_values=(35)
-n_of_layers_values=(1 3 4 5 7 12 15 20)
+n_of_layers_values=(4 5 7 12 15 20)
 
 # Loss weights (defaults match scripts/run_rdo_refusal.sh).
 ADDITION_LAMBDA=0.2

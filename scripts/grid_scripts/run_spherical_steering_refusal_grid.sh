@@ -6,7 +6,7 @@ cd "$(dirname "$0")/../.."
 
 # GPU used for every sequential run.
 # Override with: CUDA_VISIBLE_DEVICES=1 ./scripts/grid_scripts/run_spherical_steering_refusal_grid.sh
-CUDA_VISIBLE_DEVICES=3
+CUDA_VISIBLE_DEVICES=0
 cuda_visible_devices="${CUDA_VISIBLE_DEVICES:-0}"
 
 # Root directory where this grid stores experiment run directories.

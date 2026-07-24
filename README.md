@@ -5,7 +5,9 @@ This document covers the retained RDO workflow on `main`:
 1. build a DIM refusal direction with `pipeline.run_pipeline`;
 2. train/evaluate an RDO steering method with `baselines.rdo_refusal`;
 3. launch individual or grid experiments;
-4. generate `k_proj` and `num_opt_layers` ablation plots.
+4. optionally run paper Angular / Spherical inference-only steering baselines
+   (no DIM / no RDO training);
+5. generate `k_proj` and `num_opt_layers` ablation plots.
 
 All commands assume the repository is located at:
 
@@ -412,6 +414,77 @@ The grid intentionally allows only:
 Set `RESULT_ROOT` and GPU selection in the grid script. Note that the current
 script assigns `CUDA_VISIBLE_DEVICES` internally, so exporting it before launch
 does not override that assignment unless the script is changed.
+
+## Paper Angular and Spherical steering
+
+These are **inference-only** refusal baselines that reuse the same SaladBench
+data, guard metrics, and experiment logging as RDO. They do **not** require
+Stage 1 DIM artifacts and do not train an RDO direction.
+
+Papers:
+
+- [Angular Steering: Behavior Control via Rotation in Activation Space](https://arxiv.org/abs/2510.26243)
+  (`paper_angular_steering`)
+- [Spherical Steering: Geometry-Aware Activation Rotation for Language Models](https://arxiv.org/pdf/2602.08169)
+  (`paper_spherical_steering`)
+
+### Angular Steering
+
+Fixed attack/protect defaults (attack θ=180°, protect θ=0°). No θ / `k_proj` /
+`num_opt_layers` sweep — grids iterate **models only**.
+
+Single run:
+
+```bash
+cd /home/user1/buka2004/LLM-Attack-Defense
+source .venv/bin/activate
+
+MODEL_NAME="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B" \
+RESULT_ROOT="./results/rdo_refusal/AAAI-results/paper_angular_steering" \
+CUDA_VISIBLE_DEVICES=0 \
+./scripts/run_angular_steering_refusal.sh
+```
+
+Grid (edit `model_values` / `RESULT_ROOT` / GPU in the script as needed):
+
+```bash
+./scripts/grid_scripts/run_angular_steering_refusal_grid.sh
+```
+
+Optional overrides: `ANGULAR_STRATEGY`, `ANGULAR_ADAPTIVE_MODE`,
+`ANGULAR_ATTACK_DEGREE`, `ANGULAR_PROTECT_DEGREE`,
+`ANGULAR_N_EXTRACT_SAMPLES`, `ANGULAR_EXTRACT_BATCH_SIZE`.
+
+### Spherical Steering
+
+Fixed κ / α / β defaults (`kappa=20`, `alpha=0.7`, `beta=0.1`). Grids iterate
+**models only**.
+
+Single run:
+
+```bash
+cd /home/user1/buka2004/LLM-Attack-Defense
+source .venv/bin/activate
+
+MODEL_NAME="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B" \
+RESULT_ROOT="./results/rdo_refusal/AAAI-results/paper_spherical_steering" \
+CUDA_VISIBLE_DEVICES=0 \
+./scripts/run_spherical_steering_refusal.sh
+```
+
+Grid:
+
+```bash
+./scripts/grid_scripts/run_spherical_steering_refusal_grid.sh
+```
+
+Optional overrides: `SPHERICAL_KAPPA`, `SPHERICAL_ALPHA`, `SPHERICAL_BETA`,
+`SPHERICAL_N_EXTRACT_SAMPLES`, `SPHERICAL_EXTRACT_BATCH_SIZE`.
+
+Both wrappers enable the same LlamaGuard / Qwen3Guard / WildGuard, MMLU,
+WikiText perplexity, ARC, and GSM8K evaluations as `run_rdo_refusal.sh`.
+Artifacts (including `checkpoints/steering_prototype.pt`) are written under
+`RESULT_ROOT`.
 
 ## Outputs
 

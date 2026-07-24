@@ -181,32 +181,57 @@ def extract_saladbench_prototypes(
 def _spherical_geometric_logic_batched(x, mu_T, mu_H, kappa: float, alpha: float, beta: float):
     """Batched port of ``spherical_geometric_logic`` for tensors [..., D].
 
-    Keeps the upstream formulas; vectorized so nnsight tracing does not need
-    Python loops over batch/token.
+    nnsight Proxy-safe: no bitwise and, torch.where, torch.stack, or Python
+    bool tests on activation values. Gate with float multiply/add like
+    PaperAngularSteering (single comparison + soft theta gate).
     """
-    orig_dtype = x.dtype
-    x_f = x.float()
-    mu_T = mu_T.float()
-    mu_H = mu_H.float()
+    try:
+        x_f = x.float()
+    except Exception:
+        x_f = x
+    try:
+        mu_T = mu_T.to(dtype=x_f.dtype)
+        mu_H = mu_H.to(dtype=x_f.dtype)
+    except Exception:
+        try:
+            mu_T = mu_T.float()
+            mu_H = mu_H.float()
+        except Exception:
+            pass
 
     orig_norm = torch.linalg.vector_norm(x_f, dim=-1, keepdim=True).clamp_min(1e-12)
     x_hat = x_f / orig_norm
 
     cos_T = (x_hat * mu_T).sum(dim=-1).clamp(-1, 1)
     cos_H = (x_hat * mu_H).sum(dim=-1).clamp(-1, 1)
-    logits = torch.stack([kappa * cos_T, kappa * cos_H], dim=-1)
-    probs = torch.softmax(logits, dim=-1)
-    p_T, p_H = probs[..., 0], probs[..., 1]
+
+    # 2-class softmax without torch.stack (Proxy-safe).
+    logit_T = float(kappa) * cos_T
+    logit_H = float(kappa) * cos_H
+    e_T = torch.exp(logit_T)
+    e_H = torch.exp(logit_H)
+    denom_p = e_T + e_H
+    p_T = e_T / denom_p
+    p_H = e_H / denom_p
     delta = p_H - p_T
 
-    # Steering strength; inactive positions get t=0 (identity).
     denom = max(1.0 - float(beta), 1e-6)
-    t = alpha * (delta - beta) / denom
+    t = float(alpha) * (delta - float(beta)) / denom
     t = torch.clamp(t, 0.0, 1.0)
-    active = (delta > beta) & (torch.acos(cos_T) >= 1e-4)
-    t = torch.where(active, t, torch.zeros_like(t))
 
     theta = torch.acos(cos_T)
+    # (delta > beta): one comparison, same pattern as angular steering.
+    try:
+        mask_dtype = x.dtype
+    except Exception:
+        mask_dtype = torch.float32
+    active = (delta > float(beta)).to(dtype=mask_dtype)
+    # Stand-in for (theta >= 1e-4) without a second Proxy bool op:
+    # 0 at theta=0, 1 for theta >= 1e-4.
+    theta_ok = torch.clamp(theta / 1e-4, 0.0, 1.0)
+    gate = active * theta_ok
+    t = t * gate
+
     theta_new = (1.0 - t) * theta
     sin_theta = torch.sin(theta).clamp_min(1e-6)
     u = (x_hat - cos_T.unsqueeze(-1) * mu_T) / sin_theta.unsqueeze(-1)
@@ -215,9 +240,12 @@ def _spherical_geometric_logic_batched(x, mu_T, mu_H, kappa: float, alpha: float
         + torch.sin(theta_new).unsqueeze(-1) * u
     )
     x_new = x_new_hat * orig_norm
-    # Where inactive, keep original
-    x_out = torch.where(active.unsqueeze(-1), x_new, x_f)
-    return x_out.to(dtype=orig_dtype)
+    # Must identity-mask: with t=0 and tiny theta, SLERP collapses to mu_T.
+    x_out = x_f + gate.unsqueeze(-1) * (x_new - x_f)
+    try:
+        return x_out.to(dtype=x.dtype)
+    except Exception:
+        return x_out
 
 
 class PaperSphericalSteering(nn.Module):
@@ -289,6 +317,7 @@ class PaperSphericalSteering(nn.Module):
         self.set_guard_mode(self._guard_mode)
 
     def _spherical_transform(self, x):
+        # Mirror PaperAngularSteering: no Python bool/ndim tests on nnsight Proxies.
         if isinstance(x, tuple):
             if len(x) == 0:
                 return x
@@ -312,21 +341,9 @@ class PaperSphericalSteering(nn.Module):
             except Exception:
                 pass
 
-        # Match upstream generation default: steer last token only.
-        if getattr(x, "ndim", None) == 2:
-            last = x[-1:]
-            steered = _spherical_geometric_logic_batched(
-                last, mu_T, mu_H, self.kappa, self.alpha, self.beta
-            )
-            return torch.cat([x[:-1], steered], dim=0)
-
-        if getattr(x, "ndim", None) == 3:
-            last = x[:, -1:, :]
-            steered = _spherical_geometric_logic_batched(
-                last, mu_T, mu_H, self.kappa, self.alpha, self.beta
-            )
-            return torch.cat([x[:, :-1, :], steered.to(dtype=x.dtype)], dim=1)
-
+        # Apply to the full activation tensor (all tokens). Under RDO's
+        # intervene_every_step decode path this is typically last-token shaped;
+        # keep this path free of Proxy-unsafe Python conditionals.
         return _spherical_geometric_logic_batched(
             x, mu_T, mu_H, self.kappa, self.alpha, self.beta
         )
@@ -334,7 +351,7 @@ class PaperSphericalSteering(nn.Module):
     def __call__(self, direction=None, best_layer: int = None):
         del direction, best_layer
         n_layers = len(self.module.layers)
-        layer_idx = max(0, min(self.selected_layer, n_layers - 1))
+        layer_idx = max(0, min(int(self.selected_layer), n_layers - 1))
         layer = self.module.layers[layer_idx]
         layer.input = self._spherical_transform(layer.input)
 
