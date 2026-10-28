@@ -293,6 +293,18 @@ def unload_llamaguard_evaluator() -> None:
         torch.cuda.empty_cache()
 
 
+def _freest_cuda_device() -> str:
+    """Visible GPU with the most free memory, as a ``cuda:N`` string."""
+    best_idx = 0
+    best_free = -1
+    for idx in range(torch.cuda.device_count()):
+        free, _total = torch.cuda.mem_get_info(idx)
+        if free > best_free:
+            best_free = free
+            best_idx = idx
+    return f"cuda:{best_idx}"
+
+
 def get_llamaguard_evaluator() -> LlamaGuardEvaluator:
     """Lazily create and cache a single evaluator instance."""
     global _LLAMAGUARD_EVALUATOR
@@ -307,9 +319,17 @@ def get_llamaguard_evaluator() -> LlamaGuardEvaluator:
     else:
         dtype = torch.bfloat16
 
+    device = os.getenv("LLAMAGUARD_DEVICE")
+    if not device:
+        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            device = _freest_cuda_device()
+            print(f"[eval] LlamaGuard device {device} (most free memory)")
+        else:
+            device = "cuda"
+
     _LLAMAGUARD_EVALUATOR = LlamaGuardEvaluator(
         model_name=os.getenv("LLAMAGUARD_MODEL_NAME", LLAMAGUARD_MODEL_NAME),
-        device=os.getenv("LLAMAGUARD_DEVICE", "cuda"),
+        device=device,
         dtype=dtype,
     )
     return _LLAMAGUARD_EVALUATOR

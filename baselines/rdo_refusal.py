@@ -311,6 +311,18 @@ def parse_args():
 args = parse_args()
 MODEL_PATH = args.model
 
+# A sharded 32B model cannot generate targets at batch 512. Keep 512 on one GPU.
+if (
+    torch.cuda.is_available()
+    and torch.cuda.device_count() > 1
+    and "--target_generation_batch_size" not in sys.argv
+):
+    args.target_generation_batch_size = 8
+    print(
+        f"[run] {torch.cuda.device_count()} GPUs visible; "
+        "target_generation_batch_size=8"
+    )
+
 
 def _tb_dir_frz_suffix(train_kwargs: dict | None = None) -> str:
     """Short TensorBoard dirname segment: fl=freeze_order_layers (0/1), fs=freeze_step."""
@@ -335,6 +347,48 @@ elif args.dtype == 'float32':
 else:
     raise ValueError(f"Unsupported dtype: {args.dtype}")
 
+
+def _unwrap_envoy(module):
+    """Return the nn.Module behind an nnsight Envoy, or the module itself."""
+    raw = getattr(module, "_module", None)
+    if isinstance(raw, nn.Module):
+        return raw
+    return module
+
+
+def _layer_devices(module_envoy, n_layers: int) -> list[torch.device]:
+    """Device of each decoder layer after device_map placement."""
+    layers = module_envoy.layers
+    devices: list[torch.device] = []
+    fallback = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    for i in range(n_layers):
+        raw = _unwrap_envoy(layers[i])
+        device = None
+        for param in raw.parameters():
+            if param.device.type != "meta":
+                device = param.device
+                break
+        devices.append(device or fallback)
+    return devices
+
+
+def _print_layer_device_map(module_envoy) -> None:
+    """Log which GPU holds each layer. No-op when a single GPU is visible."""
+    if not torch.cuda.is_available() or torch.cuda.device_count() <= 1:
+        return
+    n_layers = len(module_envoy.layers)
+    devices = _layer_devices(module_envoy, n_layers)
+    runs: list[list] = []
+    for idx, dev in enumerate(devices):
+        label = str(dev)
+        if not runs or runs[-1][0] != label:
+            runs.append([label, idx, idx])
+        else:
+            runs[-1][2] = idx
+    summary = ", ".join(f"{label} layers {start}-{end}" for label, start, end in runs)
+    print(f"[device] {torch.cuda.device_count()} GPUs visible; {summary}")
+
+
 model = LanguageModel(MODEL_PATH, cache_dir=os.getenv("HUGGINGFACE_CACHE_DIR"), device_map='auto', torch_dtype=dtype)
 model.requires_grad_(False)
 
@@ -342,6 +396,8 @@ model.requires_grad_(False)
 # loading and testing model
 with model.trace("Hello") as tracer:
     pass
+
+_print_layer_device_map(model.model)
 
 # %%
 model_id = MODEL_PATH.split("/")[-1]
@@ -1192,6 +1248,10 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
     ``cayley_param`` Parameter). Instead ``cayley_param`` is a buffer holding the composed
     map for logging/checkpoints; ``import_cayley_checkpoint`` (via ``set_matrix``) loads eval
     checkpoints. Training optimizes ``proj_A`` and ``proj_B``.
+
+    One visible GPU keeps those tensors stacked on ``cuda``. Several visible GPUs store
+    each layer's factors and composed map on that layer's device. ``cayley_param`` still
+    exposes one ``(n_layers, dim, dim)`` tensor for checkpoints.
     """
 
     def __init__(
@@ -1227,30 +1287,71 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
             raise ValueError(f"dim // proj_reduce_ratio must be >= 1; dim={dim}, ratio={r}")
         self.proj_reduce_ratio = r
         self.k = k
-
-        if init_mode == "random":
-            self.proj_A = nn.Parameter(torch.randn(n_layers, dim, k, dtype=torch.float32, device="cuda") * 1e-3)
-            self.proj_B = nn.Parameter(torch.randn(n_layers, k, dim, dtype=torch.float32, device="cuda") * 1e-3)
-        elif init_mode == "diag_permutation":
-            matrices_a = []
-            matrices_b = []
-            diag_noise_scale = 1e-3
-            for _ in range(n_layers):
-                a = torch.eye(dim, k, dtype=torch.float32, device="cuda")
-                d = min(dim, k)
-                a[:d, :d].diagonal().add_(
-                    torch.randn(d, dtype=torch.float32, device="cuda") * diag_noise_scale
-                )
-                matrices_a.append(a)
-                b = torch.eye(k, dim, dtype=torch.float32, device="cuda")
-                b[:d, :d].diagonal().add_(
-                    torch.randn(d, dtype=torch.float32, device="cuda") * diag_noise_scale
-                )
-                matrices_b.append(b)
-            self.proj_A = nn.Parameter(torch.stack(matrices_a, dim=0))
-            self.proj_B = nn.Parameter(torch.stack(matrices_b, dim=0))
+        self._n_layers = n_layers
+        self._sharded = torch.cuda.is_available() and torch.cuda.device_count() > 1
+        if self._sharded:
+            self._layer_devices = _layer_devices(self.module, n_layers)
         else:
-            raise ValueError(f"Invalid init_mode: {init_mode}")
+            self._layer_devices = [torch.device("cuda")] * n_layers
+
+        if not self._sharded:
+            if init_mode == "random":
+                self.proj_A = nn.Parameter(torch.randn(n_layers, dim, k, dtype=torch.float32, device="cuda") * 1e-3)
+                self.proj_B = nn.Parameter(torch.randn(n_layers, k, dim, dtype=torch.float32, device="cuda") * 1e-3)
+            elif init_mode == "diag_permutation":
+                matrices_a = []
+                matrices_b = []
+                diag_noise_scale = 1e-3
+                for _ in range(n_layers):
+                    a = torch.eye(dim, k, dtype=torch.float32, device="cuda")
+                    d = min(dim, k)
+                    a[:d, :d].diagonal().add_(
+                        torch.randn(d, dtype=torch.float32, device="cuda") * diag_noise_scale
+                    )
+                    matrices_a.append(a)
+                    b = torch.eye(k, dim, dtype=torch.float32, device="cuda")
+                    b[:d, :d].diagonal().add_(
+                        torch.randn(d, dtype=torch.float32, device="cuda") * diag_noise_scale
+                    )
+                    matrices_b.append(b)
+                self.proj_A = nn.Parameter(torch.stack(matrices_a, dim=0))
+                self.proj_B = nn.Parameter(torch.stack(matrices_b, dim=0))
+            else:
+                raise ValueError(f"Invalid init_mode: {init_mode}")
+            # Not named cayley_param: that name is the property below, and
+            # register_buffer() probes hasattr() which would call the property.
+            self.register_buffer(
+                "_cayley_stacked",
+                torch.zeros(n_layers, dim, dim, dtype=torch.float32, device="cuda"),
+            )
+        else:
+            params_a = []
+            params_b = []
+            diag_noise_scale = 1e-3
+            d = min(dim, k)
+            for layer_idx, dev in enumerate(self._layer_devices):
+                if init_mode == "random":
+                    a = torch.randn(dim, k, dtype=torch.float32, device=dev) * 1e-3
+                    b = torch.randn(k, dim, dtype=torch.float32, device=dev) * 1e-3
+                elif init_mode == "diag_permutation":
+                    a = torch.eye(dim, k, dtype=torch.float32, device=dev)
+                    a[:d, :d].diagonal().add_(
+                        torch.randn(d, dtype=torch.float32, device=dev) * diag_noise_scale
+                    )
+                    b = torch.eye(k, dim, dtype=torch.float32, device=dev)
+                    b[:d, :d].diagonal().add_(
+                        torch.randn(d, dtype=torch.float32, device=dev) * diag_noise_scale
+                    )
+                else:
+                    raise ValueError(f"Invalid init_mode: {init_mode}")
+                params_a.append(nn.Parameter(a))
+                params_b.append(nn.Parameter(b))
+                self.register_buffer(
+                    f"_cayley_{layer_idx}",
+                    torch.zeros(dim, dim, dtype=torch.float32, device=dev),
+                )
+            self.proj_A = nn.ParameterList(params_a)
+            self.proj_B = nn.ParameterList(params_b)
 
         if init_vectors is not None and len(init_vectors) > 0:
             r0 = init_vectors[0].detach().float().cuda().clone()
@@ -1264,21 +1365,46 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
             requires_grad=False,
         )
 
-        self.register_buffer("cayley_param", torch.zeros(n_layers, dim, dim, dtype=torch.float32, device="cuda"))
         self._use_composed_cayley = False
 
         with torch.no_grad():
             self.orthogonalize()
 
+    def _cayley_slice(self, layer_idx: int) -> torch.Tensor:
+        if self._sharded:
+            return getattr(self, f"_cayley_{layer_idx}")
+        return self._buffers["_cayley_stacked"][layer_idx]
+
+    @property
+    def cayley_param(self) -> torch.Tensor:
+        """Composed maps as one ``(n_layers, dim, dim)`` tensor.
+
+        Sharded runs stack the per-layer buffers on CPU so checkpoint saves keep
+        the single-GPU layout. One GPU returns the live buffer.
+        """
+        if not self._sharded:
+            return self._buffers["_cayley_stacked"]
+        slices = [
+            getattr(self, f"_cayley_{layer_idx}").detach().to("cpu")
+            for layer_idx in range(self._n_layers)
+        ]
+        return torch.stack(slices, dim=0)
+
     def import_cayley_checkpoint(self, composed: torch.Tensor) -> None:
         """Load per-layer composed maps (n_layers, dim, dim) for eval; use ``matrix`` from buffer."""
+        expected = (self._n_layers, self.dim, self.dim)
+        if tuple(composed.shape) != expected:
+            raise ValueError(
+                f"import_cayley_checkpoint: expected shape {expected}, got {tuple(composed.shape)}"
+            )
         with torch.no_grad():
-            t = composed.to(device=self.cayley_param.device, dtype=self.cayley_param.dtype)
-            if t.shape != self.cayley_param.shape:
-                raise ValueError(
-                    f"import_cayley_checkpoint: expected shape {tuple(self.cayley_param.shape)}, got {tuple(t.shape)}"
-                )
-            self.cayley_param.copy_(t)
+            if self._sharded:
+                for layer_idx in range(self._n_layers):
+                    buf = self._cayley_slice(layer_idx)
+                    buf.copy_(composed[layer_idx].to(device=buf.device, dtype=buf.dtype))
+            else:
+                target = self._buffers["_cayley_stacked"]
+                target.copy_(composed.to(device=target.device, dtype=target.dtype))
         self._use_composed_cayley = True
 
     def matrix(self, layer_idx: int) -> torch.Tensor:
@@ -1288,7 +1414,7 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         if self._cached_matrices is not None:
             return self._cached_matrices[layer_idx]
         if self._use_composed_cayley:
-            return self.cayley_param[layer_idx]
+            return self._cayley_slice(layer_idx)
         A = self.proj_A[layer_idx]
         B = self.proj_B[layer_idx]
         QA = OrthogonalProjection.apply(A)
@@ -1297,36 +1423,42 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
 
     def orthogonalize(self):
         with torch.no_grad():
-            for layer_idx in range(self.proj_A.shape[0]):
+            n_layers = len(self.proj_A) if self._sharded else self.proj_A.shape[0]
+            for layer_idx in range(n_layers):
+                factor_a = self.proj_A[layer_idx]
+                factor_b = self.proj_B[layer_idx]
+                composed = self._cayley_slice(layer_idx)
                 if layer_idx in self._frozen_layer_idxs:
-                    self.proj_A[layer_idx].copy_(
-                        torch.eye(self.dim, self.k, device=self.proj_A.device, dtype=self.proj_A.dtype)
+                    factor_a.copy_(
+                        torch.eye(self.dim, self.k, device=factor_a.device, dtype=factor_a.dtype)
                     )
-                    self.proj_B[layer_idx].copy_(
-                        torch.eye(self.k, self.dim, device=self.proj_B.device, dtype=self.proj_B.dtype)
+                    factor_b.copy_(
+                        torch.eye(self.k, self.dim, device=factor_b.device, dtype=factor_b.dtype)
                     )
-                    self.cayley_param[layer_idx].copy_(torch.eye(self.dim, device=self.cayley_param.device, dtype=self.cayley_param.dtype))
+                    composed.copy_(torch.eye(self.dim, device=composed.device, dtype=composed.dtype))
                     continue
 
-                Wa = self.proj_A[layer_idx]
+                Wa = factor_a
                 Qa, Ra = torch.linalg.qr(Wa, mode="reduced")
                 da = torch.sign(torch.diag(Ra))
                 da[da == 0] = 1.0
                 Qa = Qa @ torch.diag(da)
-                self.proj_A[layer_idx].copy_(Qa)
+                factor_a.copy_(Qa)
 
                 # proj_B is (k, dim): orthonormal rows <=> QR on B.T for orthonormal columns.
-                Wb = self.proj_B[layer_idx]
+                Wb = factor_b
                 Wbt = Wb.T
                 Qbt, Rbt = torch.linalg.qr(Wbt, mode="reduced")
                 db = torch.sign(torch.diag(Rbt))
                 db[db == 0] = 1.0
                 Qbt = Qbt @ torch.diag(db)
-                self.proj_B[layer_idx].copy_(Qbt.T)
+                factor_b.copy_(Qbt.T)
 
-                self.cayley_param[layer_idx].copy_(self.proj_A[layer_idx] @ self.proj_B[layer_idx])
+                composed.copy_(factor_a @ factor_b)
 
     def parameters(self):
+        if self._sharded:
+            return list(self.proj_A) + list(self.proj_B)
         return [self.proj_A, self.proj_B]
 
 
@@ -1544,7 +1676,17 @@ def refusal_cone_optimization(model, train_dataset,
         # Important: in nnsight tracing, logging expects a traced value that supports `.save()`.
         # Anchor the "zero" to a traced tensor (lm_head.output) while still depending on params.
         if hasattr(model.lm_head, "output") and hasattr(model.lm_head.output, "reshape"):
-            return (model.lm_head.output.reshape(-1)[0] * 0.0) + (p0.reshape(-1)[0] * 0.0)
+            if not getattr(operation, "_sharded", False):
+                return (model.lm_head.output.reshape(-1)[0] * 0.0) + (p0.reshape(-1)[0] * 0.0)
+            # Factors live on each layer's GPU. Put the parameter term on the lm_head
+            # device so the traced add does not cross devices.
+            anchor = model.lm_head.output.reshape(-1)[0] * 0.0
+            param_term = p0.reshape(-1)[0] * 0.0
+            try:
+                param_term = param_term.to(device=_unwrap_envoy(model.lm_head).weight.device)
+            except Exception:
+                pass
+            return anchor + param_term
         return p0.reshape(-1)[0] * 0.0
 
     print("Cone dim", cone_dim)

@@ -14,8 +14,12 @@ result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave 
 
 export MAX_ITERS="${max_iters}"
 
-# ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES=1
+# ---- GPU ----
+# Bare launch stays on GPU 0. A preset list is kept, e.g.
+# CUDA_VISIBLE_DEVICES=0,1,2,3 ./scripts/run_rdo_refusal.sh
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  export CUDA_VISIBLE_DEVICES=0
+fi
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -30,7 +34,7 @@ export LLAMAGUARD_MAX_NEW_TOKENS="${LLAMAGUARD_MAX_NEW_TOKENS:-100}"
 export RDO_MAX_HARMFUL_PER_CATEGORY="${RDO_MAX_HARMFUL_PER_CATEGORY:-200}" # 200
 export RDO_MAX_HARMLESS_TOTAL="${RDO_MAX_HARMLESS_TOTAL:-200}" # 200
 
-export HF_TOKEN="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"
+export HF_TOKEN="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"
 
 # ---- Default command ----
 cmd=(python -m baselines.rdo_refusal \

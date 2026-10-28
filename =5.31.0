@@ -1,0 +1,3 @@
+Requirement already satisfied: pydantic in ./.venv/lib/python3.10/site-packages (2.12.5)
+Requirement already satisfied: gradio in ./.venv/lib/python3.10/site-packages (6.14.0)
+Requirement already satisfied: scikit_learn==1.6.1 in ./.venv/lib/python3.10/site-packages (1.6.1)
