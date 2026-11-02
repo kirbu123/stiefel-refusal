@@ -389,6 +389,27 @@ def _print_layer_device_map(module_envoy) -> None:
     print(f"[device] {torch.cuda.device_count()} GPUs visible; {summary}")
 
 
+def _raise_if_meta_parameters(module_envoy) -> None:
+    """Refuse a load that left weights on the meta device.
+
+    ``device_map='auto'`` offloads leftovers to CPU and keeps those parameters as
+    meta tensors. ``_layer_devices`` skips them, so the layer map can look fully
+    on GPU while ``lm_head`` is still meta. Training then dies copying that tensor.
+    """
+    raw = _unwrap_envoy(module_envoy)
+    meta_names = [name for name, param in raw.named_parameters() if param.device.type == "meta"]
+    if not meta_names:
+        return
+    preview = ", ".join(meta_names[:8])
+    if len(meta_names) > 8:
+        preview = f"{preview} (+{len(meta_names) - 8} more)"
+    raise RuntimeError(
+        f"{len(meta_names)} parameters are on the meta device because device_map offloaded "
+        f"them to CPU ({preview}). Free GPU memory so the full bf16 model fits on CUDA "
+        f"(about 64 GB for a 32B model) and rerun."
+    )
+
+
 model = LanguageModel(MODEL_PATH, cache_dir=os.getenv("HUGGINGFACE_CACHE_DIR"), device_map='auto', torch_dtype=dtype)
 model.requires_grad_(False)
 
@@ -398,6 +419,7 @@ with model.trace("Hello") as tracer:
     pass
 
 _print_layer_device_map(model.model)
+_raise_if_meta_parameters(model._envoy)
 
 # %%
 model_id = MODEL_PATH.split("/")[-1]
@@ -1678,14 +1700,15 @@ def refusal_cone_optimization(model, train_dataset,
         if hasattr(model.lm_head, "output") and hasattr(model.lm_head.output, "reshape"):
             if not getattr(operation, "_sharded", False):
                 return (model.lm_head.output.reshape(-1)[0] * 0.0) + (p0.reshape(-1)[0] * 0.0)
-            # Factors live on each layer's GPU. Put the parameter term on the lm_head
-            # device so the traced add does not cross devices.
+            # Factors live on each layer's GPU. Put both terms on one real device
+            # so the traced add does not cross devices. A CPU-offloaded lm_head
+            # reports a meta weight, and .to(meta) yields an empty tensor.
             anchor = model.lm_head.output.reshape(-1)[0] * 0.0
             param_term = p0.reshape(-1)[0] * 0.0
-            try:
-                param_term = param_term.to(device=_unwrap_envoy(model.lm_head).weight.device)
-            except Exception:
-                pass
+            weight_device = _unwrap_envoy(model.lm_head).weight.device
+            target = p0.device if weight_device.type == "meta" else weight_device
+            param_term = param_term.to(device=target)
+            anchor = anchor.to(device=target)
             return anchor + param_term
         return p0.reshape(-1)[0] * 0.0
 
