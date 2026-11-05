@@ -215,30 +215,30 @@ def parse_args():
     parser.add_argument('--n_lr_reduce', type=int, default=DEFAULT_CONFIG['n_lr_reduce'],
                     help='Number of learning rate reductions before stopping')
     parser.add_argument('--direction_mode', type=str, default=DEFAULT_CONFIG['direction_mode'],
-                    choices=['baseline', 'rotation', 'activation_rot', 'shtiefel_rot', 'shtiefel_proj_rot'],
+                    choices=['baseline', 'rotation', 'activation_rot', 'shtiefel_rot', 'shtiefel_proj_rot', 'shtiefel_proj_rot_B', 'shtiefel_proj_rot_C'],
                     help='baseline: original RefusalCone. rotation: learn orthogonal M (Cayley), r=M@r0; requires cone_dim=1')
     parser.add_argument(
         '--freeze_order_layers',
         action='store_true',
-        help='(shtiefel_rot, shtiefel_proj_rot) If set, freeze rotation at a stride of layer indices (see --freeze_step).',
+        help='(shtiefel_rot, shtiefel_proj_rot, shtiefel_proj_rot_B, shtiefel_proj_rot_C) If set, freeze rotation at a stride of layer indices (see --freeze_step).',
     )
     parser.add_argument(
         '--freeze_step',
         type=int,
         default=DEFAULT_CONFIG['freeze_step'],
-        help='(shtiefel_rot, shtiefel_proj_rot) With --freeze_order_layers, freeze layers at indices 0, freeze_step, 2*freeze_step, ... (must be >= 1).',
+        help='(shtiefel_rot, shtiefel_proj_rot, shtiefel_proj_rot_B, shtiefel_proj_rot_C) With --freeze_order_layers, freeze layers at indices 0, freeze_step, 2*freeze_step, ... (must be >= 1).',
     )
     parser.add_argument(
         '--optimized_layers',
         type=int,
         default=None,
-        help='(shtiefel_proj_rot) Rotate the first K layers and skip the rest with no matmul.',
+        help='(shtiefel_proj_rot, shtiefel_proj_rot_B, shtiefel_proj_rot_C) Rotate the first K layers and skip the rest with no matmul.',
     )
     parser.add_argument(
         '--proj_reduce_ratio',
         type=int,
         default=DEFAULT_CONFIG['proj_reduce_ratio'],
-        help='(shtiefel_proj_rot) Factor rank is hidden_size // proj_reduce_ratio.',
+        help='(shtiefel_proj_rot, shtiefel_proj_rot_B, shtiefel_proj_rot_C) Factor rank is hidden_size // proj_reduce_ratio.',
     )
 
     # Cone parameters
@@ -1579,6 +1579,317 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         return (x @ B.T) @ A.T
 
 
+_STIEFEL_PROJ_MODES = (
+    "shtiefel_proj_rot",
+    "shtiefel_proj_rot_B",
+    "shtiefel_proj_rot_C",
+)
+
+
+def _qr_orthonormal_columns(W: torch.Tensor) -> torch.Tensor:
+    """QR retraction onto matrices with orthonormal columns. Same sign fix as proj_A."""
+    Q, R = torch.linalg.qr(W, mode="reduced")
+    signs = torch.sign(torch.diag(R))
+    signs = torch.where(signs == 0, torch.ones_like(signs), signs)
+    return Q @ torch.diag(signs)
+
+
+def _project_so(W: torch.Tensor) -> torch.Tensor:
+    """QR retraction onto SO(n): positive R diagonal, then flip a column if det = -1."""
+    Q = _qr_orthonormal_columns(W)
+    det = torch.det(Q)
+    scale = torch.where(
+        det < 0,
+        -torch.ones((), device=Q.device, dtype=Q.dtype),
+        torch.ones((), device=Q.device, dtype=Q.dtype),
+    )
+    return torch.cat((Q[:, :1] * scale, Q[:, 1:]), dim=1)
+
+
+def _init_basis_factor(dim: int, n: int, init_mode: str, device: torch.device) -> torch.Tensor:
+    """d × n factor, same init as ``RefusalStiefelProjRotation.proj_A``."""
+    diag_noise_scale = 1e-3
+    if init_mode == "random":
+        return torch.randn(dim, n, dtype=torch.float32, device=device) * diag_noise_scale
+    if init_mode == "diag_permutation":
+        basis = torch.eye(dim, n, dtype=torch.float32, device=device)
+        width = min(dim, n)
+        basis[:width, :width].diagonal().add_(
+            torch.randn(width, dtype=torch.float32, device=device) * diag_noise_scale
+        )
+        return basis
+    raise ValueError(f"Invalid init_mode: {init_mode}")
+
+
+def _init_core_factor(n: int, init_mode: str, device: torch.device, trainable: bool) -> torch.Tensor:
+    """n × n core. Frozen cores stay exactly I. Trainable cores follow ``init_mode``."""
+    if not trainable:
+        return torch.eye(n, dtype=torch.float32, device=device)
+    diag_noise_scale = 1e-3
+    if init_mode == "random":
+        return torch.randn(n, n, dtype=torch.float32, device=device) * diag_noise_scale
+    if init_mode == "diag_permutation":
+        core = torch.eye(n, dtype=torch.float32, device=device)
+        core.diagonal().add_(torch.randn(n, dtype=torch.float32, device=device) * diag_noise_scale)
+        return core
+    raise ValueError(f"Invalid init_mode: {init_mode}")
+
+
+class RefusalStiefelBCRotation(RefusalStiefelRotation):
+    """
+    Subspace update M = I + B C Bᵀ.
+
+    B is d × n with orthonormal columns (St(d, n)). C is n × n in SO(n).
+    n = dim // proj_reduce_ratio. ``train_block`` selects the single optimized
+    factor: ``"B"`` freezes C at I, ``"C"`` freezes B at its init.
+    ``cayley_param`` stores the composed map for the existing checkpoints.
+    """
+
+    def __init__(
+        self,
+        module: Envoy,
+        dim: int,
+        init_vectors: torch.Tensor | None = None,
+        freeze_order_layers: bool = False,
+        init_mode: str = "diag_permutation",
+        proj_reduce_ratio: int = 10,
+        freeze_step: int = 2,
+        optimized_layers: int | None = None,
+        train_block: str = "C",
+    ) -> None:
+        nn.Module.__init__(self)
+        if train_block not in ("B", "C"):
+            raise ValueError(f"train_block must be 'B' or 'C', got {train_block}")
+        self.module = module
+        self.dim = dim
+        self.train_block = train_block
+        self._cached_matrices: list[torch.Tensor] | None = None
+        self.freeze_order_layers = bool(freeze_order_layers)
+
+        n_layers = len(self.module.layers)
+        if optimized_layers is None:
+            self._optimized_layer_idxs = None
+        else:
+            k_layers = int(optimized_layers)
+            if k_layers < 1 or k_layers > n_layers:
+                raise ValueError(
+                    f"optimized_layers must be in 1..{n_layers}, got {k_layers}"
+                )
+            self._optimized_layer_idxs = set(range(k_layers))
+            print(
+                f"[shtiefel_proj_rot_{train_block}] optimized_layers={k_layers}: "
+                f"rotate {sorted(self._optimized_layer_idxs)}, skip the rest"
+            )
+        if self.freeze_order_layers and n_layers >= 2:
+            step = max(1, int(freeze_step))
+            self._frozen_layer_idxs = set(range(0, n_layers, step))
+            self._frozen_layer_idxs.add(0)
+            self._frozen_layer_idxs.add(n_layers - 1)
+        else:
+            self._frozen_layer_idxs = set()
+
+        ratio = int(proj_reduce_ratio)
+        if ratio < 1:
+            raise ValueError(f"proj_reduce_ratio must be >= 1, got {proj_reduce_ratio}")
+        n = dim // ratio
+        if n < 1:
+            raise ValueError(f"dim // proj_reduce_ratio must be >= 1; dim={dim}, ratio={ratio}")
+        self.proj_reduce_ratio = ratio
+        self.n = n
+        self.k = n
+        self._n_layers = n_layers
+        self._sharded = torch.cuda.is_available() and torch.cuda.device_count() > 1
+        if self._sharded:
+            self._layer_devices = _layer_devices(self.module, n_layers)
+        else:
+            self._layer_devices = [torch.device("cuda")] * n_layers
+
+        train_b = train_block == "B"
+        if not self._sharded:
+            device = torch.device("cuda")
+            basis = torch.stack(
+                [_init_basis_factor(dim, n, init_mode, device) for _ in range(n_layers)],
+                dim=0,
+            )
+            core = torch.stack(
+                [_init_core_factor(n, init_mode, device, trainable=not train_b) for _ in range(n_layers)],
+                dim=0,
+            )
+            if train_b:
+                self.block_B = nn.Parameter(basis)
+                self.register_buffer("_core_stacked", core)
+            else:
+                self.register_buffer("_basis_stacked", basis)
+                self.block_C = nn.Parameter(core)
+            self.register_buffer(
+                "_cayley_stacked",
+                torch.zeros(n_layers, dim, dim, dtype=torch.float32, device=device),
+            )
+        else:
+            basis_params = []
+            core_params = []
+            for layer_idx, dev in enumerate(self._layer_devices):
+                basis = _init_basis_factor(dim, n, init_mode, dev)
+                core = _init_core_factor(n, init_mode, dev, trainable=not train_b)
+                if train_b:
+                    basis_params.append(nn.Parameter(basis))
+                    self.register_buffer(f"_core_{layer_idx}", core)
+                else:
+                    self.register_buffer(f"_basis_{layer_idx}", basis)
+                    core_params.append(nn.Parameter(core))
+                self.register_buffer(
+                    f"_cayley_{layer_idx}",
+                    torch.zeros(dim, dim, dtype=torch.float32, device=dev),
+                )
+            if train_b:
+                self.block_B = nn.ParameterList(basis_params)
+            else:
+                self.block_C = nn.ParameterList(core_params)
+
+        if init_vectors is not None and len(init_vectors) > 0:
+            r0 = init_vectors[0].detach().float().cuda().clone()
+        else:
+            r0 = torch.randn(dim, dtype=torch.float32, device="cuda")
+        r0 = r0 / r0.norm()
+        self.register_buffer("r0", r0)
+
+        self._dummy_fn = nn.Parameter(
+            torch.zeros(dim, dtype=torch.float32, device="cuda"),
+            requires_grad=False,
+        )
+        self._use_composed_cayley = False
+
+        with torch.no_grad():
+            self.orthogonalize()
+
+    def _basis(self, layer_idx: int) -> torch.Tensor:
+        if self.train_block == "B":
+            return self.block_B[layer_idx]
+        if self._sharded:
+            return getattr(self, f"_basis_{layer_idx}")
+        return self._buffers["_basis_stacked"][layer_idx]
+
+    def _core(self, layer_idx: int) -> torch.Tensor:
+        if self.train_block == "C":
+            return self.block_C[layer_idx]
+        if self._sharded:
+            return getattr(self, f"_core_{layer_idx}")
+        return self._buffers["_core_stacked"][layer_idx]
+
+    def _cayley_slice(self, layer_idx: int) -> torch.Tensor:
+        if self._sharded:
+            return getattr(self, f"_cayley_{layer_idx}")
+        return self._buffers["_cayley_stacked"][layer_idx]
+
+    @property
+    def cayley_param(self) -> torch.Tensor:
+        """Composed maps as one ``(n_layers, dim, dim)`` tensor."""
+        if not self._sharded:
+            return self._buffers["_cayley_stacked"]
+        slices = [
+            getattr(self, f"_cayley_{layer_idx}").detach().to("cpu")
+            for layer_idx in range(self._n_layers)
+        ]
+        return torch.stack(slices, dim=0)
+
+    def import_cayley_checkpoint(self, composed: torch.Tensor) -> None:
+        """Load per-layer composed maps (n_layers, dim, dim) for eval."""
+        expected = (self._n_layers, self.dim, self.dim)
+        if tuple(composed.shape) != expected:
+            raise ValueError(
+                f"import_cayley_checkpoint: expected shape {expected}, got {tuple(composed.shape)}"
+            )
+        with torch.no_grad():
+            if self._sharded:
+                for layer_idx in range(self._n_layers):
+                    buf = self._cayley_slice(layer_idx)
+                    buf.copy_(composed[layer_idx].to(device=buf.device, dtype=buf.dtype))
+            else:
+                target = self._buffers["_cayley_stacked"]
+                target.copy_(composed.to(device=target.device, dtype=target.dtype))
+        self._use_composed_cayley = True
+
+    def matrix(self, layer_idx: int) -> torch.Tensor:
+        basis = self._basis(layer_idx)
+        if layer_idx in self._frozen_layer_idxs:
+            return torch.eye(self.dim, device=basis.device, dtype=basis.dtype)
+        if self._cached_matrices is not None:
+            return self._cached_matrices[layer_idx]
+        if self._use_composed_cayley:
+            return self._cayley_slice(layer_idx)
+        B = OrthogonalProjection.apply(basis)
+        C = _project_so(self._core(layer_idx))
+        eye = torch.eye(self.dim, device=B.device, dtype=B.dtype)
+        return eye + B @ C @ B.T
+
+    def orthogonalize(self):
+        with torch.no_grad():
+            for layer_idx in range(self._n_layers):
+                basis = self._basis(layer_idx)
+                core = self._core(layer_idx)
+                composed = self._cayley_slice(layer_idx)
+                eye_d = torch.eye(self.dim, device=composed.device, dtype=composed.dtype)
+                eye_n = torch.eye(self.n, device=core.device, dtype=core.dtype)
+                if layer_idx in self._frozen_layer_idxs:
+                    basis.copy_(torch.eye(self.dim, self.n, device=basis.device, dtype=basis.dtype))
+                    core.copy_(eye_n)
+                    composed.copy_(eye_d)
+                    continue
+                basis.copy_(_qr_orthonormal_columns(basis))
+                if self.train_block == "C":
+                    core.copy_(_project_so(core))
+                else:
+                    core.copy_(eye_n)
+                composed.copy_(eye_d + basis @ core @ basis.T)
+
+    def parameters(self):
+        trained = self.block_B if self.train_block == "B" else self.block_C
+        if self._sharded:
+            return list(trained)
+        return [trained]
+
+    def _add(self, direction, alpha, layer_idx, best_layer: int = None):
+        if self._optimized_layer_idxs is not None and layer_idx not in self._optimized_layer_idxs:
+            return
+        return super()._add(direction, alpha, layer_idx, best_layer)
+
+    def _rotate(self, x, layer_idx: int):
+        """Dense Mᵀ when every layer is active; factor form on a selected subset.
+
+        Row activations: ``x + ((x @ B) @ Cᵀ) @ Bᵀ`` with ``B`` of shape ``(d, n)``.
+        """
+        if self._optimized_layer_idxs is None:
+            return super()._rotate(x, layer_idx)
+        if isinstance(x, tuple):
+            if len(x) == 0:
+                return x
+            return (self._rotate(x[0], layer_idx),) + x[1:]
+        if not hasattr(x, "dtype") and hasattr(x, "__getitem__"):
+            try:
+                first = x[0]
+                rest = x[1:]
+                return (self._rotate(first, layer_idx),) + tuple(rest)
+            except Exception:
+                return x
+
+        B = self._basis(layer_idx)
+        C = self._core(layer_idx)
+        try:
+            B = B.to(x)
+            C = C.to(x)
+        except Exception:
+            try:
+                B = B.to(device=x.device, dtype=x.dtype)
+                C = C.to(device=x.device, dtype=x.dtype)
+            except Exception:
+                try:
+                    B = B.to(dtype=model.dtype)
+                    C = C.to(dtype=model.dtype)
+                except Exception:
+                    pass
+        return x + (x @ B) @ C.T @ B.T
+
+
 class RefusalDirectionRotation(nn.Module):
     """
     Single direction (cone_dim=1): intervention direction r = M @ r0 with M orthogonal (Cayley transform).
@@ -1756,6 +2067,18 @@ def refusal_cone_optimization(model, train_dataset,
             init_mode=args.init_mode,
             freeze_step=freeze_step,
             proj_reduce_ratio=args.proj_reduce_ratio,
+        )
+    elif direction_mode in ("shtiefel_proj_rot_B", "shtiefel_proj_rot_C"):
+        operation = RefusalStiefelBCRotation(
+            model.model,
+            model.config.hidden_size,
+            init_vectors=init_vectors,
+            freeze_order_layers=freeze_order_layers,
+            init_mode=args.init_mode,
+            freeze_step=freeze_step,
+            proj_reduce_ratio=args.proj_reduce_ratio,
+            optimized_layers=getattr(args, "optimized_layers", None),
+            train_block="B" if direction_mode == "shtiefel_proj_rot_B" else "C",
         )
     else:
         raise ValueError(f"Invalid direction_mode: {direction_mode}")
@@ -2006,6 +2329,10 @@ def refusal_cone_optimization(model, train_dataset,
                             fn_vector.grad.sub_(projection_einops(fn_vector.grad, fn_vector.data))
                         for fn_vector in operation.fn_vectors:
                             fn_vector.grad.div_(accumulation_steps)
+                    elif direction_mode in ("shtiefel_proj_rot_B", "shtiefel_proj_rot_C"):
+                        for param in operation.parameters():
+                            if param.grad is not None:
+                                param.grad.div_(accumulation_steps)
                     else:
                         p0 = operation.cayley_param
                         if p0.grad is not None:
@@ -2014,7 +2341,7 @@ def refusal_cone_optimization(model, train_dataset,
                     torch.nn.utils.clip_grad_norm_(operation.parameters(), 10.0)
                     if direction_mode == "baseline":
                         grad_norm = operation.fn_vectors[-1].grad.norm().item()
-                    elif direction_mode == "shtiefel_proj_rot":
+                    elif direction_mode in _STIEFEL_PROJ_MODES:
                         grad_norm = float(
                             sum(
                                 (p.grad.norm().item() ** 2 for p in operation.parameters() if p.grad is not None),
@@ -2214,8 +2541,11 @@ def _build_steering_module(
     cone_dim=1,
 ):
     """Same constructors as ``refusal_cone_optimization``, without an optimizer."""
-    if getattr(args, "optimized_layers", None) is not None and direction_mode != "shtiefel_proj_rot":
-        raise ValueError("--optimized_layers is only supported for direction_mode=shtiefel_proj_rot")
+    if getattr(args, "optimized_layers", None) is not None and direction_mode not in _STIEFEL_PROJ_MODES:
+        raise ValueError(
+            "--optimized_layers is only supported for shtiefel_proj_rot, "
+            "shtiefel_proj_rot_B, and shtiefel_proj_rot_C"
+        )
     if init_vectors is None:
         init_vectors = []
     if orthogonal_vectors is None:
@@ -2260,6 +2590,18 @@ def _build_steering_module(
             freeze_step=freeze_step,
             optimized_layers=getattr(args, "optimized_layers", None),
             proj_reduce_ratio=args.proj_reduce_ratio,
+        )
+    if direction_mode in ("shtiefel_proj_rot_B", "shtiefel_proj_rot_C"):
+        return RefusalStiefelBCRotation(
+            model.model,
+            model.config.hidden_size,
+            init_vectors=init_vectors,
+            freeze_order_layers=freeze_order_layers,
+            init_mode=args.init_mode,
+            freeze_step=freeze_step,
+            optimized_layers=getattr(args, "optimized_layers", None),
+            proj_reduce_ratio=args.proj_reduce_ratio,
+            train_block="B" if direction_mode == "shtiefel_proj_rot_B" else "C",
         )
     raise ValueError(f"Invalid direction_mode: {direction_mode}")
 
@@ -2827,8 +3169,11 @@ def _load_llamaguard_eval_sets(
 
 def _make_refined_step_fn(model, refined_artifact, direction_mode: str):
     """Build the eval intervention for the current direction mode. None if there is no artifact."""
-    if getattr(args, "optimized_layers", None) is not None and direction_mode != "shtiefel_proj_rot":
-        raise ValueError("--optimized_layers is only supported for direction_mode=shtiefel_proj_rot")
+    if getattr(args, "optimized_layers", None) is not None and direction_mode not in _STIEFEL_PROJ_MODES:
+        raise ValueError(
+            "--optimized_layers is only supported for shtiefel_proj_rot, "
+            "shtiefel_proj_rot_B, and shtiefel_proj_rot_C"
+        )
     if refined_artifact is None:
         return None
     if direction_mode == "baseline":
@@ -2858,6 +3203,18 @@ def _make_refined_step_fn(model, refined_artifact, direction_mode: str):
             freeze_step=getattr(args, "freeze_step", DEFAULT_CONFIG.get("freeze_step", 2)),
             optimized_layers=getattr(args, "optimized_layers", None),
             proj_reduce_ratio=args.proj_reduce_ratio,
+        )
+    elif direction_mode in ("shtiefel_proj_rot_B", "shtiefel_proj_rot_C"):
+        rotation_model = RefusalStiefelBCRotation(
+            model.model,
+            model.config.hidden_size,
+            init_vectors=[],
+            init_mode=args.init_mode,
+            freeze_order_layers=getattr(args, "freeze_order_layers", False),
+            freeze_step=getattr(args, "freeze_step", DEFAULT_CONFIG.get("freeze_step", 2)),
+            optimized_layers=getattr(args, "optimized_layers", None),
+            proj_reduce_ratio=args.proj_reduce_ratio,
+            train_block="B" if direction_mode == "shtiefel_proj_rot_B" else "C",
         )
 
     return _make_activation_rotation_step_fn(

@@ -5,8 +5,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # variables
-direction_mode="shtiefel_proj_rot" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot"
-freeze_step=20 # with --freeze_order_layers: freeze layers 0, freeze_step, 2*freeze_step, ...
+direction_mode="shtiefel_proj_rot_C" # "shtiefel_rot", "activation_rot", "baseline", "shtiefel_proj_rot", "shtiefel_proj_rot_B", "shtiefel_proj_rot_C"
+# Reviewer Table 1: |L| = 2, n = 35. For hidden size 3584, n = 3584 // proj_reduce_ratio.
+optimized_layers=2
+proj_reduce_ratio=100
 llamaguard_data="rdo" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
 lr=1e-5
 max_iters=100000
@@ -36,7 +38,7 @@ export LLAMAGUARD_MAX_NEW_TOKENS="${LLAMAGUARD_MAX_NEW_TOKENS:-100}"
 export RDO_MAX_HARMFUL_PER_CATEGORY="${RDO_MAX_HARMFUL_PER_CATEGORY:-200}" # 200
 export RDO_MAX_HARMLESS_TOTAL="${RDO_MAX_HARMLESS_TOTAL:-200}" # 200
 
-export HF_TOKEN="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"
+export HF_TOKEN=""
 
 # ---- Default command ----
 cmd=(python -m baselines.rdo_refusal \
@@ -47,8 +49,8 @@ cmd=(python -m baselines.rdo_refusal \
   --eval_llamaguard \
   --eval_mmlu \
   --mmlu_store_predictions \
-  --freeze_order_layers \
-  --freeze_step "${freeze_step}" \
+  --optimized_layers "${optimized_layers}" \
+  --proj_reduce_ratio "${proj_reduce_ratio}" \
   --init_mode "diag_permutation" \
 )
 
