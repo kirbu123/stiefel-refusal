@@ -10,7 +10,9 @@ freeze_step=20 # with --freeze_order_layers: freeze layers 0, freeze_step, 2*fre
 llamaguard_data="rdo" # "rdo" (data/<splits>_splits/*_<eval_split>.json) or "basic" (SAVE_DIR/rdo/<model>/basic/targets/)
 lr=1e-5
 max_iters=100000
-result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
+train_direction=1 # set empty to skip training: init steering from these parameters and run selected evals
+result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train; ignored when train_direction is empty)
+eval_efficacy="" # set to 1 to pass --eval_efficacy (inference time and method overhead; no metric scoring)
 
 export MAX_ITERS="${max_iters}"
 
@@ -38,7 +40,6 @@ export HF_TOKEN="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"
 
 # ---- Default command ----
 cmd=(python -m baselines.rdo_refusal \
-  --train_direction \
   --model deepseek-ai/DeepSeek-R1-Distill-Qwen-7B \
   --direction_mode "${direction_mode}" \
   --llamaguard_data "${llamaguard_data}" \
@@ -53,9 +54,18 @@ cmd=(python -m baselines.rdo_refusal \
 
 # --init_mode: "random" or "diag_permutation"
 
-# Reuse an existing run dir (skip training) if provided.
+# Empty train_direction skips training and only initializes steering, then runs evals.
+if [[ -n "${train_direction}" ]]; then
+  cmd+=(--train_direction)
+fi
+
+# Reuse an existing run dir (skip training inside train_refusal_vector) if provided.
 if [[ -n "${result_path}" ]]; then
   cmd+=(--result_path "${result_path}")
+fi
+
+if [[ -n "${eval_efficacy}" ]]; then
+  cmd+=(--eval_efficacy)
 fi
 
 # Optional eval flags:

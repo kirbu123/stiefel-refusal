@@ -5,6 +5,7 @@ import json
 import os
 import os.path
 import sys
+import time
 import uuid
 import dotenv
 import torch
@@ -115,7 +116,7 @@ DEFAULT_CONFIG = {
     
     # Optimization parameters
     'epochs': 1,                      # Number of training epochs
-    'max_iters': int(os.getenv("MAX_ITERS")),              # Maximum number of iterations to train for
+    'max_iters': int(os.getenv("MAX_ITERS", "100000")),    # Maximum number of iterations to train for
     'lr': 3e-4,                       # Learning rate for optimization
     'batch_size': 1,                  # Batch size for training
     'effective_batch_size': 16,       # Effective batch size (uses gradient accumulation)
@@ -166,6 +167,7 @@ DEFAULT_CONFIG = {
     # Optimization parameters
     'freeze_order_layers': False,
     'freeze_step': 2,
+    'proj_reduce_ratio': 10,
 }
 
 def parse_args():
@@ -226,6 +228,18 @@ def parse_args():
         default=DEFAULT_CONFIG['freeze_step'],
         help='(shtiefel_rot, shtiefel_proj_rot) With --freeze_order_layers, freeze layers at indices 0, freeze_step, 2*freeze_step, ... (must be >= 1).',
     )
+    parser.add_argument(
+        '--optimized_layers',
+        type=int,
+        default=None,
+        help='(shtiefel_proj_rot) Rotate the first K layers and skip the rest with no matmul.',
+    )
+    parser.add_argument(
+        '--proj_reduce_ratio',
+        type=int,
+        default=DEFAULT_CONFIG['proj_reduce_ratio'],
+        help='(shtiefel_proj_rot) Factor rank is hidden_size // proj_reduce_ratio.',
+    )
 
     # Cone parameters
     parser.add_argument('--min_cone_dim', type=int, default=DEFAULT_CONFIG['min_cone_dim'],
@@ -270,6 +284,8 @@ def parse_args():
                     help='Evaluate initial and refined generations with LlamaGuard on harmful/harmless eval split')
     parser.add_argument('--eval_mmlu', action='store_true',
                     help='Evaluate initial and refined generations on MMLU (generate-mode by default)')
+    parser.add_argument('--eval_efficacy', action='store_true',
+                    help='Time plain model generation and the same generation with the refusal intervention. Does not score LlamaGuard or MMLU.')
     parser.add_argument(
         '--result_path',
         type=str,
@@ -329,7 +345,14 @@ def _tb_dir_frz_suffix(train_kwargs: dict | None = None) -> str:
     k = train_kwargs or {}
     fl = int(bool(k.get("freeze_order_layers", getattr(args, "freeze_order_layers", False))))
     fs = int(k.get("freeze_step", getattr(args, "freeze_step", DEFAULT_CONFIG.get("freeze_step", 2))))
-    return f"fl{fl}_fs{fs}"
+    suffix = f"fl{fl}_fs{fs}"
+    optimized_layers = getattr(args, "optimized_layers", None)
+    if optimized_layers is not None:
+        suffix = f"{suffix}_ol{int(optimized_layers)}"
+    proj_reduce_ratio = getattr(args, "proj_reduce_ratio", None)
+    if proj_reduce_ratio is not None:
+        suffix = f"{suffix}_pr{int(proj_reduce_ratio)}"
+    return suffix
 
 
 # Apply configuration values
@@ -448,12 +471,22 @@ add_layer = best_layer
 alpha = best_refusal_direction.norm().detach().clone()
 print(f"add_layer: {add_layer}, alpha: {alpha}")
 
-# %%
-harmful_train = json.load(open(f'data/{splits}_splits/harmful_train.json'))
-harmless_train = json.load(open(f'data/{splits}_splits/harmless_train.json'))
+# Train targets and the training dataset are only needed when a training flag is set.
+# Without --train_direction (and the other train_* flags) this block is skipped.
+_prepare_train_data = bool(
+    args.train_direction
+    or args.train_orthogonal_direction
+    or args.train_cone
+    or args.train_independent_direction
+)
 
-harmless_train = harmless_train[:len(harmful_train)]
-print(len(harmful_train), len(harmless_train))
+# %%
+if _prepare_train_data:
+    harmful_train = json.load(open(f'data/{splits}_splits/harmful_train.json'))
+    harmless_train = json.load(open(f'data/{splits}_splits/harmless_train.json'))
+
+    harmless_train = harmless_train[:len(harmful_train)]
+    print(len(harmful_train), len(harmless_train))
 
 # %%
 GEMMA_CHAT_TEMPLATE = """<start_of_turn>user
@@ -502,11 +535,12 @@ def generate_first_token(model, dataset, max_new_tokens=1):
         tokens.append(out[0][start_token:])
     return decoded, tokens
 
-example_completions, example_tokens = generate_first_token(model, harmful_train[:10])
-print("Example first token completions:")
-print(example_completions)
-print("Example first tokens:")
-print(example_tokens)
+if _prepare_train_data:
+    example_completions, example_tokens = generate_first_token(model, harmful_train[:10])
+    print("Example first token completions:")
+    print(example_completions)
+    print("Example first tokens:")
+    print(example_tokens)
 
 # %%
 if "gemma" in MODEL_PATH.lower():
@@ -519,8 +553,9 @@ else:
     raise ValueError(f"Model {MODEL_PATH} not supported, need to configure refusal tokens")
 
 # %%
-harmful_train_instructions = apply_chat_template(model.tokenizer, [d["instruction"] for d in harmful_train])
-harmless_train_instructions = apply_chat_template(model.tokenizer, [d["instruction"] for d in harmless_train])
+if _prepare_train_data:
+    harmful_train_instructions = apply_chat_template(model.tokenizer, [d["instruction"] for d in harmful_train])
+    harmless_train_instructions = apply_chat_template(model.tokenizer, [d["instruction"] for d in harmless_train])
 # %%
 module = model.model
 
@@ -574,18 +609,19 @@ def generate_harmless_targets(model, harmless_instructions, targets_path, max_ne
         
     return targets
 
-num_target_tokens = 30
+if _prepare_train_data:
+    num_target_tokens = 30
 
-# Set up paths
-harmful_targets_path = f"{os.getenv('SAVE_DIR')}/rdo/{model_id}/{splits}/targets/harmful_targets.json"
-harmless_targets_path = f"{os.getenv('SAVE_DIR')}/rdo/{model_id}/{splits}/targets/harmless_targets.json"
+    # Set up paths
+    harmful_targets_path = f"{os.getenv('SAVE_DIR')}/rdo/{model_id}/{splits}/targets/harmful_targets.json"
+    harmless_targets_path = f"{os.getenv('SAVE_DIR')}/rdo/{model_id}/{splits}/targets/harmless_targets.json"
 
-# Generate all targets
-harmful_targets = generate_harmful_targets(model, harmful_train_instructions, best_refusal_direction, harmful_targets_path, num_target_tokens)
-harmless_targets = generate_harmless_targets(model, harmless_train_instructions, harmless_targets_path, num_target_tokens)
+    # Generate all targets
+    harmful_targets = generate_harmful_targets(model, harmful_train_instructions, best_refusal_direction, harmful_targets_path, num_target_tokens)
+    harmless_targets = generate_harmless_targets(model, harmless_train_instructions, harmless_targets_path, num_target_tokens)
 
 # %%
-if args.filter_data:
+if _prepare_train_data and args.filter_data:
     print("Filtering data")
     harmful_train_scores = get_bypass_scores(model, harmful_train_instructions, refusal_tokens, batch_size=args.filter_batch_size)
     harmless_train_scores = get_bypass_scores(model, harmless_train_instructions, refusal_tokens, batch_size=args.filter_batch_size)
@@ -620,9 +656,10 @@ if args.filter_data:
     harmless_targets = filtered_harmless_targets
 
 # Extract targets from filtered data
-ablation_train_targets = [t["ablation"] for t in harmful_targets]
-addition_train_targets = [t["addition"] for t in harmless_targets]
-retain_train_targets = [t["retain"] for t in harmless_targets]
+if _prepare_train_data:
+    ablation_train_targets = [t["ablation"] for t in harmful_targets]
+    addition_train_targets = [t["addition"] for t in harmless_targets]
+    retain_train_targets = [t["retain"] for t in harmless_targets]
 
 # %%
 def build_prompts_and_labels(model, harmful_instructions, harmless_instructions, ablation_targets, addition_targets, retain_targets):
@@ -658,7 +695,8 @@ def build_prompts_and_labels(model, harmful_instructions, harmless_instructions,
         addition_labels.append(addition_label)
     return ablation_prompts, addition_prompts, retain_prompts, ablation_labels, addition_labels
 
-ablation_train_prompts, addition_train_prompts, retain_train_prompts, ablation_train_labels, addition_train_labels = build_prompts_and_labels(model, harmful_train_instructions, harmless_train_instructions, ablation_train_targets, addition_train_targets, retain_train_targets)
+if _prepare_train_data:
+    ablation_train_prompts, addition_train_prompts, retain_train_prompts, ablation_train_labels, addition_train_labels = build_prompts_and_labels(model, harmful_train_instructions, harmless_train_instructions, ablation_train_targets, addition_train_targets, retain_train_targets)
 
 # %%
 class CustomDataset(torch.utils.data.Dataset):
@@ -691,39 +729,40 @@ class CustomDataset(torch.utils.data.Dataset):
             'retain_target': self.retain_targets[idx],
         }
 
-train_dataset = CustomDataset(harmful_train_instructions, harmless_train_instructions, ablation_train_prompts, ablation_train_targets, ablation_train_labels, addition_train_prompts, addition_train_targets, addition_train_labels, retain_train_prompts, retain_train_targets)
-print(len(train_dataset))
-print("Example item:")
-d = train_dataset[0]
-for item in d.items():
-    print(item)
+if _prepare_train_data:
+    train_dataset = CustomDataset(harmful_train_instructions, harmless_train_instructions, ablation_train_prompts, ablation_train_targets, ablation_train_labels, addition_train_prompts, addition_train_targets, addition_train_labels, retain_train_prompts, retain_train_targets)
+    print(len(train_dataset))
+    print("Example item:")
+    d = train_dataset[0]
+    for item in d.items():
+        print(item)
 
-# %%
-print(f"Length of harmful_prompts: {len(train_dataset.harmful_prompts)}")
-print(f"Length of harmless_prompts: {len(train_dataset.harmless_prompts)}")
-print(f"Length of ablation_prompts: {len(train_dataset.ablation_prompts)}")
-print(f"Length of ablation_targets: {len(train_dataset.ablation_targets)}")
-print(f"Length of ablation_labels: {len(train_dataset.ablation_labels)}")
-print(f"Length of addition_prompts: {len(train_dataset.addition_prompts)}")
-print(f"Length of addition_targets: {len(train_dataset.addition_targets)}")
-print(f"Length of addition_labels: {len(train_dataset.addition_labels)}")
-print(f"Length of retain_prompts: {len(train_dataset.retain_prompts)}")
-print(f"Length of retain_targets: {len(train_dataset.retain_targets)}")
+    # %%
+    print(f"Length of harmful_prompts: {len(train_dataset.harmful_prompts)}")
+    print(f"Length of harmless_prompts: {len(train_dataset.harmless_prompts)}")
+    print(f"Length of ablation_prompts: {len(train_dataset.ablation_prompts)}")
+    print(f"Length of ablation_targets: {len(train_dataset.ablation_targets)}")
+    print(f"Length of ablation_labels: {len(train_dataset.ablation_labels)}")
+    print(f"Length of addition_prompts: {len(train_dataset.addition_prompts)}")
+    print(f"Length of addition_targets: {len(train_dataset.addition_targets)}")
+    print(f"Length of addition_labels: {len(train_dataset.addition_labels)}")
+    print(f"Length of retain_prompts: {len(train_dataset.retain_prompts)}")
+    print(f"Length of retain_targets: {len(train_dataset.retain_targets)}")
 
-lengths = [
-    len(train_dataset.harmful_prompts),
-    len(train_dataset.harmless_prompts),
-    len(train_dataset.ablation_prompts),
-    len(train_dataset.ablation_targets),
-    len(train_dataset.ablation_labels),
-    len(train_dataset.addition_prompts),
-    len(train_dataset.addition_targets),
-    len(train_dataset.addition_labels),
-    len(train_dataset.retain_prompts),
-    len(train_dataset.retain_targets),
-]
-assert len(set(lengths)) == 1, f"Dataset component lengths are not equal: {lengths}"
-print(f"All dataset component lengths are equal: {lengths[0]}")
+    lengths = [
+        len(train_dataset.harmful_prompts),
+        len(train_dataset.harmless_prompts),
+        len(train_dataset.ablation_prompts),
+        len(train_dataset.ablation_targets),
+        len(train_dataset.ablation_labels),
+        len(train_dataset.addition_prompts),
+        len(train_dataset.addition_targets),
+        len(train_dataset.addition_labels),
+        len(train_dataset.retain_prompts),
+        len(train_dataset.retain_targets),
+    ]
+    assert len(set(lengths)) == 1, f"Dataset component lengths are not equal: {lengths}"
+    print(f"All dataset component lengths are equal: {lengths[0]}")
 
 # %%
 def custom_collate(batch):
@@ -1285,6 +1324,7 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         init_mode: str = "diag_permutation",
         proj_reduce_ratio: int = 10,
         freeze_step: int = 2,
+        optimized_layers: int | None = None,
     ) -> None:
         nn.Module.__init__(self)
         self.module = module
@@ -1293,6 +1333,19 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
         self.freeze_order_layers = bool(freeze_order_layers)
 
         n_layers = len(self.module.layers)
+        if optimized_layers is None:
+            self._optimized_layer_idxs = None
+        else:
+            k_layers = int(optimized_layers)
+            if k_layers < 1 or k_layers > n_layers:
+                raise ValueError(
+                    f"optimized_layers must be in 1..{n_layers}, got {k_layers}"
+                )
+            self._optimized_layer_idxs = set(range(k_layers))
+            print(
+                f"[shtiefel_proj_rot] optimized_layers={k_layers}: "
+                f"rotate {sorted(self._optimized_layer_idxs)}, skip the rest"
+            )
         if self.freeze_order_layers and n_layers >= 2:
             step = max(1, int(freeze_step))
             self._frozen_layer_idxs = set(range(0, n_layers, step))
@@ -1483,6 +1536,48 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
             return list(self.proj_A) + list(self.proj_B)
         return [self.proj_A, self.proj_B]
 
+    def _add(self, direction, alpha, layer_idx, best_layer: int = None):
+        if self._optimized_layer_idxs is not None and layer_idx not in self._optimized_layer_idxs:
+            return
+        return super()._add(direction, alpha, layer_idx, best_layer)
+
+    def _rotate(self, x, layer_idx: int):
+        """Factor multiply when a layer subset is selected; dense map otherwise.
+
+        Row activations: ``(x @ B.T) @ A.T`` with ``B`` of shape ``(k, dim)`` and
+        ``A`` of shape ``(dim, k)``. Rank ``k`` is what the efficacy timer measures.
+        """
+        if self._optimized_layer_idxs is None:
+            return super()._rotate(x, layer_idx)
+        if isinstance(x, tuple):
+            if len(x) == 0:
+                return x
+            return (self._rotate(x[0], layer_idx),) + x[1:]
+        if not hasattr(x, "dtype") and hasattr(x, "__getitem__"):
+            try:
+                first = x[0]
+                rest = x[1:]
+                return (self._rotate(first, layer_idx),) + tuple(rest)
+            except Exception:
+                return x
+
+        A = self.proj_A[layer_idx]
+        B = self.proj_B[layer_idx]
+        try:
+            A = A.to(x)
+            B = B.to(x)
+        except Exception:
+            try:
+                A = A.to(device=x.device, dtype=x.dtype)
+                B = B.to(device=x.device, dtype=x.dtype)
+            except Exception:
+                try:
+                    A = A.to(dtype=model.dtype)
+                    B = B.to(dtype=model.dtype)
+                except Exception:
+                    pass
+        return (x @ B.T) @ A.T
+
 
 class RefusalDirectionRotation(nn.Module):
     """
@@ -1660,6 +1755,7 @@ def refusal_cone_optimization(model, train_dataset,
             freeze_order_layers=freeze_order_layers,
             init_mode=args.init_mode,
             freeze_step=freeze_step,
+            proj_reduce_ratio=args.proj_reduce_ratio,
         )
     else:
         raise ValueError(f"Invalid direction_mode: {direction_mode}")
@@ -2066,6 +2162,161 @@ def refusal_cone_optimization(model, train_dataset,
         "lowest_loss_cayley_param": lowest_loss_cayley_param,
     }
 
+def _run_selected_evals(tb_run_dir, results):
+    """Run the eval flags selected on the command line against one steering artifact."""
+    if not (args.eval_llamaguard or args.eval_mmlu or args.eval_efficacy):
+        return
+    refined = _extract_refined_artifact(results, args.direction_mode)
+    mmlu_cfg = {
+        "enabled": True,
+        "dataset": args.mmlu_dataset,
+        "subset": args.mmlu_subset,
+        "split": "test",
+        "mode": args.mmlu_mode,
+        "answer_mode": args.mmlu_answer_mode,
+        "n_shots": args.mmlu_n_shots,
+        "sample_size": args.mmlu_sample_size,
+        "sample_seed": args.mmlu_sample_seed,
+        "max_new_tokens": args.mmlu_max_new_tokens,
+        "store_predictions": bool(args.mmlu_store_predictions),
+    }
+    if args.eval_llamaguard or args.eval_mmlu:
+        _evaluate_llamaguard_and_mmlu(
+            tb_run_dir=tb_run_dir,
+            model=model,
+            refined_artifact=refined,
+            direction_mode=args.direction_mode,
+            splits_name=args.splits,
+            eval_split=args.eval_split,
+            llamaguard_data_mode=args.llamaguard_data,
+            model_name=model_id,
+            eval_max_new_tokens=args.eval_max_new_tokens,
+            eval_batch_size=args.eval_batch_size,
+            mmlu_cfg=mmlu_cfg,
+        )
+    if args.eval_efficacy:
+        _evaluate_efficacy(
+            tb_run_dir=tb_run_dir,
+            model=model,
+            refined_artifact=refined,
+            direction_mode=args.direction_mode,
+            eval_batch_size=args.eval_batch_size,
+            mmlu_cfg=mmlu_cfg,
+        )
+
+
+def _build_steering_module(
+    direction_mode,
+    freeze_order_layers,
+    freeze_step,
+    init_vectors=None,
+    orthogonal_vectors=None,
+    cone_dim=1,
+):
+    """Same constructors as ``refusal_cone_optimization``, without an optimizer."""
+    if getattr(args, "optimized_layers", None) is not None and direction_mode != "shtiefel_proj_rot":
+        raise ValueError("--optimized_layers is only supported for direction_mode=shtiefel_proj_rot")
+    if init_vectors is None:
+        init_vectors = []
+    if orthogonal_vectors is None:
+        orthogonal_vectors = []
+    if direction_mode == "baseline":
+        return RefusalCone(
+            model.model,
+            model.config.hidden_size,
+            cone_dim,
+            init_vectors=init_vectors,
+            orthogonal_vectors=orthogonal_vectors,
+        )
+    if direction_mode == "rotation":
+        return RefusalDirectionRotation(
+            model.model,
+            model.config.hidden_size,
+            init_vectors=init_vectors,
+            orthogonal_vectors=orthogonal_vectors,
+        )
+    if direction_mode == "activation_rot":
+        return RefusalDirectionActivationRotation(
+            model.model,
+            model.config.hidden_size,
+            init_vectors=init_vectors,
+        )
+    if direction_mode == "shtiefel_rot":
+        return RefusalStiefelRotation(
+            model.model,
+            model.config.hidden_size,
+            init_vectors=init_vectors,
+            freeze_order_layers=freeze_order_layers,
+            init_mode=args.init_mode,
+            freeze_step=freeze_step,
+        )
+    if direction_mode == "shtiefel_proj_rot":
+        return RefusalStiefelProjRotation(
+            model.model,
+            model.config.hidden_size,
+            init_vectors=init_vectors,
+            freeze_order_layers=freeze_order_layers,
+            init_mode=args.init_mode,
+            freeze_step=freeze_step,
+            optimized_layers=getattr(args, "optimized_layers", None),
+            proj_reduce_ratio=args.proj_reduce_ratio,
+        )
+    raise ValueError(f"Invalid direction_mode: {direction_mode}")
+
+
+def _results_from_initialized_steering(operation, direction_mode: str) -> dict:
+    """Pack an untrained module the way ``_extract_refined_artifact`` reads it."""
+    if direction_mode == "baseline":
+        vector = operation.fn_vectors[0].detach().cpu().clone()
+        return {
+            "lowest_loss_vector": vector,
+            "lowest_loss_cayley_param": None,
+        }
+    cayley = operation.cayley_param.detach().cpu().clone()
+    return {
+        "lowest_loss_vector": None,
+        "lowest_loss_cayley_param": cayley,
+    }
+
+
+def _run_initialized_steering_eval():
+    """Initialize steering from launch parameters and run selected evals. No training."""
+    print(
+        "[run] --train_direction is off: initialize steering and run selected evals "
+        "(no training; result_path is ignored)"
+    )
+    freeze_order_layers = getattr(args, "freeze_order_layers", False)
+    freeze_step = getattr(args, "freeze_step", DEFAULT_CONFIG.get("freeze_step", 2))
+    operation = _build_steering_module(
+        args.direction_mode,
+        freeze_order_layers,
+        freeze_step,
+    )
+    results = _results_from_initialized_steering(operation, args.direction_mode)
+    save_root = os.getenv("SAVE_DIR", "results")
+    frz = _tb_dir_frz_suffix({
+        "freeze_order_layers": freeze_order_layers,
+        "freeze_step": freeze_step,
+    })
+    tb_run_dir = os.path.join(
+        save_root,
+        "tensorboard",
+        f"init_{model_id}_{args.direction_mode}_{frz}",
+    )
+    os.makedirs(tb_run_dir, exist_ok=True)
+    run_config = vars(args).copy()
+    run_config.update({
+        "model_id": model_id,
+        "add_layer": add_layer,
+        "alpha": float(alpha.detach().cpu()) if torch.is_tensor(alpha) else alpha,
+        "initialized_without_training": True,
+    })
+    run_config.pop("orthogonal_vectors", None)
+    save_run_hparams(tb_run_dir, run_config)
+    print(f"TensorBoard log dir: {tb_run_dir}")
+    _run_selected_evals(tb_run_dir, results)
+
+
 # %%
 def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], **kwargs):
     """
@@ -2156,34 +2407,7 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
         finally:
             tb_writer.close()
         print(f"TensorBoard log dir: {tb_run_dir}")
-    if args.eval_llamaguard or args.eval_mmlu:
-        refined = _extract_refined_artifact(results, args.direction_mode)
-        mmlu_cfg = {
-            "enabled": True,
-            "dataset": args.mmlu_dataset,
-            "subset": args.mmlu_subset,
-            "split": "test",
-            "mode": args.mmlu_mode,
-            "answer_mode": args.mmlu_answer_mode,
-            "n_shots": args.mmlu_n_shots,
-            "sample_size": args.mmlu_sample_size,
-            "sample_seed": args.mmlu_sample_seed,
-            "max_new_tokens": args.mmlu_max_new_tokens,
-            "store_predictions": bool(args.mmlu_store_predictions),
-        }
-        _evaluate_llamaguard_and_mmlu(
-            tb_run_dir=tb_run_dir,
-            model=model,
-            refined_artifact=refined,
-            direction_mode=args.direction_mode,
-            splits_name=args.splits,
-            eval_split=args.eval_split,
-            llamaguard_data_mode=args.llamaguard_data,
-            model_name=model_id,
-            eval_max_new_tokens=args.eval_max_new_tokens,
-            eval_batch_size=args.eval_batch_size,
-            mmlu_cfg=mmlu_cfg,
-        )
+    _run_selected_evals(tb_run_dir, results)
     return results
 
 
@@ -2346,6 +2570,78 @@ def _generate_nnsight(
     return decoded
 
 
+def _sync_visible_cuda() -> None:
+    """Wait for GPU work on every visible device before reading the clock."""
+    if not torch.cuda.is_available():
+        return
+    for device_index in range(torch.cuda.device_count()):
+        torch.cuda.synchronize(device_index)
+
+
+def _timed_generate_nnsight(
+    model: LanguageModel,
+    prompts: list[str],
+    *,
+    max_new_tokens: int,
+    batch_size: int,
+    intervene_step_fn=None,
+) -> tuple[list[str], float]:
+    """Eval-only wrapper. Times one plain or steered generation. Training does not call this."""
+    _sync_visible_cuda()
+    start = time.perf_counter()
+    decoded = _generate_nnsight(
+        model,
+        prompts,
+        max_new_tokens=max_new_tokens,
+        batch_size=batch_size,
+        intervene_step_fn=intervene_step_fn,
+    )
+    _sync_visible_cuda()
+    return decoded, time.perf_counter() - start
+
+
+def _steering_time_section(
+    *,
+    n_prompts: int,
+    max_new_tokens: int,
+    batch_size: int,
+    baseline_s: float,
+    steered_s: float | None,
+) -> dict:
+    overhead_s = None if steered_s is None else steered_s - baseline_s
+    overhead_ratio = None
+    if steered_s is not None and baseline_s > 0:
+        overhead_ratio = steered_s / baseline_s
+    return {
+        "n_prompts": n_prompts,
+        "max_new_tokens": max_new_tokens,
+        "batch_size": batch_size,
+        "baseline_s": baseline_s,
+        "steered_s": steered_s,
+        "overhead_s": overhead_s,
+        "overhead_ratio": overhead_ratio,
+    }
+
+
+def _steering_time_overall(sections: dict) -> dict:
+    baseline_s = sum(section["baseline_s"] for section in sections.values())
+    steered_values = [section["steered_s"] for section in sections.values()]
+    if not sections or any(value is None for value in steered_values):
+        steered_s = None
+        overhead_s = None
+        overhead_ratio = None
+    else:
+        steered_s = sum(steered_values)
+        overhead_s = steered_s - baseline_s
+        overhead_ratio = (steered_s / baseline_s) if baseline_s > 0 else None
+    return {
+        "baseline_s": baseline_s,
+        "steered_s": steered_s,
+        "overhead_s": overhead_s,
+        "overhead_ratio": overhead_ratio,
+    }
+
+
 def _make_ablation_step_fn(fn_vector: torch.Tensor):
     fn_vector = fn_vector / (fn_vector.norm() + 1e-12)
     def step_fn(model: LanguageModel):
@@ -2373,6 +2669,16 @@ def _make_activation_rotation_step_fn(
     constructing explicit Cayley matrices and rotating `layer.input` directly.
     """
     if rotation_model is not None:
+        # A selected layer subset is timed with the low-rank factors already
+        # built on this module. A dense Cayley cache would hide that rank.
+        if getattr(rotation_model, "_optimized_layer_idxs", None) is not None:
+            def step_fn(model: LanguageModel):
+                if hasattr(rotation_model, "module"):
+                    rotation_model.module = model.model
+                rotation_model(direction=None)
+
+            return step_fn
+
         # Reuse the trained rotation module for evaluation.
         set_matrix(cayley_param, rotation_model)
 
@@ -2519,6 +2825,112 @@ def _load_llamaguard_eval_sets(
     raise ValueError(f"Unsupported llamaguard_data mode: {mode}")
 
 
+def _make_refined_step_fn(model, refined_artifact, direction_mode: str):
+    """Build the eval intervention for the current direction mode. None if there is no artifact."""
+    if getattr(args, "optimized_layers", None) is not None and direction_mode != "shtiefel_proj_rot":
+        raise ValueError("--optimized_layers is only supported for direction_mode=shtiefel_proj_rot")
+    if refined_artifact is None:
+        return None
+    if direction_mode == "baseline":
+        return _make_ablation_step_fn(refined_artifact)
+
+    rotation_model = None
+    if direction_mode == "activation_rot":
+        rotation_model = RefusalDirectionActivationRotation(
+            model.model, model.config.hidden_size, init_vectors=[]
+        )
+    elif direction_mode == "shtiefel_rot":
+        rotation_model = RefusalStiefelRotation(
+            model.model,
+            model.config.hidden_size,
+            init_vectors=[],
+            init_mode=args.init_mode,
+            freeze_order_layers=getattr(args, "freeze_order_layers", False),
+            freeze_step=getattr(args, "freeze_step", DEFAULT_CONFIG.get("freeze_step", 2)),
+        )
+    elif direction_mode == "shtiefel_proj_rot":
+        rotation_model = RefusalStiefelProjRotation(
+            model.model,
+            model.config.hidden_size,
+            init_vectors=[],
+            init_mode=args.init_mode,
+            freeze_order_layers=getattr(args, "freeze_order_layers", False),
+            freeze_step=getattr(args, "freeze_step", DEFAULT_CONFIG.get("freeze_step", 2)),
+            optimized_layers=getattr(args, "optimized_layers", None),
+            proj_reduce_ratio=args.proj_reduce_ratio,
+        )
+
+    return _make_activation_rotation_step_fn(
+        refined_artifact,
+        rotation_model=rotation_model,
+    )
+
+
+def _fmt_seconds(value) -> str:
+    return "null" if value is None else f"{value:.3f}s"
+
+
+def _evaluate_efficacy(
+    *,
+    tb_run_dir: str,
+    model: LanguageModel,
+    refined_artifact,
+    direction_mode: str,
+    eval_batch_size: int,
+    mmlu_cfg: dict,
+) -> None:
+    """Time plain generation against the same generation with the refusal intervention.
+
+    Uses the MMLU prompt sample and token budget. Does not score answers or load LlamaGuard.
+    """
+    normalized = mmlu_eval.normalize_mmlu_config(mmlu_cfg)
+    prepared = mmlu_eval.prepare_mmlu_data(normalized)
+    prompts = [entry["prompt"] for entry in prepared["entries"]]
+    chat_prompts = apply_chat_template(model.tokenizer, prompts)
+    max_new_tokens = normalized["max_new_tokens"]
+
+    _, baseline_s = _timed_generate_nnsight(
+        model, chat_prompts, max_new_tokens=max_new_tokens, batch_size=eval_batch_size
+    )
+    steered_s = None
+    step_fn = _make_refined_step_fn(model, refined_artifact, direction_mode)
+    if step_fn is not None:
+        _, steered_s = _timed_generate_nnsight(
+            model,
+            chat_prompts,
+            max_new_tokens=max_new_tokens,
+            batch_size=eval_batch_size,
+            intervene_step_fn=step_fn,
+        )
+
+    section = _steering_time_section(
+        n_prompts=len(chat_prompts),
+        max_new_tokens=max_new_tokens,
+        batch_size=eval_batch_size,
+        baseline_s=baseline_s,
+        steered_s=steered_s,
+    )
+    sections = {"efficacy": section}
+    overall = _steering_time_overall(sections)
+    steering_path = os.path.join(tb_run_dir, "steering_time.json")
+    _safe_json_dump(
+        steering_path,
+        {
+            "saved_at": datetime.now().isoformat(),
+            "direction_mode": direction_mode,
+            "sections": sections,
+            "overall": overall,
+        },
+    )
+    print(
+        "[eval] steering time "
+        f"baseline={_fmt_seconds(overall['baseline_s'])} "
+        f"steered={_fmt_seconds(overall['steered_s'])} "
+        f"overhead={_fmt_seconds(overall['overhead_s'])} "
+        f"-> {steering_path}"
+    )
+
+
 def _evaluate_llamaguard_and_mmlu(
     *,
     tb_run_dir: str,
@@ -2545,43 +2957,6 @@ def _evaluate_llamaguard_and_mmlu(
             "eval_split": eval_split,
             "llamaguard_data_mode": llamaguard_data_mode,
         }
-
-        def _make_refined_step_fn(refined_artifact):
-            if refined_artifact is None:
-                return None
-            if direction_mode == "baseline":
-                return _make_ablation_step_fn(refined_artifact)
-
-            # For activation-rotation style modes, reuse the operation modules' own
-            # proxy-safe rotation logic (avoids bf16/float32 matmul mismatches).
-            rotation_model = None
-            if direction_mode == "activation_rot":
-                rotation_model = RefusalDirectionActivationRotation(
-                    model.model, model.config.hidden_size, init_vectors=[]
-                )
-            elif direction_mode == "shtiefel_rot":
-                rotation_model = RefusalStiefelRotation(
-                    model.model,
-                    model.config.hidden_size,
-                    init_vectors=[],
-                    init_mode=args.init_mode,
-                    freeze_order_layers=getattr(args, "freeze_order_layers", False),
-                    freeze_step=getattr(args, "freeze_step", DEFAULT_CONFIG.get("freeze_step", 2)),
-                )
-            elif direction_mode == "shtiefel_proj_rot":
-                rotation_model = RefusalStiefelProjRotation(
-                    model.model,
-                    model.config.hidden_size,
-                    init_vectors=[],
-                    init_mode=args.init_mode,
-                    freeze_order_layers=getattr(args, "freeze_order_layers", False),
-                    freeze_step=getattr(args, "freeze_step", DEFAULT_CONFIG.get("freeze_step", 2)),
-                )
-
-            return _make_activation_rotation_step_fn(
-                refined_artifact,
-                rotation_model=rotation_model,
-            )
 
         # --- LlamaGuard ---
         if args.eval_llamaguard:
@@ -2626,15 +3001,31 @@ def _evaluate_llamaguard_and_mmlu(
                 harmful_prompts = apply_chat_template(model.tokenizer, harmful_q)
                 harmless_prompts = apply_chat_template(model.tokenizer, harmless_q)
 
-                initial_harmful = _generate_nnsight(model, harmful_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size)
-                initial_harmless = _generate_nnsight(model, harmless_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size)
+                initial_harmful = _generate_nnsight(
+                    model, harmful_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size
+                )
+                initial_harmless = _generate_nnsight(
+                    model, harmless_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size
+                )
 
                 refined_harmful = None
                 refined_harmless = None
                 if refined_artifact is not None:
-                    step_fn = _make_refined_step_fn(refined_artifact)
-                    refined_harmful = _generate_nnsight(model, harmful_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size, intervene_step_fn=step_fn)
-                    refined_harmless = _generate_nnsight(model, harmless_prompts, max_new_tokens=eval_max_new_tokens, batch_size=eval_batch_size, intervene_step_fn=step_fn)
+                    step_fn = _make_refined_step_fn(model, refined_artifact, direction_mode)
+                    refined_harmful = _generate_nnsight(
+                        model,
+                        harmful_prompts,
+                        max_new_tokens=eval_max_new_tokens,
+                        batch_size=eval_batch_size,
+                        intervene_step_fn=step_fn,
+                    )
+                    refined_harmless = _generate_nnsight(
+                        model,
+                        harmless_prompts,
+                        max_new_tokens=eval_max_new_tokens,
+                        batch_size=eval_batch_size,
+                        intervene_step_fn=step_fn,
+                    )
 
                 evaluator = get_llamaguard_evaluator()
                 initial_harmful_results = evaluator.evaluate_batch(list(zip(harmful_q, initial_harmful)), progress_every=20)
@@ -2710,13 +3101,21 @@ def _evaluate_llamaguard_and_mmlu(
             prompts = [e["prompt"] for e in entries]
             chat_prompts = apply_chat_template(model.tokenizer, prompts)
 
-            initial_resp = _generate_nnsight(model, chat_prompts, max_new_tokens=normalized["max_new_tokens"], batch_size=eval_batch_size)
+            initial_resp = _generate_nnsight(
+                model, chat_prompts, max_new_tokens=normalized["max_new_tokens"], batch_size=eval_batch_size
+            )
             initial_pred = [mmlu_eval.parse_choice_letter(r) for r in initial_resp]
 
             refined_pred = None
             if refined_artifact is not None:
-                step_fn = _make_refined_step_fn(refined_artifact)
-                refined_resp = _generate_nnsight(model, chat_prompts, max_new_tokens=normalized["max_new_tokens"], batch_size=eval_batch_size, intervene_step_fn=step_fn)
+                step_fn = _make_refined_step_fn(model, refined_artifact, direction_mode)
+                refined_resp = _generate_nnsight(
+                    model,
+                    chat_prompts,
+                    max_new_tokens=normalized["max_new_tokens"],
+                    batch_size=eval_batch_size,
+                    intervene_step_fn=step_fn,
+                )
                 refined_pred = [mmlu_eval.parse_choice_letter(r) for r in refined_resp]
 
             initial_rows = []
@@ -2778,6 +3177,12 @@ if args.train_direction:
         group_name=group_name,
         run_name=run_name,
     )
+elif not (
+    args.train_orthogonal_direction
+    or args.train_cone
+    or args.train_independent_direction
+):
+    _run_initialized_steering_eval()
 
 if args.train_orthogonal_direction:
     print("Training orthogonal refusal direction")
