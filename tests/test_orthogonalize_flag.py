@@ -191,7 +191,7 @@ class TestOrthogonalizeFlag(unittest.TestCase):
             (venv / ".rdo-requirements.sha256").touch()
             for name, body in {
                 "sha256sum": "#!/bin/bash\nexit 0\n",
-                "apptainer": "#!" + sys.executable + "\nimport os,json\nprint(json.dumps([os.environ['APPTAINERENV_ORTHOGONALIZE'],os.environ['APPTAINERENV_TRAIN_DIAGNOSTICS_GAP']]))\n",
+                "apptainer": "#!" + sys.executable + "\nimport os,json\nprint(json.dumps([os.environ['APPTAINERENV_'+k] for k in ['ORTHOGONALIZE','TRAIN_DIAGNOSTICS_GAP','CLEAR_CKPTS','RDO_LLAMAGUARD_STRICT']]))\n",
             }.items():
                 script = root / name
                 script.write_text(body)
@@ -200,10 +200,11 @@ class TestOrthogonalizeFlag(unittest.TestCase):
                 env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
                            RDO_REPO_ROOT=str(ROOT), RDO_PPU_IMAGE=str(image),
                            RDO_PPU_VENV=str(venv), SLURM_JOB_ID="smoke-test",
-                           CUDA_VISIBLE_DEVICES="mock", ORTHOGONALIZE=value, TRAIN_DIAGNOSTICS_GAP="17")
+                           CUDA_VISIBLE_DEVICES="mock", ORTHOGONALIZE=value, TRAIN_DIAGNOSTICS_GAP="17",
+                           CLEAR_CKPTS="false", RDO_LLAMAGUARD_STRICT="1")
                 output = subprocess.check_output(
                     ["bash", str(ROOT / "scripts/launch_ppu.sh"), "rdo"], env=env, text=True)
-                self.assertEqual(json.loads(output), [value, "17"])
+                self.assertEqual(json.loads(output), [value, "17", "false", "1"])
 
 
 if __name__ == "__main__":

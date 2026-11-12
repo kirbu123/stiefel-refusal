@@ -403,6 +403,35 @@ python -m baselines.rdo_refusal \
 
 The existing run must contain the appropriate checkpoint files.
 
+On ALI, use the launcher so evaluation stays in the scheduler/container runtime:
+
+```bash
+env RDO_PLATFORM=ppu RDO_DEVICE=cuda CLEAR_CKPTS=false RDO_LLAMAGUARD_STRICT=1 \
+  MODEL_NAME=deepseek-ai/DeepSeek-R1-Distill-Qwen-7B \
+  DIRECTION_MODE=shtiefel_additive_rot \
+  ./scripts/run_rdo_refusal.sh --result_path /absolute/path/to/existing/run
+```
+
+Use the saved model, method, rank, layer configuration and orthogonalization
+setting from the run's `hparams.json`. `--result_path` loads the best checkpoint
+and restarts evaluation without retraining. `CLEAR_CKPTS=false` preserves tensor
+checkpoints after success; `RDO_LLAMAGUARD_STRICT=1` makes guard failures fail the
+job with their original error. Both settings are forwarded into the PPU container.
+The basic guard dataset is loaded directly through `datasets`, independently of
+the installed Heretic version or the repository's local `heretic` package.
+
+Offline CPU evaluation smoke test (requires PyTorch, datasets, tensorboard and
+pydantic-settings; no model/dataset downloads during the test):
+
+```bash
+python -m unittest discover -s tests -p 'test_rdo_eval_resume_smoke.py' -v
+```
+
+The smoke test reloads constrained/unconstrained checkpoints, applies steering on
+CPU tensors, and runs the actual evaluation orchestration and artifact writers
+with local prompt fixtures and guard test doubles. It also exercises dataset,
+generation and classifier failures to prevent secondary `UnboundLocalError`s.
+
 ## Steering methods
 
 `--direction_mode` supports:
@@ -578,8 +607,8 @@ and selected layers. Best-loss, final, and history artifacts are
 `lowest_loss_reft.pt`, `final_reft.pt`, and `reft_params.pt` under `checkpoints/`.
 Progress and active-layer artifacts also include the ReFT state. Existing
 `--result_path` evaluation restores the saved rank and layers. The launcher's
-existing `clear_ckpts=true` setting deletes checkpoints after successful training
-and evaluation; set it to `false` in the launcher to retain artifacts for reuse.
+default `clear_ckpts=true` setting deletes checkpoints after successful training
+and evaluation; set `CLEAR_CKPTS=false` to retain artifacts for reuse.
 
 Offline CPU smoke tests need only PyTorch, with no model or dataset downloads:
 

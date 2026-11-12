@@ -30,7 +30,7 @@ max_iters=10000
 result_path="" # e.g. results/rdo_refusal/tensorboard/<existing_run_dir> (leave empty to train)
 result_root="${RESULT_ROOT:-./results/rdo_refusal/tensorboard}" # root for newly trained run directories
 log_steps=0
-clear_ckpts=true # delete checkpoint .pt files only after training and final validation succeed
+clear_ckpts="${CLEAR_CKPTS:-true}" # false retains checkpoints after successful evaluation
 eval_activation_pca="${EVAL_ACTIVATION_PCA:-false}" # true: dump best-layer acts + 3D PCA plot during train
 activation_save_gap="${ACTIVATION_SAVE_GAP:-100}" # optimizer-step gap when eval_activation_pca=true
 keep_activation_pca_dumps="${KEEP_ACTIVATION_PCA_DUMPS:-false}" # true: keep tmp_best_layer_activations after plot
@@ -47,8 +47,8 @@ repetition_lambda="${REPETITION_LAMBDA:-0.0}"
 # LlamaGuard eval config
 eval_max_new_tokens=256 # inportant param for llama guard eval
 eval_batch_size=8
-MAX_HARMFUL=1000 # 200
-MAX_HARMLESS=1000 # 200
+MAX_HARMFUL=250 # 200
+MAX_HARMLESS=250 # 200
 
 # MMLU eval config
 enable_mmlu_eval=true # true

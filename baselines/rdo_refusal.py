@@ -5023,7 +5023,7 @@ def _basic_llamaguard_targets_paths(model_name: str) -> tuple[str, str]:
 def _build_basic_llamaguard_targets_cache(model_name: str) -> tuple[list[dict], list[dict]]:
     from config import HARMLESS_EVAL_DATASET
     from data_utils import load_all_datasets_with_categories
-    from heretic.utils import load_prompts
+    from datasets import load_dataset
 
     harmful_path, harmless_path = _basic_llamaguard_targets_paths(model_name)
     os.makedirs(os.path.dirname(harmful_path), exist_ok=True)
@@ -5038,7 +5038,10 @@ def _build_basic_llamaguard_targets_cache(model_name: str) -> tuple[list[dict], 
         if item.get("instruction")
     ]
 
-    harmless_prompts = load_prompts(HARMLESS_EVAL_DATASET)
+    # Keep this evaluator independent of Heretic's changing load_prompts API
+    # and the repository's local heretic.config compatibility package.
+    spec = HARMLESS_EVAL_DATASET
+    harmless_prompts = load_dataset(spec.dataset, split=spec.split)[spec.column]
     harmless = [
         {
             "instruction": prompt,
@@ -5462,6 +5465,7 @@ def _evaluate_end_metrics(
         # --- LlamaGuard ---
         if args.eval_llamaguard:
             strict = str(os.getenv("RDO_LLAMAGUARD_STRICT", "0")).lower() in ("1", "true", "yes", "y")
+            primary_generations_ready = False
             try:
                 harmful, harmless = _load_llamaguard_eval_sets(
                     splits_name=splits_name,
@@ -5547,6 +5551,7 @@ def _evaluate_end_metrics(
                             ),
                         }
 
+                primary_generations_ready = True
                 guard_metrics = {}
                 guard_errors = {}
 
@@ -5651,21 +5656,22 @@ def _evaluate_end_metrics(
                 if strict:
                     raise
 
-            _save_generated_responses(
-                tb_run_dir=tb_run_dir,
-                harmful_q=harmful_q,
-                harmless_q=harmless_q,
-                initial_harmful=initial_harmful,
-                initial_harmless=initial_harmless,
-                refined_generations=refined_generations,
-                direction_mode=direction_mode,
-                llamaguard_data_mode=llamaguard_data_mode,
-            )
+            if primary_generations_ready:
+                _save_generated_responses(
+                    tb_run_dir=tb_run_dir,
+                    harmful_q=harmful_q,
+                    harmless_q=harmless_q,
+                    initial_harmful=initial_harmful,
+                    initial_harmless=initial_harmless,
+                    refined_generations=refined_generations,
+                    direction_mode=direction_mode,
+                    llamaguard_data_mode=llamaguard_data_mode,
+                )
 
             # Also write generated responses for the complementary split so both
             # train_answers (basic) and test_answers (rdo) are available from one run.
             normalized_mode = str(llamaguard_data_mode).strip().lower()
-            if normalized_mode in ("basic", "rdo"):
+            if primary_generations_ready and normalized_mode in ("basic", "rdo"):
                 secondary_mode = "rdo" if normalized_mode == "basic" else "basic"
                 try:
                     sec_harmful, sec_harmless = _load_llamaguard_eval_sets(
