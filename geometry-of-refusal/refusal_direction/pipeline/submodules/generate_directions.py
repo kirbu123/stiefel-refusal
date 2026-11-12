@@ -47,11 +47,11 @@ def get_mean_diff(model, tokenizer, harmful_instructions, harmless_instructions,
 
     return mean_diff
 
-def generate_directions(model_base: ModelBase, harmful_instructions, harmless_instructions, artifact_dir):
+def generate_directions(model_base: ModelBase, harmful_instructions, harmless_instructions, artifact_dir, batch_size=32):
     if not os.path.exists(artifact_dir):
         os.makedirs(artifact_dir)
 
-    mean_diffs = get_mean_diff(model_base.model, model_base.tokenizer, harmful_instructions, harmless_instructions, model_base.tokenize_instructions_fn, model_base.model_block_modules, positions=list(range(-len(model_base.eoi_toks), 0)))
+    mean_diffs = get_mean_diff(model_base.model, model_base.tokenizer, harmful_instructions, harmless_instructions, model_base.tokenize_instructions_fn, model_base.model_block_modules, positions=list(range(-len(model_base.eoi_toks), 0)), batch_size=batch_size)
 
     assert mean_diffs.shape == (len(model_base.eoi_toks), model_base.model.config.num_hidden_layers, model_base.model.config.hidden_size)
     assert not mean_diffs.isnan().any()

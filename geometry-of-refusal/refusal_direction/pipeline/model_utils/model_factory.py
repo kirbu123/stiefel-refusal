@@ -2,6 +2,10 @@ from pipeline.model_utils.model_base import ModelBase
 
 def construct_model_base(model_path: str) -> ModelBase:
 
+    if 'magistral' in model_path.lower():
+        from pipeline.model_utils.magistral_model import MagistralModel
+        return MagistralModel(model_path)
+
     if 'qwen' in model_path.lower():
         from pipeline.model_utils.qwen_model import QwenModel
         return QwenModel(model_path)

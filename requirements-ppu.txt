@@ -1,0 +1,27 @@
+# RDO application dependencies. Vendor torch/numpy/torchvision/triton/bitsandbytes
+# are inherited from the SAIL image and protected by generated constraints.
+nnsight==0.3.7
+transformers==4.57.6
+tokenizers==0.22.2
+huggingface-hub==0.36.2
+accelerate==1.12.0
+datasets==4.6.0
+# PyArrow 26 requires NumPy 2; retain compatibility with the vendor NumPy 1.26 ABI.
+pyarrow==23.0.1
+peft==0.18.1
+heretic-llm==1.2.0
+diffusers==0.35.1
+jaxtyping==0.3.7
+python-dotenv==1.2.1
+tensorboard==2.20.0
+psutil==7.2.2
+
+# Native Tekken tokenizer for Magistral.
+mistral-common==1.8.5
+
+# DIM plots and completion evaluation
+wandb==0.25.0
+matplotlib==3.10.8
+seaborn==0.13.2
+litellm==1.95.0
+strong-reject @ git+https://github.com/dsbowen/strong_reject.git@7a551d5b440ec7b75d4f6f5bb7c1719965b76b47

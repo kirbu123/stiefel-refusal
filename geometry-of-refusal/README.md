@@ -91,3 +91,18 @@ Use the `run_rdo_pipeline.py` script to evaluate the computed RDO, Cone, or othe
 ## Analysis
 
 The `cosinesims_analysis.py` script can be used to analyze the cosine similarities between the computed DIM direction and rep. ind. directions.
+
+## Alibaba server and Magistral
+
+From the parent `stiefel-refusal` repository root:
+
+```bash
+./scripts/run_dim_pipeline.sh --model_path mistralai/Magistral-Small-2506 --batch_size 2
+```
+
+This submits to `labs-pool`, allocates a whole 96 GiB PPU, installs the application
+in the vendor container and runs from `geometry-of-refusal/refusal_direction`.
+Use `--check_environment` or `--smoke-test` for small checks without 24B weights.
+Magistral uses native Tekken tokenization (`mistral-common==1.8.5`), the official
+system prompt and Mistral decoder hooks. See the parent README for resources,
+logs and the optional `--no_filter` switch for reasoning-model data selection.

@@ -39,3 +39,5 @@ wandb/
 # Python cache
 *.pyc
 __pycache__/
+# Vendor container virtual environments
+.venv-ppu*/

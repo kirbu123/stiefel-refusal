@@ -3,6 +3,20 @@ set -euo pipefail
 
 # Run from repo root
 cd "$(dirname "$0")/.."
+# Alibaba training runs in the scheduler-managed labs-pool, never the host venv.
+explicit_cpu=0
+previous=""
+for arg in "$@"; do
+  [[ "$arg" != --resources ]] || exec cards status
+  if [[ "$arg" == --device=cpu || "$previous:$arg" == --device:cpu ]]; then explicit_cpu=1; fi
+  previous="$arg"
+done
+if [[ "${RDO_PPU_CONTAINER:-0}" != 1 && "$explicit_cpu" == 0 && "${RDO_DEVICE:-auto}" != cpu ]] &&
+   { [[ "${RDO_PLATFORM:-auto}" == ppu ]] || [[ -e /dev/alixpu && "${RDO_PLATFORM:-auto}" == auto ]]; }; then
+  exec bash "$PWD/scripts/launch_ppu.sh" rdo "$@"
+fi
+python_bin="${RDO_PYTHON:-$PWD/.venv/bin/python}"
+
 # variablesallenai/Olmo-3-7B-Instruct
 model="${MODEL_NAME:-deepseek-ai/DeepSeek-R1-Distill-Qwen-7B}" # override with MODEL_NAME
 direction_mode="${DIRECTION_MODE:-activation_additive_rot}" # override with DIRECTION_MODE
@@ -31,8 +45,8 @@ repetition_lambda="${REPETITION_LAMBDA:-0.0}"
 # LlamaGuard eval config
 eval_max_new_tokens=256 # inportant param for llama guard eval
 eval_batch_size=8
-MAX_HARMFUL=200 # 200
-MAX_HARMLESS=200 # 200
+MAX_HARMFUL=1000 # 200
+MAX_HARMLESS=1000 # 200
 
 # MMLU eval config
 enable_mmlu_eval=true # true
@@ -79,7 +93,7 @@ gsm8k_max_new_tokens=512
 export MAX_ITERS="${max_iters}"
 
 # ---- GPU (override: CUDA_VISIBLE_DEVICES=1 ./scripts/run_rdo_refusal.sh) ----
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2}"
+# Device visibility is assigned by Slurm. Preserve its mask/MIG UUID.
 
 # ---- Fast defaults (override by exporting before running) ----
 # These avoid long runs when eval flags are enabled.
@@ -103,10 +117,10 @@ export GUARD_TRAIN_BATCH_SIZE="${GUARD_TRAIN_BATCH_SIZE:-$eval_batch_size}"
 export MAX_HARMFUL="${MAX_HARMFUL}" # 250
 export MAX_HARMLESS="${MAX_HARMLESS}" # 250
 
-export HF_TOKEN="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"
+export HF_TOKEN=""
 
 # ---- Default command ----
-cmd=(python -m baselines.rdo_refusal \
+cmd=("$python_bin" -u -m baselines.rdo_refusal \
   --train_direction \
   --model "${model}" \
   --direction_mode "${direction_mode}" \
@@ -208,7 +222,7 @@ fi
 # cmd+=(--eval_mmlu)
 # cmd+=(--mmlu_store_predictions)
 
-"${cmd[@]}"
+"${cmd[@]}" "$@"
 
 # ---- Optional eval flags ----
 # Add these if you want metrics after training:

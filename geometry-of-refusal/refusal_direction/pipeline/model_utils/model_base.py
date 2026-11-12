@@ -87,7 +87,7 @@ class ModelBase(ABC):
 
         from accelerate.utils import find_executable_batch_size
 
-        @find_executable_batch_size(starting_batch_size=128)
+        @find_executable_batch_size(starting_batch_size=max(1, min(batch_size, len(dataset))))
         def get_max_batch_size(batch_size):
             try_batch_inference(batch_size)
             return batch_size
@@ -98,7 +98,7 @@ class ModelBase(ABC):
             print(f"Using maximum batch size of {max_batch_size}")
             self.max_batch_size = max_batch_size 
         else:
-            max_batch_size = self.max_batch_size
+            max_batch_size = min(self.max_batch_size, batch_size)
 
         for i in tqdm(range(0, len(dataset), max_batch_size)):
             tokenized_instructions = self.tokenize_instructions_fn(instructions=instructions[i:i + max_batch_size])

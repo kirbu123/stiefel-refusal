@@ -32,6 +32,58 @@ You can also authenticate once with:
 hf auth login
 ```
 
+## Alibaba PPU server: labs-pool
+
+On `ali117197`, the training partition is **labs-pool**. Slurm calls the
+accelerator GRES `gpu`, but assigns Alibaba PPUs, not NVIDIA GPUs. Physical
+indices and MIG UUIDs must not be chosen manually. Corporate resources are not used.
+
+Both launchers submit batch jobs, enter the installed SAIL 2.1/PyTorch 2.10 image,
+and set up `.venv-ppu-sail21` **inside the allocated labs-pool job**. Vendor torch,
+torchvision/torchaudio, NumPy, Triton and bitsandbytes are inherited from the image
+and protected by constraints. Use `requirements-ppu.txt`, not the NVIDIA root
+requirements, in this environment. PyArrow 23.0.1 supports vendor NumPy 1.26.
+
+```bash
+# From this repository root: automatic setup and batch submission.
+./scripts/run_rdo_refusal.sh
+./scripts/run_dim_pipeline.sh --model_path mistralai/Magistral-Small-2506 --batch_size 2
+
+# Optional setup only, live resources, and small preflight checks.
+./scripts/run_rdo_refusal.sh --setup-only
+./scripts/run_rdo_refusal.sh --resources
+./scripts/run_rdo_refusal.sh --check_environment
+./scripts/run_dim_pipeline.sh --model_path mistralai/Magistral-Small-2506 --check_environment
+
+# Real-backend smoke tests; no pretrained model weights downloaded.
+./scripts/run_rdo_refusal.sh --smoke-test
+./scripts/run_dim_pipeline.sh --model_path mistralai/Magistral-Small-2506 --smoke-test
+```
+
+Defaults: one **whole 96 GiB PPU**, 8 CPUs, 128 GiB host RAM, 24 hours, lowest
+priority `pool-batch`. Whole cards avoid the earlier MIG fencing failure path and
+provide headroom for Magistral 24B. Jobs can queue. Optional overrides:
+`RDO_PPU_PROFILE=half|auto|whole`, `RDO_PPU_CPUS`, `RDO_PPU_RAM`, `RDO_PPU_TIME`,
+`RDO_PPU_IMAGE`, `RDO_PPU_VENV`. Use a separate venv for a different image.
+Short setup/check/smoke commands wait at most 30 seconds for allocation.
+Slurm's assigned visibility mask is preserved, including with `apptainer --cleanenv`.
+
+Console logs: `results/rdo_refusal/slurm/rdo-ppu-<JobID>.log` and
+`dim-ppu-<JobID>.log`. Check status with `squeue -u "$USER"`.
+The launcher handles Slurm's temporary batch-script path independently of `$0`.
+The generic installation instructions below apply to other/NVIDIA hosts.
+
+Magistral DIM support uses the native Tekken tokenizer, official system prompt,
+Mistral decoder hooks and tokenizer-specific refusal IDs. `--batch_size` controls
+both generation and direction scoring, default 2. If the existing short-completion
+refusal filter finds no refusals for a reasoning model, `--no_filter` explicitly
+uses raw data instead; this changes the experiment's data selection.
+
+Direct host `python -m pipeline.run_pipeline` does not allocate PPUs; use the DIM
+launcher above. The tmux/libtinfo version warning is unrelated to model support.
+RDO's CLI learning rate and loss weights now reach the training function. All
+existing experiment settings in the shell script, including cleanup, are retained.
+
 ## Environment installation
 
 Python 3.12 and a CUDA-capable PyTorch installation are the currently used

@@ -11,6 +11,7 @@ import uuid
 import dotenv
 import torch
 import torch.nn as nn
+from runtime_support import configure_runtime, check_data_runtime
 import numpy as np
 import traceback
 import time
@@ -328,6 +329,9 @@ def parse_args():
                     choices=['bfloat16', 'float16', 'float32'],
                     help='Floating point precision to use for model initialization')
     
+    parser.add_argument('--check_environment', action='store_true', help='Check the runtime without loading model weights')
+    parser.add_argument('--device', default=os.getenv('RDO_DEVICE', 'auto'), help='auto, cpu, cuda, cuda:N')
+
     # Training objectives
     parser.add_argument('--train_direction', action='store_true', 
                     help='Train a standard refusal direction')
@@ -594,6 +598,13 @@ def parse_args():
     return parser.parse_args()
 
 args = parse_args()
+if Path('/dev/alixpu').exists() and os.getenv('RDO_PPU_CONTAINER') != '1' and getattr(args, 'device', 'auto') != 'cpu':
+    raise RuntimeError('Use ./scripts/run_rdo_refusal.sh to allocate labs-pool and enter the PPU container.')
+RUNTIME_DEVICE, selected_dtype = configure_runtime(getattr(args, 'device', 'auto'), getattr(torch, args.dtype))
+args.dtype = str(selected_dtype).removeprefix('torch.')
+check_data_runtime()
+if getattr(args, 'check_environment', False):
+    raise SystemExit(0)
 _requested_num_opt_layers = int(getattr(args, "num_opt_layers", 1))
 if _requested_num_opt_layers < 0:
     raise AssertionError(f"--num_opt_layers must be >= 0, got {args.num_opt_layers}")
@@ -657,7 +668,7 @@ model = LanguageModel(
     MODEL_PATH,
     tokenizer=tokenizer,
     cache_dir=os.getenv("HUGGINGFACE_CACHE_DIR"),
-    device_map="auto",
+    device_map={"": RUNTIME_DEVICE},
     dtype=dtype,
 )
 model.requires_grad_(False)
@@ -3857,6 +3868,12 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
     # Combine specific args and potential overrides from kwargs
     train_kwargs = {
         "cone_dim": 1,  # Specific override for single direction training
+        "lr": args.lr,
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "ablation_lambda": args.ablation_lambda,
+        "addition_lambda": args.addition_lambda,
+        "retain_lambda": args.retain_lambda,
         "orthogonal_vectors": orthogonal_vectors,
         "direction_mode": args.direction_mode,
         "optimizer_name": args.optimizer,
