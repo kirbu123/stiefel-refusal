@@ -41,6 +41,7 @@ from evaluate.evaluation_qwen3guard import get_qwen3guard_evaluator, unload_qwen
 from evaluate.evaluation_wildguard import get_wildguard_evaluator, unload_wildguard_evaluator
 from evaluate import mmlu as mmlu_eval
 from evaluate import rdo_locality
+from baselines.reft_ops import REFT_MODES, ReFTIntervention
 from baselines.additive_rotation_ops import (
     additive_subspace_rotation,
     dense_additive_rotation_matrix,
@@ -381,8 +382,8 @@ def parse_args():
         help='Delete checkpoint .pt files only after training and end-of-run evaluation succeed',
     )
     parser.add_argument('--direction_mode', type=str, default=DEFAULT_CONFIG['direction_mode'],
-                    choices=['baseline', 'rotation', 'activation_rot', 'activation_additive_rot', 'shtiefel_rot', 'shtiefel_proj_rot', 'shtiefel_additive_rot', 'angular_steering', 'householder_pseudo_rotation', 'paper_angular_steering', 'paper_spherical_steering'],
-                    help='baseline: original RefusalCone. rotation: learn orthogonal M (Cayley), r=M@r0; requires cone_dim=1. paper_*_steering: upstream inference-time steering (no DIM/train)')
+                    choices=['loreft', 'direft', 'baseline', 'rotation', 'activation_rot', 'activation_additive_rot', 'shtiefel_rot', 'shtiefel_proj_rot', 'shtiefel_additive_rot', 'angular_steering', 'householder_pseudo_rotation', 'paper_angular_steering', 'paper_spherical_steering'],
+                    help='baseline: original RefusalCone. loreft/direft: low-rank affine ReFT interventions (protect subtracts the residual). rotation: learn orthogonal M (Cayley), r=M@r0; requires cone_dim=1. paper_*_steering: upstream inference-time steering (no DIM/train)')
     parser.add_argument('--angular_strategy', type=str, default='max_sim',
                     choices=['max_sim', 'max_norm'],
                     help='Layer-selection strategy for paper_angular_steering plane extraction')
@@ -412,7 +413,7 @@ def parse_args():
         default=DEFAULT_CONFIG['num_opt_layers'],
         help=(
             'Number of layers to optimize for layer-selective modes. For baseline, '
-            'activation_additive_rot, and shtiefel_additive_rot, nol=0 selects all layers and '
+            'activation_additive_rot, shtiefel_additive_rot, loreft, and direft, nol=0 selects all layers and '
             'is logged as the model layer count; positive values select that many middle layers. '
             'Other supported modes use standard middle-layer selection.'
         ),
@@ -609,6 +610,8 @@ _requested_num_opt_layers = int(getattr(args, "num_opt_layers", 1))
 if _requested_num_opt_layers < 0:
     raise AssertionError(f"--num_opt_layers must be >= 0, got {args.num_opt_layers}")
 _all_layer_nol_modes = {
+    "loreft",
+    "direft",
     "baseline",
     "activation_additive_rot",
     "shtiefel_additive_rot",
@@ -616,7 +619,7 @@ _all_layer_nol_modes = {
 if _requested_num_opt_layers == 0 and args.direction_mode not in _all_layer_nol_modes:
     raise AssertionError(
         "--num_opt_layers=0 (all layers) is supported only for "
-        "direction_mode=baseline, activation_additive_rot, or shtiefel_additive_rot"
+        "direction_mode=baseline, activation_additive_rot, shtiefel_additive_rot, loreft, or direft"
     )
 MODEL_PATH = args.model
 
@@ -2694,7 +2697,9 @@ def _save_progress_operation_checkpoint(
     }
     if frozen is not None:
         payload["frozen_layer_indices"] = frozen
-    if direction_mode == "baseline":
+    if direction_mode in REFT_MODES:
+        payload["reft"] = operation.export_checkpoint()
+    elif direction_mode == "baseline":
         payload["fn_vectors"] = torch.stack(operation.fn_vectors, dim=0).detach().cpu()
     elif direction_mode in {"shtiefel_proj_rot", "shtiefel_additive_rot"}:
         payload["proj_A"] = operation.proj_A.detach().cpu()
@@ -2744,7 +2749,9 @@ def _write_tb_checkpoint_layer_artifacts(
     }
     if frozen is not None:
         state["frozen_layer_indices"] = frozen
-    if direction_mode in {"shtiefel_proj_rot", "shtiefel_additive_rot"} and active:
+    if direction_mode in REFT_MODES:
+        state["reft"] = operation.export_checkpoint()
+    elif direction_mode in {"shtiefel_proj_rot", "shtiefel_additive_rot"} and active:
         idx = torch.tensor(active, dtype=torch.long, device=operation.proj_A.device)
         state["proj_A"] = operation.proj_A.index_select(0, idx).detach().cpu()
         state["proj_B"] = operation.proj_B.index_select(0, idx).detach().cpu()
@@ -3065,7 +3072,17 @@ def refusal_cone_optimization(model, train_dataset,
 
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True, collate_fn=custom_collate)
 
-    if direction_mode == "baseline":
+    if direction_mode in REFT_MODES:
+        if cone_dim != 1:
+            raise ValueError("ReFT methods require cone_dim=1")
+        operation = ReFTIntervention(
+            model.model, model.config.hidden_size, direction_mode,
+            k_proj=k_proj, num_opt_layers=num_opt_layers, best_layer=best_layer,
+            layer_scores=_layer_scores_from_refusal_directions(
+                globals().get("refusal_directions"), len(model.model.layers)),
+            device=_runtime_device(),
+        )
+    elif direction_mode == "baseline":
         operation = RefusalCone(
             model.model,
             model.config.hidden_size,
@@ -3504,12 +3521,15 @@ def refusal_cone_optimization(model, train_dataset,
                         vectors.append(torch.stack(operation.fn_vectors, dim=0).detach().cpu().data.clone())
                     else:
                         vectors.append(operation.stack_directions_for_log())
-                        checkpoint_matrix = (
-                            operation.checkpoint_matrix()
-                            if hasattr(operation, "checkpoint_matrix")
-                            else operation.cayley_param
-                        )
-                        cayley_params.append(checkpoint_matrix.detach().cpu().data.clone())
+                        if direction_mode in REFT_MODES:
+                            cayley_params.append(operation.export_checkpoint())
+                        else:
+                            checkpoint_matrix = (
+                                operation.checkpoint_matrix()
+                                if hasattr(operation, "checkpoint_matrix")
+                                else operation.cayley_param
+                            )
+                            cayley_params.append(checkpoint_matrix.detach().cpu().data.clone())
                     bypass_scores.append(basis_bypass_scores)
 
                     training_metrics = {
@@ -3648,7 +3668,11 @@ def refusal_cone_optimization(model, train_dataset,
         os.makedirs(tb_checkpoint_dir, exist_ok=True)
         torch.save(save_vectors, os.path.join(tb_checkpoint_dir, "vectors.pt"))
         torch.save(lowest_loss_vector, os.path.join(tb_checkpoint_dir, "lowest_loss_vector.pt"))
-        if direction_mode != "baseline" and lowest_loss_cayley_param is not None:
+        if direction_mode in REFT_MODES:
+            torch.save(save_cayley_params, os.path.join(tb_checkpoint_dir, "reft_params.pt"))
+            torch.save(lowest_loss_cayley_param, os.path.join(tb_checkpoint_dir, "lowest_loss_reft.pt"))
+            torch.save(operation.export_checkpoint(), os.path.join(tb_checkpoint_dir, "final_reft.pt"))
+        elif direction_mode != "baseline" and lowest_loss_cayley_param is not None:
             torch.save(save_cayley_params, os.path.join(tb_checkpoint_dir, "cayley_params.pt"))
             torch.save(lowest_loss_cayley_param, os.path.join(tb_checkpoint_dir, "lowest_loss_cayley_param.pt"))
         _write_tb_checkpoint_layer_artifacts(
@@ -4256,7 +4280,8 @@ def _load_training_results_from_result_path(result_path: str, direction_mode: st
       <result_path>/
         checkpoints/
           lowest_loss_vector.pt
-          lowest_loss_cayley_param.pt      (required when direction_mode != "baseline")
+          lowest_loss_reft.pt              (loreft/direft)
+          lowest_loss_cayley_param.pt      (other trained rotation modes)
 
     Returns a dict shaped like the `refusal_cone_optimization` return so downstream
     helpers (e.g. `_extract_refined_artifact`) can be reused.
@@ -4285,7 +4310,12 @@ def _load_training_results_from_result_path(result_path: str, direction_mode: st
     lowest_cayley = None
     steering_plane = None
     steering_prototype = None
-    if direction_mode == _PAPER_ANGULAR_MODE:
+    if direction_mode in REFT_MODES:
+        reft_path = _req(os.path.join(ckpt_dir, "lowest_loss_reft.pt"), "lowest_loss_reft.pt")
+        lowest_cayley = torch.load(reft_path, map_location="cpu")
+        if lowest_cayley.get("method") != direction_mode:
+            raise ValueError("ReFT checkpoint method does not match --direction_mode")
+    elif direction_mode == _PAPER_ANGULAR_MODE:
         plane_path = _req(
             os.path.join(ckpt_dir, "steering_plane.pt"),
             "steering_plane.pt (required for paper_angular_steering)",
@@ -4320,7 +4350,8 @@ def _load_training_results_from_result_path(result_path: str, direction_mode: st
     vectors_path = os.path.join(ckpt_dir, "vectors.pt")
     if os.path.exists(vectors_path):
         results["vectors"] = torch.load(vectors_path, map_location="cpu")
-    cayley_params_path = os.path.join(ckpt_dir, "cayley_params.pt")
+    history_file = "reft_params.pt" if direction_mode in REFT_MODES else "cayley_params.pt"
+    cayley_params_path = os.path.join(ckpt_dir, history_file)
     if os.path.exists(cayley_params_path):
         results["cayley_params"] = torch.load(cayley_params_path, map_location="cpu")
 
@@ -4332,6 +4363,7 @@ def _extract_refined_artifact(training_results: dict, direction_mode: str):
     Return an object representing the learned "refined" intervention.
     - baseline/rotation: a vector direction (Tensor [d_model])
     - rotation modes: per-layer dense intervention matrix (Tensor [n_layers, d, d])
+    - loreft/direft: versioned dict with affine parameters and layer metadata
     - paper_angular_steering: plane dict with b1/b2/layer/degrees
     - paper_spherical_steering: prototype dict with mu_harm/mu_safe/layer/kappa/alpha/beta
     """
@@ -4419,6 +4451,10 @@ def _build_sparse_rotation_cache(cayley_param: torch.Tensor, rotation_model: nn.
 
 
 def _prime_rotation_model_cache(rotation_model: nn.Module, cayley_param: torch.Tensor | None = None) -> None:
+    if isinstance(rotation_model, ReFTIntervention):
+        if cayley_param is not None:
+            rotation_model.load_checkpoint(cayley_param)
+        return
     if cayley_param is not None:
         set_matrix(cayley_param, rotation_model)
     if not hasattr(rotation_model, "set_cached_matrices"):
@@ -4706,7 +4742,7 @@ def _normalize_guard_backends(backends) -> list[str]:
 
 
 def _supports_protect_guard_mode(direction_mode: str) -> bool:
-    return str(direction_mode).strip().lower() in {
+    return str(direction_mode).strip().lower() in REFT_MODES | {
         "baseline",
         "shtiefel_proj_rot",
         "shtiefel_additive_rot",
@@ -5082,6 +5118,11 @@ def _evaluate_end_metrics(
         }
 
         def _build_refined_rotation_model():
+            if direction_mode in REFT_MODES:
+                if refined_artifact["dim"] != model.config.hidden_size:
+                    raise ValueError("ReFT checkpoint hidden size does not match the model")
+                return ReFTIntervention.from_checkpoint(
+                    model.model, refined_artifact, device=_runtime_device())
             if direction_mode == "activation_rot":
                 return RefusalDirectionActivationRotation(
                     model.model, model.config.hidden_size, init_vectors=[],

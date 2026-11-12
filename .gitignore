@@ -41,3 +41,6 @@ wandb/
 __pycache__/
 # Vendor container virtual environments
 .venv-ppu*/
+
+# Offline ReFT smoke-test environment
+.venv-reft/

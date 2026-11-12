@@ -461,11 +461,62 @@ Inference-only paper baselines (no DIM / no RDO training). See
 
 - `num_opt_layers=N`: optimize `N` selected layers.
 - `num_opt_layers=0`: optimize all model layers, but only for `baseline`,
-  `activation_additive_rot`, and `shtiefel_additive_rot`.
+  `activation_additive_rot`, `shtiefel_additive_rot`, `loreft`, and `direft`.
 - `k_proj`: low-rank subspace width for projected/additive methods.
 - `init_mode`: `random`, `diag_permutation`, `ones`, or `ab_orthogonal`.
 - `orth_method`: `qr` or `svd` for Stiefel orthogonalization.
 - `optimizer`: `Adam`, `AdamW`, or `SGD`.
+
+### `loreft` / `direft`
+
+These methods use [ReFT equations 2–3](https://proceedings.neurips.cc/paper_files/paper/2024/file/75008a0fba53bf13b0bb3b7bff986e0e-Paper-Conference.pdf)
+as layer-input interventions in the existing RDO training pipeline. For column
+activations `h`, each selected layer learns its own rank-`k_proj` residual:
+
+- LoReFT: `delta(h) = R.T @ (W @ h + b - R @ h)`, with `R @ R.T = I`.
+  Initialize a random orthonormal `R`, copy `W = R`, and set `b = 0`; the initial
+  operator is identity. Orthogonality is enforced by a Householder parametrization.
+- DiReFT: `delta(h) = W2.T @ (W1 @ h + b)`. Initialize `W1` with PyTorch linear-layer
+  Kaiming uniform initialization, copy `W2 = W1`, and set `b = 0`. Both matrices
+  remain unconstrained; this initialization is intentionally not identity.
+
+Copies are independent trainable parameters. Attack applies `h + delta(h)`;
+defence (`protect`) applies `h - delta(h)` using the same learned parameters.
+Defence reverses the residual sign and is not generally the exact inverse of
+attack. The training `add` path also reverses the residual sign at its requested
+layer. No learned norm scaling or clipping is applied. `init_mode` and
+`orth_method` do not override these ReFT-specific initialization/constraint rules.
+Use `--train_direction` (the script default); refusal cones are not supported.
+
+Interventions cover all token positions at the selected layer inputs, including
+generation steps; this reuses the project's activation-intervention placement,
+rather than reproducing the paper's prefix/suffix position search.
+
+```bash
+DIRECTION_MODE=loreft K_PROJ=35 NUM_OPT_LAYERS=1 ./scripts/run_rdo_refusal.sh
+DIRECTION_MODE=direft K_PROJ=35 NUM_OPT_LAYERS=0 ./scripts/run_rdo_refusal.sh
+```
+
+ReFT checkpoints retain the bias and complete parameter state, rank, method,
+and selected layers. Best-loss, final, and history artifacts are
+`lowest_loss_reft.pt`, `final_reft.pt`, and `reft_params.pt` under `checkpoints/`.
+Progress and active-layer artifacts also include the ReFT state. Existing
+`--result_path` evaluation restores the saved rank and layers. The launcher's
+existing `clear_ckpts=true` setting deletes checkpoints after successful training
+and evaluation; set it to `false` in the launcher to retain artifacts for reuse.
+
+Offline CPU smoke tests need only PyTorch, with no model or dataset downloads:
+
+```bash
+python3 -m venv .venv-reft
+.venv-reft/bin/python -m pip install torch
+.venv-reft/bin/python -m unittest discover -s tests -p 'test_reft_smoke.py' -v
+```
+
+Tests exercise exact formulas and initialization, gradients and orthogonality
+during tiny frozen-model training, layer-input adapters, attack/protect modes,
+checkpoint reload, and CPU launcher argument forwarding. They do not run a full
+nnsight model or guard service.
 
 Loss weights:
 
