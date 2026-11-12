@@ -45,6 +45,7 @@ from baselines.training_diagnostics import (
     DIAGNOSTICS_DEFINITIONS, current_diagnostics, steering_begin, steering_end, with_training_diagnostics,
 )
 from baselines.reft_ops import REFT_MODES, ReFTIntervention
+from baselines.best_checkpoint import BestOperatorCheckpoint
 from baselines.additive_rotation_ops import (
     additive_subspace_rotation,
     dense_additive_rotation_matrix,
@@ -3286,7 +3287,7 @@ def refusal_cone_optimization(model, train_dataset,
     accumulation_steps = effective_batch_size // batch_size
     print("Accumulation steps", accumulation_steps)
     vectors = []
-    cayley_params = []
+    best_checkpoint = BestOperatorCheckpoint(direction_mode)
     train_losses = []
     stopped = False
     lowest_training_loss = float('inf')
@@ -3609,15 +3610,7 @@ def refusal_cone_optimization(model, train_dataset,
                         vectors.append(torch.stack(operation.fn_vectors, dim=0).detach().cpu().data.clone())
                     else:
                         vectors.append(operation.stack_directions_for_log())
-                        if direction_mode in REFT_MODES:
-                            cayley_params.append(operation.export_checkpoint())
-                        else:
-                            checkpoint_matrix = (
-                                operation.checkpoint_matrix()
-                                if hasattr(operation, "checkpoint_matrix")
-                                else operation.cayley_param
-                            )
-                            cayley_params.append(checkpoint_matrix.detach().cpu().data.clone())
+                    best_checkpoint.update(train_loss, operation, len(train_losses) - 1)
                     bypass_scores.append(basis_bypass_scores)
 
                     training_metrics = {
@@ -3743,26 +3736,17 @@ def refusal_cone_optimization(model, train_dataset,
             break
 
     save_vectors = vectors
-    save_cayley_params = cayley_params
-    lowest_loss_index = torch.argmin(torch.tensor(train_losses)).item()
+    best_checkpoint.require_best()
+    lowest_loss_index = best_checkpoint.index
     lowest_loss_vector = save_vectors[lowest_loss_index]
-    lowest_loss_cayley_param = None
-    if direction_mode != "baseline":
-        try:
-            lowest_loss_cayley_param = save_cayley_params[lowest_loss_index]
-        except Exception:
-            lowest_loss_cayley_param = None
+    lowest_loss_cayley_param = best_checkpoint.artifact
     if tb_checkpoint_dir is not None:
         os.makedirs(tb_checkpoint_dir, exist_ok=True)
         torch.save(save_vectors, os.path.join(tb_checkpoint_dir, "vectors.pt"))
         torch.save(lowest_loss_vector, os.path.join(tb_checkpoint_dir, "lowest_loss_vector.pt"))
+        best_checkpoint.save(tb_checkpoint_dir)
         if direction_mode in REFT_MODES:
-            torch.save(save_cayley_params, os.path.join(tb_checkpoint_dir, "reft_params.pt"))
-            torch.save(lowest_loss_cayley_param, os.path.join(tb_checkpoint_dir, "lowest_loss_reft.pt"))
             torch.save(operation.export_checkpoint(), os.path.join(tb_checkpoint_dir, "final_reft.pt"))
-        elif direction_mode != "baseline" and lowest_loss_cayley_param is not None:
-            torch.save(save_cayley_params, os.path.join(tb_checkpoint_dir, "cayley_params.pt"))
-            torch.save(lowest_loss_cayley_param, os.path.join(tb_checkpoint_dir, "lowest_loss_cayley_param.pt"))
         _write_tb_checkpoint_layer_artifacts(
             tb_checkpoint_dir,
             operation,
@@ -3819,7 +3803,7 @@ def refusal_cone_optimization(model, train_dataset,
 
     return {
         "vectors": vectors,
-        "lowest_loss": lowest_training_loss,
+        "lowest_loss": best_checkpoint.loss,
         "refusal_scores": bypass_scores,
         "train_losses": train_losses,
         "lowest_loss_vector": lowest_loss_vector,
@@ -4439,10 +4423,8 @@ def _load_training_results_from_result_path(result_path: str, direction_mode: st
     vectors_path = os.path.join(ckpt_dir, "vectors.pt")
     if os.path.exists(vectors_path):
         results["vectors"] = torch.load(vectors_path, map_location="cpu")
-    history_file = "reft_params.pt" if direction_mode in REFT_MODES else "cayley_params.pt"
-    cayley_params_path = os.path.join(ckpt_dir, history_file)
-    if os.path.exists(cayley_params_path):
-        results["cayley_params"] = torch.load(cayley_params_path, map_location="cpu")
+    # Legacy operator histories can be very large and are not needed for eval.
+    # Leave any existing files untouched and load only the best operator above.
 
     return results
 

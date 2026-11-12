@@ -403,6 +403,14 @@ python -m baselines.rdo_refusal \
 
 The existing run must contain the appropriate checkpoint files.
 
+Training keeps one detached best operator on CPU, replacing it only when the
+training loss improves (equal losses keep the first best state). It does not
+accumulate operator histories or write `cayley_params.pt` / `reft_params.pt`.
+Evaluation loads the best checkpoint and ignores legacy operator-history files
+even if they are present. Existing history files are not deleted automatically.
+Scalar loss logs, vector/PCA diagnostics and explicitly requested `log_steps`
+progress checkpoints retain their existing behavior.
+
 On ALI, use the launcher so evaluation stays in the scheduler/container runtime:
 
 ```bash
@@ -603,8 +611,8 @@ DIRECTION_MODE=direft K_PROJ=35 NUM_OPT_LAYERS=0 ./scripts/run_rdo_refusal.sh
 ```
 
 ReFT checkpoints retain the bias and complete parameter state, rank, method,
-and selected layers. Best-loss, final, and history artifacts are
-`lowest_loss_reft.pt`, `final_reft.pt`, and `reft_params.pt` under `checkpoints/`.
+and selected layers. Best-loss and final artifacts are `lowest_loss_reft.pt` and
+`final_reft.pt` under `checkpoints/`; per-step operator histories are not saved.
 Progress and active-layer artifacts also include the ReFT state. Existing
 `--result_path` evaluation restores the saved rank and layers. The launcher's
 default `clear_ckpts=true` setting deletes checkpoints after successful training
