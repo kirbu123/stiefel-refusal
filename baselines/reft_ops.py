@@ -11,6 +11,7 @@ from torch import nn
 from torch.nn.utils.parametrizations import orthogonal
 
 from baselines.additive_rotation_ops import select_activation_additive_layers
+from baselines.training_diagnostics import steering_begin, steering_end
 
 REFT_MODES = frozenset({"loreft", "direft"})
 
@@ -106,7 +107,9 @@ class ReFTIntervention(nn.Module):
         if isinstance(h, tuple):
             return (self.apply_tensor(h[0], layer_idx, opposite),) + h[1:]
         sign = 1 if self._guard_mode == "attack" else -1
-        return self.operators[str(layer_idx)](h, sign=-sign if opposite else sign)
+        h, timing_token = steering_begin(h)
+        result = self.operators[str(layer_idx)](h, sign=-sign if opposite else sign)
+        return steering_end(result, timing_token)
 
     def forward(self, direction=None, best_layer=None):
         for i in sorted(self._optimized_layer_idxs):

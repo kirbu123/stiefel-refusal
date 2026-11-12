@@ -2,6 +2,7 @@
 
 import argparse
 import ast
+import __future__
 import importlib.util
 import os
 from pathlib import Path
@@ -16,6 +17,8 @@ import torch
 from torch import nn
 
 from baselines.reft_ops import DiReFT, LoReFT, REFT_MODES, ReFTIntervention
+from baselines import additive_rotation_ops
+from baselines.training_diagnostics import steering_begin, steering_end
 
 ROOT = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location("rdo_locality", ROOT / "evaluate/rdo_locality.py")
@@ -23,26 +26,40 @@ rdo_locality = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rdo_locality)
 
 
-def pipeline_helpers():
+def pipeline_helpers(include_additive=False):
     """Execute real pipeline helpers without its import-time model/data loading."""
     tree = ast.parse((ROOT / "baselines/rdo_refusal.py").read_text())
     names = {
-        "parse_args", "_layer_index_sets", "_save_progress_operation_checkpoint",
+        "parse_args", "_parse_bool", "_layer_index_sets", "_save_progress_operation_checkpoint",
         "_write_tb_checkpoint_layer_artifacts", "_load_training_results_from_result_path",
         "_extract_refined_artifact", "_prime_rotation_model_cache",
         "_supports_protect_guard_mode", "_build_train_guard_step_fn",
     }
-    nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+    if include_additive:
+        names.update({
+            "RefusalDirectionActivationRotation", "OrthogonalProjection",
+            "RefusalDirectionActivationAdditiveRotation", "RefusalStiefelRotation",
+            "RefusalStiefelProjRotation", "RefusalStiefelAdditiveRotation",
+            "_layer_scores_from_refusal_directions", "_build_optimized_layer_idxs",
+            "_finish_operation_update", "_build_sparse_rotation_cache", "set_matrix",
+        })
+    nodes = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in names]
     nodes += [n for n in tree.body if isinstance(n, ast.Assign)
               and any(isinstance(t, ast.Name) and t.id == "DEFAULT_CONFIG" for t in n.targets)]
     nodes.sort(key=lambda n: n.lineno)
     namespace = dict(torch=torch, nn=nn, os=os, sys=sys, argparse=argparse,
+                     steering_begin=steering_begin, steering_end=steering_end,
                      rdo_locality=rdo_locality,
                      REFT_MODES=REFT_MODES, ReFTIntervention=ReFTIntervention,
                      _PAPER_ANGULAR_MODE="paper_angular_steering",
                      _PAPER_SPHERICAL_MODE="paper_spherical_steering")
+    if include_additive:
+        namespace.update(vars(additive_rotation_ops))
+        namespace.update(_runtime_device=lambda: torch.device("cpu"),
+                         model=SimpleNamespace(dtype=torch.float32))
     with patch.dict(os.environ, {"MAX_ITERS": "5"}):
-        exec(compile(ast.Module(body=nodes, type_ignores=[]), "rdo_helpers", "exec"), namespace)
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "rdo_helpers", "exec",
+                     flags=__future__.annotations.compiler_flag), namespace)
     return SimpleNamespace(**namespace)
 
 

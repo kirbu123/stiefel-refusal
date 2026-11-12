@@ -465,7 +465,83 @@ Inference-only paper baselines (no DIM / no RDO training). See
 - `k_proj`: low-rank subspace width for projected/additive methods.
 - `init_mode`: `random`, `diag_permutation`, `ones`, or `ab_orthogonal`.
 - `orth_method`: `qr` or `svd` for Stiefel orthogonalization.
+- `orthogonalize`: `true` (default) or `false`; controls training constraints for
+  `activation_additive_rot` and `shtiefel_additive_rot` only.
 - `optimizer`: `Adam`, `AdamW`, or `SGD`.
+
+Both additive rotation methods keep their current orthogonal initialization for
+either setting. With `orthogonalize=true`, forward projections and retraction
+after every optimizer step behave as before. With `false`, training skips both
+forward SVD projections (including their custom backward rules) and post-update
+retractions. Cayley additive uses its raw learned basis, but its subspace map
+remains orthogonal by the Cayley formula. Stiefel additive uses raw factors
+`B = proj_A` and `Q = proj_B @ proj_A`, with no orthogonal projection.
+Scaling, clipping, layer selection, and attack/protect transpose conventions are
+unchanged; without constraints the protect map is not guaranteed to invert attack.
+
+The launcher currently defaults to `true`. Override it using the environment or
+an explicit CLI argument (CLI takes precedence):
+
+```bash
+ORTHOGONALIZE=false DIRECTION_MODE=shtiefel_additive_rot ./scripts/run_rdo_refusal.sh
+./scripts/run_rdo_refusal.sh --orthogonalize false
+```
+
+Passing `false` for other methods is rejected before model loading. The setting
+is recorded in run configuration and progress/active-layer checkpoint metadata;
+dense checkpoints reload the actual saved map without re-projecting it. Older
+artifacts remain compatible with the default `true` setting. CPU coverage:
+
+```bash
+.venv-reft/bin/python -m unittest discover -s tests -p 'test_orthogonalize_flag.py' -v
+```
+
+### Training diagnostics and timing
+
+Training writes CSV logs directly into the experiment directory beside the
+TensorBoard events. These files survive `clear_ckpts` cleanup:
+
+- `operator_metrics.csv` (the two additive rotation methods): one row per active
+  layer with `b_frobenius`, `q_frobenius`, `b_orthogonality_error`, and
+  `q_orthogonality_error`. Errors are Frobenius norms of `B.T @ B - I` and
+  `Q.T @ Q - I`. Measurements use the effective factors in float32 without
+  gradients; unconstrained factors are not projected for measurement.
+- `training_forward_timing.csv` (all trained direction modes): one row per actual
+  model forward, with `steering_application_ms`, `model_forward_ms`, steering
+  region count, upcoming optimizer step, microbatch iteration, phase, actual
+  batch/sequence dimensions, and timing backend. Combined nnsight invocation
+  batches produce one model timing row.
+
+`TRAIN_DIAGNOSTICS_GAP=100` / `--train_diagnostics_gap 100` is the default. Forward
+timing samples every accumulated microbatch leading to optimizer update 1 and
+updates 100, 200, etc. Operator metrics describe initialization, those post-update
+states, and the final updated state (without duplicate final rows). Set the gap
+to `0` to disable diagnostics. CLI arguments override the environment setting:
+
+```bash
+TRAIN_DIAGNOSTICS_GAP=100 ./scripts/run_rdo_refusal.sh
+./scripts/run_rdo_refusal.sh --train_diagnostics_gap 0
+```
+
+Steering timing covers application to activations, including scaling/clipping,
+and excludes constructing B/Q. Model timing includes steering and runtime hook
+overhead, ending at logits before traced loss/backward. Backward, optimizer work,
+post-update retraction, scanning, guard validation, PCA probes, and final
+evaluation are excluded. CPU uses `perf_counter`; CUDA-compatible devices use
+stream events resolved after the forward, without per-layer synchronization.
+Timing is sampled instrumentation, not an estimate of overhead-free throughput.
+Training score forwards are identified by their phase; unsteered reference
+forwards have zero steering regions. Timing definitions and cadence are saved in
+`hparams.json`. Existing training CSVs are never overwritten.
+
+Run offline CPU checks with:
+
+```bash
+python -m unittest discover -s tests -p 'test_training_diagnostics.py' -v
+```
+
+The real deferred-execution integration test requires `nnsight==0.3.7` and its
+dependencies; it uses a tiny local model without downloading model weights.
 
 ### `loreft` / `direft`
 

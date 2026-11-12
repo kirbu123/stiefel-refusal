@@ -41,6 +41,9 @@ from evaluate.evaluation_qwen3guard import get_qwen3guard_evaluator, unload_qwen
 from evaluate.evaluation_wildguard import get_wildguard_evaluator, unload_wildguard_evaluator
 from evaluate import mmlu as mmlu_eval
 from evaluate import rdo_locality
+from baselines.training_diagnostics import (
+    DIAGNOSTICS_DEFINITIONS, current_diagnostics, steering_begin, steering_end, with_training_diagnostics,
+)
 from baselines.reft_ops import REFT_MODES, ReFTIntervention
 from baselines.additive_rotation_ops import (
     additive_subspace_rotation,
@@ -96,7 +99,7 @@ def tensorboard_log_scalars(writer, metrics, step):
 def save_run_hparams(run_dir, config_dict):
     os.makedirs(run_dir, exist_ok=True)
     path = os.path.join(run_dir, "hparams.json")
-    safe = {}
+    safe = {"training_diagnostics": DIAGNOSTICS_DEFINITIONS}
     for k, v in config_dict.items():
         try:
             json.dumps(v)
@@ -219,6 +222,7 @@ DEFAULT_CONFIG = {
     'optimize_basis': True,           # Whether to optimize the basis vectors directly
     'init_mode': "random", # "diag_permutation", "ab_orthogonal"  # Method for initializing the rotation matrices
     'orth_method': "svd",  # Orthogonalization method for Stiefel modes: "qr" or "svd"
+    'orthogonalize': True,  # Training constraints for the two additive rotation modes
     'k_proj': 35,  # Direct projected/additive low-rank subspace width
     'retain_loss': False, # Whether to use KL divergence for the retain loss
 
@@ -287,6 +291,7 @@ DEFAULT_CONFIG = {
     'result_root': None,               # Optional root for newly trained TensorBoard runs
     # 0 = disabled. Run in-training guard validation every N dataloader iterations.
     'train_guard_val_gap': 0,
+    'train_diagnostics_gap': 100,
     # (activation modes) Gate/clip scaling bounds: keep the intervened activation norm
     # within [clip_lower, clip_upper] * start_norm. clip_lower=0 disables the lower bound.
     'clip_upper': 2.0,
@@ -300,6 +305,13 @@ DEFAULT_CONFIG = {
     # When True with eval_activation_pca: keep checkpoints/tmp_best_layer_activations after plotting.
     'keep_activation_pca_dumps': False,
 }
+
+def _parse_bool(value):
+    value = value.lower()
+    if value not in ("true", "false"):
+        raise argparse.ArgumentTypeError("expected true or false")
+    return value == "true"
+
 
 def parse_args():
     """
@@ -441,6 +453,11 @@ def parse_args():
     parser.add_argument('--orth_method', type=str, default=DEFAULT_CONFIG["orth_method"],
                     choices=['qr', 'svd'],
                     help='Orthogonalization method for Stiefel modes')
+    parser.add_argument('--train_diagnostics_gap', type=int, default=DEFAULT_CONFIG['train_diagnostics_gap'],
+                    help='Training diagnostics every N optimizer steps plus the first; 0 disables (default: 100)')
+    parser.add_argument('--orthogonalize', type=_parse_bool, metavar='{true,false}',
+                    default=DEFAULT_CONFIG['orthogonalize'],
+                    help='Enable training projections/retractions (default: true). False is supported only for activation_additive_rot and shtiefel_additive_rot; orthogonal initialization and the Cayley formula are preserved.')
     parser.add_argument(
         '--k_proj',
         type=int,
@@ -596,7 +613,14 @@ def parse_args():
     parser.add_argument('--locality_store_predictions', action='store_true',
                     help='Store full ARC/GSM8K predictions in eval JSON')
     
-    return parser.parse_args()
+    parsed = parser.parse_args()
+    if parsed.train_diagnostics_gap < 0:
+        parser.error('--train_diagnostics_gap must be >= 0')
+    if not parsed.orthogonalize and parsed.direction_mode not in {
+        "activation_additive_rot", "shtiefel_additive_rot",
+    }:
+        parser.error('--orthogonalize false is supported only for activation_additive_rot and shtiefel_additive_rot')
+    return parsed
 
 args = parse_args()
 if Path('/dev/alixpu').exists() and os.getenv('RDO_PPU_CONTAINER') != '1' and getattr(args, 'device', 'auto') != 'cpu':
@@ -1266,8 +1290,9 @@ class RefusalCone(nn.Module):
             activation = layer.output[0][:]
         else:
             activation = layer.output
+        activation, timing_token = steering_begin(activation)
         projection = projection_einops(activation, direction)
-        new_activation = activation - projection
+        new_activation = steering_end(activation - projection, timing_token)
         if tuple_length == 2:
             layer.output = (new_activation, layer.output[1])
         elif tuple_length == 3:
@@ -1276,15 +1301,17 @@ class RefusalCone(nn.Module):
             layer.output = new_activation
 
     def ablate_input(self, layer, direction, best_layer: int = None):
-        projection = projection_einops(layer.input, direction)
-        new_activation = layer.input - projection
-        layer.input = new_activation
+        activation, timing_token = steering_begin(layer.input)
+        projection = projection_einops(activation, direction)
+        layer.input = steering_end(activation - projection, timing_token)
 
     def add(self, direction, alpha, layer_idx, best_layer: int = None):
         direction = direction / direction.norm()
         direction = direction.to(model.dtype)
         sign = -1.0 if self._guard_mode == "protect" else 1.0
-        self.module.layers[layer_idx].input += sign * alpha * direction
+        layer = self.module.layers[layer_idx]
+        activation, timing_token = steering_begin(layer.input)
+        layer.input = steering_end(activation + sign * alpha * direction, timing_token)
 
     def set_guard_mode(self, mode: str) -> None:
         mode = str(mode).strip().lower()
@@ -1485,8 +1512,9 @@ class RefusalDirectionActivationRotation(nn.Module):
         Keeps the written norm within [clip_lower, clip_upper] * start_norm.
         nnsight-proxy-safe: only uses `.norm()`/`clamp`, like RefusalStiefelRotation._add.
         """
-        start_norm = layer.input.norm()
-        scaled = self._rotate(layer.input, layer_idx, inverse=inverse) * self.input_norm_scale[layer_idx]
+        activation, timing_token = steering_begin(layer.input)
+        start_norm = activation.norm()
+        scaled = self._rotate(activation, layer_idx, inverse=inverse) * self.input_norm_scale[layer_idx]
 
         # Upper bound: only ever shrink (never grow) so the norm stays <= clip_upper * start_norm.
         scaled_norm = torch.clamp(scaled.norm(), min=1e-12)
@@ -1499,7 +1527,7 @@ class RefusalDirectionActivationRotation(nn.Module):
             lo_factor = torch.clamp((start_norm * self._clip_lower) / scaled_norm, min=1.0)
             scaled = scaled * lo_factor
 
-        layer.input = scaled
+        layer.input = steering_end(scaled, timing_token)
 
     def __call__(self, direction, best_layer: int = None):
         # Keep signature compatible with baseline training loop.
@@ -1573,6 +1601,7 @@ class RefusalDirectionActivationAdditiveRotation(RefusalDirectionActivationRotat
         k_proj: int = 35,
         num_opt_layers: int = 1,
         best_layer: int | None = None,
+        orthogonalize: bool = True,
     ) -> None:
         super().__init__(
             module,
@@ -1610,10 +1639,18 @@ class RefusalDirectionActivationAdditiveRotation(RefusalDirectionActivationRotat
         )
         self._imported_dense: torch.Tensor | None = None
         self._use_imported_dense = False
+        # Both settings start from the same orthogonal initialization.
+        self.orthogonalize_enabled = True
         self.orthogonalize()
+        self.orthogonalize_enabled = bool(orthogonalize)
 
     def _basis(self, layer_idx: int) -> torch.Tensor:
+        if not self.orthogonalize_enabled:
+            return self.basis_param[layer_idx]
         return OrthogonalProjection.apply(self.basis_param[layer_idx])
+
+    def _subspace_factors(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        return self._basis(layer_idx), RefusalDirectionActivationRotation.cayley_matrix(self, layer_idx)
 
     def checkpoint_matrix(self) -> torch.Tensor:
         if self._use_imported_dense and self._imported_dense is not None:
@@ -1708,6 +1745,8 @@ class RefusalDirectionActivationAdditiveRotation(RefusalDirectionActivationRotat
         super()._apply(layer, layer_idx, inverse)
 
     def orthogonalize(self):
+        if not self.orthogonalize_enabled:
+            return
         with torch.no_grad():
             for layer_idx in range(self.basis_param.shape[0]):
                 if layer_idx not in self._optimized_layer_idxs:
@@ -1993,7 +2032,8 @@ class RefusalStiefelRotation(nn.Module):
         if layer_idx not in self._optimized_layer_idxs:
             return
         layer = self.module.layers[layer_idx]
-        rotated_input = self._rotate(layer.input, layer_idx, inverse=inverse)
+        activation, timing_token = steering_begin(layer.input)
+        rotated_input = self._rotate(activation, layer_idx, inverse=inverse)
 
         # For harmless-time intervention (`add`), alpha controls interpolation strength:
         # alpha=0 -> no-op, alpha=1 -> full inverse transform.
@@ -2012,7 +2052,7 @@ class RefusalStiefelRotation(nn.Module):
         # else:
             # layer.input = rotated_input
 
-        start_norm = layer.input.norm()
+        start_norm = activation.norm()
         scaled_input = rotated_input * self.input_norm_scale[layer_idx]
 
         # Keep scaled activations within start_norm ± start_norm => [0, 2 * start_norm].
@@ -2021,7 +2061,7 @@ class RefusalStiefelRotation(nn.Module):
         # nnsight can wrap tensors as proxies where `.dtype` is not a real torch.dtype.
         safe_scaled_norm = torch.clamp(scaled_norm, min=1e-12)
         clip_factor = torch.clamp(max_norm / safe_scaled_norm, max=1.0)
-        layer.input = scaled_input * clip_factor
+        layer.input = steering_end(scaled_input * clip_factor, timing_token)
 
     def orthogonalize(self):
         """Initialize/force orthogonality without gradients."""
@@ -2303,15 +2343,23 @@ class RefusalStiefelProjRotation(RefusalStiefelRotation):
 class RefusalStiefelAdditiveRotation(RefusalStiefelProjRotation):
     """Apply the projected Stiefel map only inside its learned subspace."""
 
-    def __init__(self, *args, optimize_all_layers: bool = False, **kwargs) -> None:
+    def __init__(self, *args, optimize_all_layers: bool = False,
+                 orthogonalize: bool = True, **kwargs) -> None:
+        self.orthogonalize_enabled = True
         super().__init__(*args, **kwargs)
         if optimize_all_layers:
             self._optimized_layer_idxs = set(range(len(self.module.layers)))
             self.num_opt_layers = len(self.module.layers)
         # The parent performs additional initialization after its first retraction.
         self.orthogonalize()
+        self.orthogonalize_enabled = bool(orthogonalize)
+        if not self.orthogonalize_enabled:
+            self.refresh_composed_matrix()
 
     def _subspace_factors(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.orthogonalize_enabled:
+            basis = self.proj_A[layer_idx]
+            return basis, self.proj_B[layer_idx] @ basis
         basis = OrthogonalProjection.apply(self.proj_A[layer_idx])
         right = OrthogonalProjection.apply(self.proj_B[layer_idx])
         rotation = OrthogonalProjection.apply(right @ basis)
@@ -2378,7 +2426,13 @@ class RefusalStiefelAdditiveRotation(RefusalStiefelProjRotation):
         )
 
     def orthogonalize(self):
+        if not self.orthogonalize_enabled:
+            return
         super().orthogonalize()
+        self.refresh_composed_matrix()
+
+    def refresh_composed_matrix(self):
+        """Refresh checkpoint/logging maps without retracting learned parameters."""
         with torch.no_grad():
             for layer_idx in range(self.proj_A.shape[0]):
                 if layer_idx not in self._optimized_layer_idxs:
@@ -2606,8 +2660,9 @@ class RefusalDirectionRotation(nn.Module):
             activation = layer.output[0][:]
         else:
             activation = layer.output
+        activation, timing_token = steering_begin(activation)
         projection = projection_einops(activation, direction)
-        new_activation = activation - projection
+        new_activation = steering_end(activation - projection, timing_token)
         if tuple_length == 2:
             layer.output = (new_activation, layer.output[1])
         elif tuple_length == 3:
@@ -2616,15 +2671,17 @@ class RefusalDirectionRotation(nn.Module):
             layer.output = new_activation
 
     def ablate_input(self, layer, direction):
-        projection = projection_einops(layer.input, direction)
-        new_activation = layer.input - projection
-        layer.input = new_activation
+        activation, timing_token = steering_begin(layer.input)
+        projection = projection_einops(activation, direction)
+        layer.input = steering_end(activation - projection, timing_token)
 
     def add(self, direction, alpha, layer_idx, best_layer: int = None):
         direction = self.current_direction()
         direction = direction / direction.norm()
         direction = direction.to(model.dtype)
-        self.module.layers[layer_idx].input += alpha * direction
+        layer = self.module.layers[layer_idx]
+        activation, timing_token = steering_begin(layer.input)
+        layer.input = steering_end(activation + alpha * direction, timing_token)
 
     def transform(self, sample):
         fn_row = self.current_direction().unsqueeze(0)
@@ -2677,6 +2734,14 @@ def _layer_index_sets(operation, n_layers: int) -> tuple[list[int], list[int] | 
     return list(range(n_layers)), None
 
 
+def _finish_operation_update(operation):
+    """Retract constrained methods, or only refresh unconstrained composed maps."""
+    if getattr(operation, "orthogonalize_enabled", True):
+        operation.orthogonalize()
+    elif hasattr(operation, "refresh_composed_matrix"):
+        operation.refresh_composed_matrix()
+
+
 def _save_progress_operation_checkpoint(
     tb_checkpoint_dir: str,
     iters_steps: int,
@@ -2697,6 +2762,8 @@ def _save_progress_operation_checkpoint(
     }
     if frozen is not None:
         payload["frozen_layer_indices"] = frozen
+    if hasattr(operation, "orthogonalize_enabled"):
+        payload["orthogonalize"] = operation.orthogonalize_enabled
     if direction_mode in REFT_MODES:
         payload["reft"] = operation.export_checkpoint()
     elif direction_mode == "baseline":
@@ -2749,6 +2816,8 @@ def _write_tb_checkpoint_layer_artifacts(
     }
     if frozen is not None:
         state["frozen_layer_indices"] = frozen
+    if hasattr(operation, "orthogonalize_enabled"):
+        state["orthogonalize"] = operation.orthogonalize_enabled
     if direction_mode in REFT_MODES:
         state["reft"] = operation.export_checkpoint()
     elif direction_mode in {"shtiefel_proj_rot", "shtiefel_additive_rot"} and active:
@@ -3033,6 +3102,7 @@ def _build_optimizer(optimizer_name: str, params, lr: float):
     raise ValueError(f"Unsupported optimizer: {optimizer_name}")
 
 
+@with_training_diagnostics
 def refusal_cone_optimization(model, train_dataset, 
                               batch_size=DEFAULT_CONFIG['batch_size'], 
                               effective_batch_size=DEFAULT_CONFIG['effective_batch_size'], 
@@ -3060,7 +3130,8 @@ def refusal_cone_optimization(model, train_dataset,
                               tb_checkpoint_dir=None,
                               direction_mode=DEFAULT_CONFIG['direction_mode'],
                               log_steps: int = DEFAULT_CONFIG['log_steps'],
-                              train_guard_val_gap: int = DEFAULT_CONFIG['train_guard_val_gap']):
+                              train_guard_val_gap: int = DEFAULT_CONFIG['train_guard_val_gap'],
+                              train_diagnostics_gap: int = DEFAULT_CONFIG['train_diagnostics_gap']):
 
     if direction_mode == "rotation":
         if cone_dim != 1:
@@ -3110,6 +3181,7 @@ def refusal_cone_optimization(model, train_dataset,
             k_proj=k_proj,
             num_opt_layers=num_opt_layers,
             best_layer=best_layer,
+            orthogonalize=getattr(args, "orthogonalize", True),
         )
     elif direction_mode == "shtiefel_rot":
         operation = RefusalStiefelRotation(
@@ -3163,11 +3235,14 @@ def refusal_cone_optimization(model, train_dataset,
             num_opt_layers=num_opt_layers,
             best_layer=best_layer,
             optimize_all_layers=bool(getattr(args, "optimize_all_layers", False)),
+            orthogonalize=getattr(args, "orthogonalize", True),
         )
     else:
         raise ValueError(f"Invalid direction_mode: {direction_mode}")
 
     optimizer = _build_optimizer(optimizer_name, operation.parameters(), lr)
+    diagnostics = current_diagnostics()
+    diagnostics.attach_operation(operation)
 
     def _log_scalar(x):
         """
@@ -3192,16 +3267,16 @@ def refusal_cone_optimization(model, train_dataset,
         if isinstance(params, (list, tuple)):
             if len(params) == 0:
                 # Anchor to traced graph if available, otherwise plain tensor.
-                if hasattr(model.lm_head, "output") and hasattr(model.lm_head.output, "reshape"):
-                    return model.lm_head.output.reshape(-1)[0] * 0.0
+                if hasattr(model.lm_head, "output") and hasattr(diagnostics.forward_output(model.lm_head.output), "reshape"):
+                    return diagnostics.forward_output(model.lm_head.output).reshape(-1)[0] * 0.0
                 return torch.zeros((), device=model.model.device)
             p0 = params[0]
         else:
             p0 = next(iter(params))
         # Important: in nnsight tracing, logging expects a traced value that supports `.save()`.
         # Anchor the "zero" to a traced tensor (lm_head.output) while still depending on params.
-        if hasattr(model.lm_head, "output") and hasattr(model.lm_head.output, "reshape"):
-            return (model.lm_head.output.reshape(-1)[0] * 0.0) + (p0.reshape(-1)[0] * 0.0)
+        if hasattr(model.lm_head, "output") and hasattr(diagnostics.forward_output(model.lm_head.output), "reshape"):
+            return (diagnostics.forward_output(model.lm_head.output).reshape(-1)[0] * 0.0) + (p0.reshape(-1)[0] * 0.0)
         return p0.reshape(-1)[0] * 0.0
 
     print("Cone dim", cone_dim)
@@ -3327,6 +3402,7 @@ def refusal_cone_optimization(model, train_dataset,
                 cache=train_guard_cache,
             )
 
+            diagnostics.begin_microbatch(opt_step_counter + 1, num_iters)
             ablation_prompt = batch['ablation_prompt']
             ablation_labels = batch['ablation_labels']
             addition_prompt = batch['addition_prompt']
@@ -3343,36 +3419,39 @@ def refusal_cone_optimization(model, train_dataset,
 
                 for sample_vector in sample_vectors:
                     if ablation_lambda > 0:
+                        diagnostics.phase = "ablation"
                         with model.trace() as tracer:
                             with tracer.invoke(ablation_prompt):
                                 direction = operation.transform(sample_vector)
                                 operation(direction)
-                                logits = model.lm_head.output[:, :-1]
+                                logits = diagnostics.forward_output(model.lm_head.output)[:, :-1]
                                 sample_ablation_loss = compute_ce_loss(logits, ablation_labels) / n_sample
                                 log = _log_scalar(sample_ablation_loss)
                             (ablation_lambda * sample_ablation_loss).backward()
                     batch_sample_ablation_loss += log
                     if addition_lambda > 0:
+                        diagnostics.phase = "addition"
                         with model.trace() as tracer:
                             with tracer.invoke(addition_prompt):
                                 direction = operation.transform(sample_vector)
                                 operation.add(direction, alpha, add_layer, best_layer)
-                                logits = model.lm_head.output[:, :-1]
+                                logits = diagnostics.forward_output(model.lm_head.output)[:, :-1]
                                 sample_addition_loss = compute_ce_loss(logits, addition_labels) / n_sample
                                 log = _log_scalar(sample_addition_loss)
                             (addition_lambda * sample_addition_loss).backward()
                         batch_sample_addition_loss += log
                     if retain_lambda > 0:
+                        diagnostics.phase = "retain"
                         with model.trace() as tracer:
                             with tracer.invoke(retain_prompt):
-                                baseline_retain_logits = model.lm_head.output[:, -num_target_tokens:]
+                                baseline_retain_logits = diagnostics.forward_output(model.lm_head.output)[:, -num_target_tokens:]
                             with tracer.invoke(retain_prompt):
                                 direction = operation.transform(sample_vector)
                                 if direction_mode == "baseline":
                                     operation(direction)
                                 else:
                                     operation.add(direction, alpha, add_layer, best_layer)
-                                sample_retain_logits = model.lm_head.output[:, -num_target_tokens:]
+                                sample_retain_logits = diagnostics.forward_output(model.lm_head.output)[:, -num_target_tokens:]
                                 if args.retain_loss:
                                     sample_retain_loss = kl_div_fn(baseline_retain_logits, sample_retain_logits).mean() / n_sample
                                 else:
@@ -3384,10 +3463,11 @@ def refusal_cone_optimization(model, train_dataset,
             if optimize_basis:
                 for fn_vector in operation.fn_vectors:
                     if ablation_lambda > 0 or repetition_lambda > 0:
+                        diagnostics.phase = "ablation"
                         with model.trace() as tracer:
                             with tracer.invoke(ablation_prompt):
                                 operation(fn_vector)
-                                logits = model.lm_head.output[:, :-1]
+                                logits = diagnostics.forward_output(model.lm_head.output)[:, :-1]
                                 basis_ablation_loss = compute_ce_loss(logits, ablation_labels) / cone_dim
                                 log = _log_scalar(basis_ablation_loss)
                                 # Cheap repetition metric on the same (harmful/jailbreak) logits.
@@ -3407,25 +3487,27 @@ def refusal_cone_optimization(model, train_dataset,
                         batch_repetition_loss += rep_loss_log
 
                     if addition_lambda > 0:
+                        diagnostics.phase = "addition"
                         with model.trace() as tracer:
                             with tracer.invoke(addition_prompt):
                                 operation.add(fn_vector, alpha, add_layer, best_layer)
-                                logits = model.lm_head.output[:, :-1]
+                                logits = diagnostics.forward_output(model.lm_head.output)[:, :-1]
                                 basis_addition_loss = compute_ce_loss(logits, addition_labels) / cone_dim
                                 log = _log_scalar(basis_addition_loss)
                             (addition_lambda * basis_addition_loss).backward()
                         batch_basis_addition_loss += log
 
                     if retain_lambda > 0:
+                        diagnostics.phase = "retain"
                         with model.trace() as tracer:
                             with tracer.invoke(retain_prompt):
-                                baseline_retain_logits = model.lm_head.output[:, -num_target_tokens:]
+                                baseline_retain_logits = diagnostics.forward_output(model.lm_head.output)[:, -num_target_tokens:]
                             with tracer.invoke(retain_prompt):
                                 if direction_mode == "baseline":
                                     operation(fn_vector)
                                 else:
                                     operation.add(fn_vector, alpha, add_layer, best_layer)
-                                retain_logits = model.lm_head.output[:, -num_target_tokens:]
+                                retain_logits = diagnostics.forward_output(model.lm_head.output)[:, -num_target_tokens:]
                                 if args.retain_loss:
                                     basis_retain_loss = kl_div_fn(baseline_retain_logits, retain_logits).mean() / cone_dim
                                 else:
@@ -3435,39 +3517,44 @@ def refusal_cone_optimization(model, train_dataset,
                         batch_basis_retain_loss += log
                 
             with torch.no_grad():
+                diagnostics.phase = "training_score_harmful"
                 with model.trace() as tracer:
                     for fn_vector in operation.fn_vectors:
                         with tracer.invoke(harmful_prompt):
                             operation(fn_vector)
-                            last_token_logits = model.lm_head.output[:, -1]
+                            last_token_logits = diagnostics.forward_output(model.lm_head.output)[:, -1]
                             bypass_score = _log_scalar(refusal_metric(last_token_logits, refusal_tokens))
                         batch_basis_bypass_scores.append(bypass_score)
 
+                diagnostics.phase = "training_score_harmless"
                 with model.trace() as tracer:
                     for fn_vector in operation.fn_vectors:
                         with tracer.invoke(harmless_prompt):
                             operation.add(fn_vector, alpha, add_layer, best_layer)
-                            last_token_logits = model.lm_head.output[:, -1]
+                            last_token_logits = diagnostics.forward_output(model.lm_head.output)[:, -1]
                             induce_score = _log_scalar(refusal_metric(last_token_logits, refusal_tokens))
                         batch_basis_induce_scores.append(induce_score)
                 if n_sample > 0:
+                    diagnostics.phase = "training_score_harmful"
                     with model.trace() as tracer:
                         for fixed_sample_vector in fixed_sample_vectors:
                             with tracer.invoke(harmful_prompt):
                                 direction = operation.transform(fixed_sample_vector)
                                 operation(direction)
-                                sample_last_token_logits = model.lm_head.output[:, -1]
+                                sample_last_token_logits = diagnostics.forward_output(model.lm_head.output)[:, -1]
                                 sample_bypass_score = _log_scalar(refusal_metric(sample_last_token_logits, refusal_tokens))
                                 batch_sample_bypass_scores.append(sample_bypass_score)
+                    diagnostics.phase = "training_score_harmless"
                     with model.trace() as tracer:
                         for fixed_sample_vector in fixed_sample_vectors:
                             with tracer.invoke(harmless_prompt):
                                 direction = operation.transform(fixed_sample_vector)
                                 operation.add(direction, alpha, add_layer, best_layer)
-                                sample_last_token_logits = model.lm_head.output[:, -1]
+                                sample_last_token_logits = diagnostics.forward_output(model.lm_head.output)[:, -1]
                                 sample_induce_score = _log_scalar(refusal_metric(sample_last_token_logits, refusal_tokens))
                                 batch_sample_induce_scores.append(sample_induce_score)
 
+                diagnostics.end_microbatch()
                 step_counter += 1
                 if step_counter % accumulation_steps == 0:
                     if direction_mode == "baseline":
@@ -3499,7 +3586,8 @@ def refusal_cone_optimization(model, train_dataset,
                             fixed_basis_vector = fixed_basis_vector / fixed_basis_vector.norm()
                             operation.fn_vectors[i].data.copy_(fixed_basis_vector.data)
 
-                    operation.orthogonalize()
+                    _finish_operation_update(operation)
+                    diagnostics.log_operators(opt_step_counter)
 
                     batch_sample_ablation_loss /= accumulation_steps
                     batch_sample_addition_loss /= accumulation_steps
@@ -3905,6 +3993,7 @@ def train_refusal_vector(group_name=None, run_name=None, orthogonal_vectors=[], 
         "k_proj": getattr(args, "k_proj", DEFAULT_CONFIG.get("k_proj", 35)),
         "log_steps": getattr(args, "log_steps", DEFAULT_CONFIG["log_steps"]),
         "train_guard_val_gap": getattr(args, "train_guard_val_gap", DEFAULT_CONFIG["train_guard_val_gap"]),
+        "train_diagnostics_gap": getattr(args, "train_diagnostics_gap", DEFAULT_CONFIG["train_diagnostics_gap"]),
         "repetition_lambda": getattr(args, "repetition_lambda", DEFAULT_CONFIG["repetition_lambda"]),
     }
     train_kwargs.update(kwargs) # Apply any user-provided overrides
@@ -5147,6 +5236,7 @@ def _evaluate_end_metrics(
                         DEFAULT_CONFIG.get("num_opt_layers", 1),
                     ),
                     best_layer=best_layer,
+                    orthogonalize=getattr(args, "orthogonalize", True),
                 )
             if direction_mode == "shtiefel_rot":
                 return RefusalStiefelRotation(
@@ -5258,6 +5348,7 @@ def _evaluate_end_metrics(
                     num_opt_layers=getattr(args, "num_opt_layers", DEFAULT_CONFIG.get("num_opt_layers", 1)),
                     best_layer=best_layer,
                     optimize_all_layers=bool(getattr(args, "optimize_all_layers", False)),
+                    orthogonalize=getattr(args, "orthogonalize", True),
                 )
             return None
 
@@ -6088,6 +6179,10 @@ def train_refusal_cone(group_name, run_name, init_vectors, **kwargs):
     train_kwargs.setdefault(
         "train_guard_val_gap",
         getattr(args, "train_guard_val_gap", DEFAULT_CONFIG["train_guard_val_gap"]),
+    )
+    train_kwargs.setdefault(
+        "train_diagnostics_gap",
+        getattr(args, "train_diagnostics_gap", DEFAULT_CONFIG["train_diagnostics_gap"]),
     )
     train_kwargs.setdefault(
         "repetition_lambda",

@@ -36,6 +36,8 @@ activation_save_gap="${ACTIVATION_SAVE_GAP:-100}" # optimizer-step gap when eval
 keep_activation_pca_dumps="${KEEP_ACTIVATION_PCA_DUMPS:-false}" # true: keep tmp_best_layer_activations after plot
 init_mode="diag_permutation" # "random", "diag_permutation", or "ab_orthogonal"
 orth_method="svd" # "qr" or "svd"
+train_diagnostics_gap="${TRAIN_DIAGNOSTICS_GAP:-100}" # optimizer-step cadence; 0 disables
+orthogonalize="${ORTHOGONALIZE:-true}" # false disables training projections/retractions for the two additive rotation modes
 k_proj="${K_PROJ:-35}" # direct low-rank projection width; override with K_PROJ
 ablation_lambda="${ABLATION_LAMBDA:-1.0}"
 addition_lambda="${ADDITION_LAMBDA:-0.0}"
@@ -132,6 +134,8 @@ cmd=("$python_bin" -u -m baselines.rdo_refusal \
   --k_proj "${k_proj}" \
   --init_mode "${init_mode}" \
   --orth_method "${orth_method}" \
+  --orthogonalize "${orthogonalize}" \
+  --train_diagnostics_gap "${train_diagnostics_gap}" \
   --log_steps "${log_steps}" \
   --train_guard_val_gap "${train_guard_val_gap}" \
   --result_root "${result_root}" \
