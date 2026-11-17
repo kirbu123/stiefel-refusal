@@ -1061,6 +1061,15 @@ Only missing or invalid groups (split/category/phase)
 are scored. Training, response generation, and other evaluators are not run.
 The script reuses one lazily loaded judge for the supplied experiments.
 
+On Alibaba PPU, the same Python command automatically uses `scripts/launch_ppu.sh`
+to submit a `backfill-ppu` job in `labs-pool` and run inside the SAIL container
+with `.venv-ppu-sail21`, just like the training launcher. Detection uses
+`RDO_PLATFORM=ppu` or `/dev/alixpu` when `RDO_PLATFORM=auto`; `RDO_DEVICE=cpu`
+opts out. Existing `RDO_PPU_*` resource/image/venv overrides apply, and Slurm's
+assigned device mask is preserved. Logs are written to
+`results/rdo_refusal/slurm/backfill-ppu-<JobID>.log`. Already inside the container,
+the script runs directly. `--dry-run` and `--help` stay local without allocation.
+
 Use `--dry-run` to inspect response files and missing groups without loading
 the judge or writing artifacts; references are not required for this mode.
 For each experiment, the latest `eval_metrics_*.json` and its existing CSV are

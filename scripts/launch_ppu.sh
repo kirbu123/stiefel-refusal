@@ -1,5 +1,5 @@
 #!/bin/bash
-# Shared scheduler/container boundary for RDO and geometry-of-refusal DIM.
+# Shared scheduler/container boundary for RDO, DIM, and offline safety backfill.
 set -euo pipefail
 if [[ -n "${RDO_REPO_ROOT:-}" ]]; then
   repo_root="$RDO_REPO_ROOT"
@@ -12,8 +12,8 @@ else
 fi
 cd "$repo_root"
 export RDO_REPO_ROOT="$PWD"
-workload="${1:?Expected rdo or dim}"; shift
-case "$workload" in rdo|dim) ;; *) echo 'Expected rdo or dim' >&2; exit 2 ;; esac
+workload="${1:?Expected rdo, dim, or backfill}"; shift
+case "$workload" in rdo|dim|backfill) ;; *) echo 'Expected rdo, dim, or backfill' >&2; exit 2 ;; esac
 image="${RDO_PPU_IMAGE:-/bmcp_lvm_fs/apptainer/sif/inference-26.04-v2.1.0-vllm0.20.1-torch2.10-cu130-20260608.sif}"
 venv_dir="${RDO_PPU_VENV:-$repo_root/.venv-ppu-sail21}"
 profile="${RDO_PPU_PROFILE:-whole}"
@@ -68,6 +68,10 @@ for arg in "$@"; do
     exec apptainer exec --cleanenv "$image" "$venv_dir/bin/python" "$repo_root/scripts/smoke_ppu.py" "$workload"
   fi
 done
+if [[ "$workload" == backfill ]]; then
+  exec apptainer exec --cleanenv "$image" "$venv_dir/bin/python" -u \
+    "$repo_root/scripts/backfill_safety_metrics.py" "$@"
+fi
 entry="$repo_root/scripts/run_rdo_refusal.sh"
 [[ "$workload" != dim ]] || entry="$repo_root/scripts/run_dim_pipeline.sh"
 exec apptainer exec --cleanenv "$image" bash "$entry" "$@"

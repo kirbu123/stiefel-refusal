@@ -5,6 +5,7 @@ import csv
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -38,6 +39,7 @@ class BackfillSmokeTests(unittest.TestCase):
         self.factory = Mock(return_value=self.judge)
         self.tb = Mock()
         self.addCleanup(patch.stopall)
+        patch.dict(os.environ, {"RDO_PLATFORM": "cpu", "RDO_DEVICE": "auto", "RDO_PPU_CONTAINER": "0"}).start()
         patch.object(backfill.safety, "SafetyAnalisysEvaluator", self.factory).start()
         patch.object(backfill, "publish_tensorboard", self.tb).start()
 
@@ -183,6 +185,32 @@ class BackfillSmokeTests(unittest.TestCase):
             with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
                 backfill.main(["--exp-dirs", str(self.root), *flags])
         self.factory.assert_not_called()
+
+    def test_ppu_detection_and_no_recursive_launch(self):
+        args = SimpleNamespace(dry_run=False, exp_dirs=[self.root / 'exp one'],
+                               metrics=['safetyanalisys'], safety_analisys_references=self.references,
+                               safety_analisys_batch_size=1)
+        for overrides in ({"RDO_PPU_CONTAINER": "1"}, {"RDO_DEVICE": "cpu"},
+                          {"RDO_PLATFORM": "cpu"}):
+            with patch.dict(os.environ, {"RDO_PLATFORM": "ppu", **overrides}), \
+                    patch.object(backfill.os, 'execvpe') as execute:
+                backfill.maybe_launch_ppu(args)
+                execute.assert_not_called()
+        with patch.dict(os.environ, {"RDO_PLATFORM": "ppu"}), \
+                patch.object(backfill.os, 'execvpe') as execute:
+            args.dry_run = True
+            backfill.maybe_launch_ppu(args)
+            execute.assert_not_called()
+            args.dry_run = False
+        for present in (False, True):
+            with patch.dict(os.environ, {"RDO_PLATFORM": "auto"}), \
+                    patch.object(backfill.Path, 'exists', return_value=present), \
+                    patch.object(backfill.os, 'execvpe') as execute:
+                backfill.maybe_launch_ppu(args)
+                self.assertEqual(execute.call_count, int(present))
+                if present:
+                    self.assertEqual(execute.call_args.args[1][:3],
+                                     ['bash', str(ROOT / 'scripts/launch_ppu.sh'), 'backfill'])
 
     def test_bad_references_and_incompatible_partial_config(self):
         directory, metrics, _ = self.experiment()

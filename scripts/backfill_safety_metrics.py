@@ -250,6 +250,24 @@ def process(directory, args, get_evaluator):
     return len(missing), total - len(missing)
 
 
+def maybe_launch_ppu(args):
+    """Use the same scheduler/container boundary as run_rdo_refusal.sh."""
+    platform = os.environ.get("RDO_PLATFORM", "auto")
+    if (args.dry_run or os.environ.get("RDO_PPU_CONTAINER", "0") == "1"
+            or os.environ.get("RDO_DEVICE", "auto") == "cpu"):
+        return
+    if platform != "ppu" and not (platform == "auto" and Path("/dev/alixpu").exists()):
+        return
+    # The launcher changes to the repository root. Resolve user paths before
+    # crossing that boundary so paths containing spaces and other cwd's work.
+    forwarded = ["--exp-dirs", *(str(p.expanduser().resolve()) for p in args.exp_dirs),
+                 "--metrics", *args.metrics,
+                 "--safety-analisys-references", str(args.safety_analisys_references.expanduser().resolve()),
+                 "--safety-analisys-batch-size", str(args.safety_analisys_batch_size)]
+    env = dict(os.environ, RDO_REPO_ROOT=str(ROOT))
+    os.execvpe("bash", ["bash", str(ROOT / "scripts/launch_ppu.sh"), "backfill", *forwarded], env)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--exp-dirs", nargs="+", type=Path, required=True)
@@ -262,6 +280,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.safety_analisys_batch_size < 1:
         parser.error("--safety-analisys-batch-size must be positive")
+    maybe_launch_ppu(args)
     evaluator = None
 
     def get_evaluator():
