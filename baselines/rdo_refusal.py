@@ -41,6 +41,7 @@ from evaluate.evaluation_qwen3guard import get_qwen3guard_evaluator, unload_qwen
 from evaluate.evaluation_wildguard import get_wildguard_evaluator, unload_wildguard_evaluator
 from evaluate import mmlu as mmlu_eval
 from evaluate import rdo_locality
+from evaluate import evaluation_safety_analisys as safety_analisys
 from baselines.training_diagnostics import (
     DIAGNOSTICS_DEFINITIONS, current_diagnostics, steering_begin, steering_end, with_training_diagnostics,
 )
@@ -571,8 +572,13 @@ def parse_args():
                     choices=['rdo', 'basic'],
                     help='LlamaGuard eval data source: rdo uses data/{splits}_splits/*_{eval_split}.json, basic uses cached basic-refusal targets')
     parser.add_argument('--eval_guard_backend', type=str, nargs='+', action='append', default=None,
-                    choices=['llamaguard', 'qwen3guard', 'wildguard'],
+                    choices=['llamaguard', 'qwen3guard', 'wildguard', 'safetyanalisys'],
                     help='One or more guard evaluator backends to score eval generations')
+    parser.add_argument('--safety_analisys_references', type=str,
+                    default=str(safety_analisys.DEFAULT_REFERENCES_PATH),
+                    help=f'References JSON (default: {safety_analisys.DEFAULT_REFERENCES_PATH})')
+    parser.add_argument('--safety_analisys_batch_size', type=int, default=1,
+                    help='Judge continuation batch size (independent frozen DeepSeek)')
     parser.add_argument('--eval_max_new_tokens', type=int, default=DEFAULT_CONFIG['eval_max_new_tokens'],
                     help='Max new tokens for generation during LlamaGuard eval')
     parser.add_argument('--eval_batch_size', type=int, default=DEFAULT_CONFIG['eval_batch_size'],
@@ -615,6 +621,16 @@ def parse_args():
                     help='Store full ARC/GSM8K predictions in eval JSON')
     
     parsed = parser.parse_args()
+    selected_guards = {v for group in (parsed.eval_guard_backend or []) for v in group}
+    if "safetyanalisys" in selected_guards:
+        if not parsed.eval_llamaguard:
+            parser.error('SafetyAnalisys requires --eval_llamaguard (the safety evaluation stage)')
+        if not parsed.safety_analisys_references or parsed.safety_analisys_batch_size < 1:
+            parser.error('SafetyAnalisys requires --safety_analisys_references and a positive batch size')
+        try:
+            safety_analisys.load_references(parsed.safety_analisys_references)
+        except (OSError, ValueError, TypeError, AttributeError) as error:
+            parser.error(str(error))
     if parsed.train_diagnostics_gap < 0:
         parser.error('--train_diagnostics_gap must be >= 0')
     if not parsed.orthogonalize and parsed.direction_mode not in {
@@ -4332,13 +4348,15 @@ def _eval_payload_to_major_metrics_rows(payload: dict) -> list[dict]:
     locality_metrics = payload.get("locality_metrics") or {}
     rows.extend(rdo_locality.metrics_to_csv_rows(locality_metrics))
 
+    if payload.get("safety_analisys"):
+        rows.extend(safety_analisys.metrics_to_csv_rows(payload["safety_analisys"]))
     return rows
 
 
 def _safe_eval_metrics_csv_dump(path: str, payload: dict) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     rows = _eval_payload_to_major_metrics_rows(payload)
-    fieldnames = ["benchmark", "backend", "group", "phase", "metric", "value"]
+    fieldnames = ["benchmark", "backend", "group", "split", "phase", "metric", "value"]
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -4802,7 +4820,7 @@ def _normalize_guard_backends(backends) -> list[str]:
     if not values:
         return ["llamaguard"]
 
-    allowed = {"llamaguard", "qwen3guard", "wildguard"}
+    allowed = {"llamaguard", "qwen3guard", "wildguard", "safetyanalisys"}
     normalized = []
     for v in values:
         if v not in allowed:
@@ -4887,7 +4905,9 @@ def _run_train_guard_validation(
     if num_iters <= 0 or (num_iters % gap) != 0:
         return
 
-    backends = _normalize_guard_backends(guard_backends)
+    backends = [b for b in _normalize_guard_backends(guard_backends) if b != "safetyanalisys"]
+    if not backends:
+        return
     if "guard_data" not in cache:
         harmful, harmless = _load_llamaguard_eval_sets(
             splits_name=splits_name,
@@ -5448,6 +5468,7 @@ def _evaluate_end_metrics(
         if args.eval_llamaguard:
             strict = str(os.getenv("RDO_LLAMAGUARD_STRICT", "0")).lower() in ("1", "true", "yes", "y")
             primary_generations_ready = False
+            safety_generations = {}
             try:
                 harmful, harmless = _load_llamaguard_eval_sets(
                     splits_name=splits_name,
@@ -5534,6 +5555,19 @@ def _evaluate_end_metrics(
                         }
 
                 primary_generations_ready = True
+                def _collect_safety_generations(mode, harmful_q, harmless_q,
+                                                initial_harmful, initial_harmless, refined):
+                    split = "train" if mode == "basic" else "test"
+                    safety_generations[split] = {
+                        "source": {"mode": mode, "eval_split": eval_split if mode == "rdo" else None,
+                                   "splits_name": splits_name if mode == "rdo" else None,
+                                   "model_name": model_name if mode == "basic" else None},
+                        "questions": {"harmful": harmful_q, "harmless": harmless_q},
+                        "phases": {"initial": {"harmful": initial_harmful, "harmless": initial_harmless},
+                                   **{f"refined_{k}": v for k, v in refined.items()}},
+                    }
+                _collect_safety_generations(llamaguard_data_mode, harmful_q, harmless_q,
+                                            initial_harmful, initial_harmless, refined_generations)
                 guard_metrics = {}
                 guard_errors = {}
 
@@ -5547,6 +5581,8 @@ def _evaluate_end_metrics(
                         eval_writer.add_scalar(f"eval/guard/{backend}/{prefix}_pct_unsafe", stats["pct_unsafe"], 0)
 
                 for backend in guard_backends:
+                    if backend == "safetyanalisys":
+                        continue  # Evaluated once both generation sets are ready.
                     evaluator = None
                     try:
                         evaluator = _get_guard_evaluator(backend)
@@ -5726,6 +5762,9 @@ def _evaluate_end_metrics(
                                 ),
                             }
 
+                    _collect_safety_generations(secondary_mode, sec_harmful_q, sec_harmless_q,
+                                                sec_initial_harmful, sec_initial_harmless,
+                                                sec_refined_generations)
                     _save_generated_responses(
                         tb_run_dir=tb_run_dir,
                         harmful_q=sec_harmful_q,
@@ -5741,6 +5780,32 @@ def _evaluate_end_metrics(
                         f"[eval] Secondary generated_responses write failed for mode={secondary_mode}: "
                         f"{type(sec_e).__name__}: {sec_e}"
                     )
+
+            if "safetyanalisys" in guard_backends:
+                evaluator = None
+                try:
+                    if set(safety_generations) != {"train", "test"}:
+                        raise ValueError("SafetyAnalisys requires successful train and test generation")
+                    evaluator = safety_analisys.SafetyAnalisysEvaluator(
+                        args.safety_analisys_references, args.safety_analisys_batch_size)
+                    split_metrics, details = safety_analisys.evaluate_splits(
+                        safety_generations, evaluator, eval_writer)
+                    details_name = f"safety_analisys_scores_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                    _safe_json_dump(os.path.join(tb_run_dir, details_name), {
+                        "config": evaluator.config, "scores": details})
+                    payload["safety_analisys"] = {
+                        "config": evaluator.config, "splits": split_metrics,
+                        "scores_file": details_name}
+                except Exception as error:
+                    payload.setdefault("guard_errors", {})["safetyanalisys"] = {
+                        "type": type(error).__name__, "message": str(error),
+                        "traceback": traceback.format_exc()}
+                    print(f"[eval] SafetyAnalisys failed: {type(error).__name__}: {error}")
+                    if strict:
+                        raise
+                finally:
+                    if evaluator is not None:
+                        evaluator.close()
 
         # --- MMLU ---
         if args.eval_mmlu:

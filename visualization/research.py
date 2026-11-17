@@ -241,6 +241,8 @@ def _rows_from_eval_csv(path: Path) -> list[dict[str, Any]]:
         )
         if phase in ("refined", "delta") and key in canonical_keys:
             continue
+        if row.get("backend") == "safetyanalisys" and row.get("split") in ("train", "test"):
+            row = {**row, "group": f"{row['group']}_{row['split']}"}
         normalized.append(row)
     return normalized
 
@@ -390,6 +392,14 @@ def _rows_from_eval_json(path: Path) -> list[dict[str, Any]]:
                     }
                 )
 
+    for split, source in (payload.get("safety_analisys") or {}).get("splits", {}).items():
+        for kind, phases in source["results"].items():
+            for phase, stats in phases.items():
+                for metric in ("mean_score", "n"):
+                    if stats.get(metric) is not None:
+                        rows.append(dict(benchmark="guard", backend="safetyanalisys",
+                                         group=f"{kind}_{split}", split=split, phase=phase,
+                                         metric=metric, value=stats[metric]))
     rows.extend(_locality_rows_from_payload(payload.get("locality_metrics") or {}))
     return rows
 

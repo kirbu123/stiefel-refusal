@@ -989,3 +989,100 @@ Install environment
   -> generate ablation plots (ablation_study.py)
   -> optional: plot_activation_pca_compare / plot_activation_pca_vector_compare
 ```
+
+### SafetyAnalisys: reference-based answer quality
+
+Enable this optional **final** safety evaluator alongside the guards:
+
+```bash
+./scripts/run_rdo_refusal.sh \
+  --eval_guard_backend llamaguard qwen3guard wildguard safetyanalisys \
+  --safety_analisys_references /absolute/path/to/references.json \
+  --safety_analisys_batch_size 1
+```
+
+The safety stage (`--eval_llamaguard`) must be enabled. Periodic training
+validation does not run SafetyAnalisys. Without this backend, evaluation behavior
+is unchanged apart from the additional, empty `split` column in the metrics CSV.
+
+Both post-train evaluation and offline backfill default to
+`./val_utils/safety_analisys_references.json`, relative to the current working
+directory. Run from the repository root. Fill its empty fields, or pass an explicit
+references path to use a separate file.
+The template deliberately fails validation until filled. The version-1 JSON has
+`harmful` and `harmless` objects, each containing keys `"1"` through `"4"`.
+Every key contains the same positive number n of `{ "prompt": "...", "response":
+"..." }` examples: 8n examples in total. **1 means worst quality; 4 means best
+quality**, for both categories. Examples define what quality means in each
+category; this score is distinct from the guards' harmfulness scale.
+
+A separately loaded, frozen `deepseek-ai/DeepSeek-R1-Distill-Qwen-7B` scores
+conditional likelihoods of the four continuations, including multi-token labels.
+The selected integer is the most likely continuation; ties select the smaller
+score. Probabilities are normalized over these four candidates only. No judge
+reasoning is generated. All 4n examples for the relevant category are included;
+context overflow fails explicitly without truncation. The judge requires memory
+in addition to the evaluated model and uses the available Hugging Face cache.
+
+The evaluator reuses safety generations for `initial`, `refined_attack`, and,
+where supported, `refined_protect`. Four separate means are reported per phase:
+SafetyAnalisys harmful train/test and harmless train/test. Existing source
+conventions apply: `basic` is labeled `train`, `rdo` is labeled `test`; the latter
+uses the configured `eval_split`, which may actually be `val`. Actual sources are
+recorded in JSON metadata. Existing sample limits also apply.
+
+Results appear under `safety_analisys` in the final metrics JSON, as `guard` rows
+with backend `safetyanalisys` and a `split` column in CSV, and at
+`eval/guard/safetyanalisys/{split}/{kind}/{phase}/mean_score` in TensorBoard.
+The JSON records the model, prompt version, and references SHA-256. A separate
+`safety_analisys_scores_*.json` stores each candidate's prompt, response, selected
+score, and four probabilities. Research readers distinguish train/test as
+`harmful_train`, `harmful_test`, `harmless_train`, and `harmless_test` groups.
+Errors are recorded under `guard_errors.safetyanalisys`; setting
+`RDO_LLAMAGUARD_STRICT=1` makes them fatal. Missing or invalid reference files
+are rejected before training.
+
+#### Backfill SafetyAnalisys from saved answers
+
+Run from the repository root with one or more experiment directories:
+
+```bash
+python3 scripts/backfill_safety_metrics.py \
+  --exp-dirs /absolute/path/to/exp1 /absolute/path/to/exp2 \
+  --metrics safetyanalisys \
+  --safety-analisys-references /absolute/path/to/references.json \
+  --safety-analisys-batch-size 1
+```
+
+Currently `safetyanalisys` is the only supported metric and the default when
+`--metrics` is omitted. `--safety-analisys-references` is optional and defaults
+to the same file as post-train evaluation (see above).
+Only missing or invalid groups (split/category/phase)
+are scored. Training, response generation, and other evaluators are not run.
+The script reuses one lazily loaded judge for the supplied experiments.
+
+Use `--dry-run` to inspect response files and missing groups without loading
+the judge or writing artifacts; references are not required for this mode.
+For each experiment, the latest `eval_metrics_*.json` and its existing CSV are
+updated. Each split uses the latest response batch at or before the metrics
+filename timestamp; all phases must belong to that batch. Missing phases or
+mismatched prompts cause an error rather than mixing response batches.
+
+Existing metrics are preserved. Results include detailed per-answer scores,
+JSON aggregates, CSV rows with `split`, and TensorBoard scalars at step 0.
+Repeated runs skip completed groups and repair derived CSV/TensorBoard entries
+without judging them again. A partial metric requires the same reference hash,
+judge model, and prompt version. Fully completed experiments do not require
+references or loading the judge. TensorBoard publication requires `tensorboard`.
+Each file is replaced atomically; interrupted publication can be retried.
+Errors are reported per experiment, processing continues, and any error gives
+a nonzero exit status.
+
+CPU smoke tests use a stub judge and temporary experiments:
+
+```bash
+python3 -m unittest discover -s tests -p 'test*safety*.py' -v
+```
+
+No models are downloaded by these tests. The TensorBoard event integration
+check requires `tensorboard`; the existing likelihood check requires `torch`.
